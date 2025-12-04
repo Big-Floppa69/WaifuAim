@@ -1,9 +1,17 @@
 import sys
+import os
 from PyQt6.QtWidgets import QApplication, QLabel, QSystemTrayIcon, QMenu
 from PyQt6.QtGui import QPixmap, QIcon, QAction
 from PyQt6.QtCore import Qt
 import keyboard as kb  # type: ignore
 import threading
+
+
+def make_key_handler(func, hotkey):
+    def handler(event):
+        if event.name == hotkey and event.event_type == 'up':
+            func()
+    return handler
 
 
 def mirror(label, pixmap):
@@ -12,22 +20,44 @@ def mirror(label, pixmap):
     label.setPixmap(QPixmap.fromImage(mirrored_image))
 
 
-def mirrorHotKey(label):
+def get_art_list():
+    exts = ('.png', '.jpg', '.jpeg', '.webp')
+    files = []
+    for f in os.listdir('.'):
+        if f.lower().endswith(exts) and 'tray' not in f.lower():
+            files.append(f)
+    return files
+
+
+def mirror_hot_key(label):
     kb.add_hotkey('alt', lambda: mirror(label, label.pixmap()))
 
 
-def hideHotKey(label):
+def hide_hot_key(label):
     def toggle_visibility():
         if label.isVisible():
             label.hide()
         else:
             label.show()
 
-    def on_key(event):
-        if event.name == 'f1' and event.event_type == 'up':
-            toggle_visibility()
+    handler = make_key_handler(toggle_visibility, 'f1')
+    kb.hook(handler)
 
-    kb.hook(on_key)
+
+def art_switch_hot_key(label):
+    arts = get_art_list()
+    if not arts:
+        return
+
+    index = 0
+
+    def switch():
+        nonlocal index
+        index = (index + 1) % len(arts)
+        pix = QPixmap(arts[index])
+        label.setPixmap(pix)
+
+    kb.add_hotkey('f2', switch)
 
 
 def transparent(label, percent):
@@ -100,8 +130,9 @@ def main():
     tray_icon.setContextMenu(tray_menu)
     tray_icon.show()
 
-    threading.Thread(target=mirrorHotKey, args=(label,), daemon=True).start()
-    threading.Thread(target=hideHotKey, args=(label,), daemon=True).start()
+    threading.Thread(target=mirror_hot_key, args=(label,), daemon=True).start()
+    threading.Thread(target=hide_hot_key, args=(label,), daemon=True).start()
+    threading.Thread(target=art_switch_hot_key, args=(label,), daemon=True).start()
 
     sys.exit(app.exec())
 
