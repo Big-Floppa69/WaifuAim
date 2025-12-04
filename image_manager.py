@@ -18,7 +18,8 @@ class ImageManagerDialog(QWidget):
     
     def __init__(self, parent=None, images_folder="display_images"):
         super().__init__(parent)
-        self.images_folder = images_folder
+        # Use absolute path to ensure we have proper path handling
+        self.images_folder = os.path.abspath(images_folder)
         self.drag_position = None
         self.image_editor = None
         self.init_ui()
@@ -265,8 +266,9 @@ class ImageManagerDialog(QWidget):
         self.image_list.clear()
         
         # Ensure folder exists
-        if not os.path.exists(self.images_folder):
-            os.makedirs(self.images_folder)
+        abs_folder_path = os.path.abspath(self.images_folder)
+        if not os.path.exists(abs_folder_path):
+            os.makedirs(abs_folder_path)
             return
         
         # Load images
@@ -306,7 +308,11 @@ class ImageManagerDialog(QWidget):
             for file_path in files:
                 try:
                     filename = os.path.basename(file_path)
-                    dest_path = os.path.join(self.images_folder, filename)
+                    # Normalize the path to ensure it's correct
+                    dest_path = os.path.normpath(os.path.join(self.images_folder, filename))
+                    
+                    # Ensure folder exists
+                    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
                     
                     # Check if file already exists
                     if os.path.exists(dest_path):
@@ -319,8 +325,14 @@ class ImageManagerDialog(QWidget):
                         if reply == QMessageBox.StandardButton.No:
                             continue
                     
-                    # Copy file
-                    shutil.copy2(file_path, dest_path)
+                    # Copy file with error handling
+                    try:
+                        shutil.copy2(file_path, dest_path)
+                    except PermissionError:
+                        # If permission error, try to fix by ensuring directory exists
+                        os.makedirs(self.images_folder, exist_ok=True)
+                        # Try again with normalized path
+                        shutil.copy2(file_path, dest_path)
                     
                 except Exception as e:
                     QMessageBox.warning(
