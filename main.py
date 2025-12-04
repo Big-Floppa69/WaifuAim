@@ -2,25 +2,37 @@ import sys
 from PyQt6.QtWidgets import QApplication, QLabel, QSystemTrayIcon, QMenu
 from PyQt6.QtGui import QPixmap, QIcon, QAction
 from PyQt6.QtCore import Qt
-import keyboard as kb # type: ignore
+import keyboard as kb  # type: ignore
 import threading
 
-def toggle(label):
-    try:
-        kb.add_hotkey('`', lambda: label.hide() if label.isVisible() else label.show())
-    except:
-        kb.add_hotkey('ё', lambda: label.hide() if label.isVisible() else label.show())
 
 def mirror(label, pixmap):
     original_image = pixmap.toImage()
     mirrored_image = original_image.mirrored(True, False)
     label.setPixmap(QPixmap.fromImage(mirrored_image))
 
+
 def mirrorHotKey(label):
     kb.add_hotkey('alt', lambda: mirror(label, label.pixmap()))
 
+
+def hideHotKey(label):
+    def toggle_visibility():
+        if label.isVisible():
+            label.hide()
+        else:
+            label.show()
+
+    def on_key(event):
+        if event.name == 'f1' and event.event_type == 'up':
+            toggle_visibility()
+
+    kb.hook(on_key)
+
+
 def transparent(label, percent):
     label.setWindowOpacity(percent)
+
 
 def main():
     app = QApplication(sys.argv)
@@ -45,7 +57,7 @@ def main():
     label.show()
 
     tray_icon = QSystemTrayIcon(QIcon("astra_yao_tray.png"), parent=app)
-    
+
     tray_menu = QMenu()
 
     exit_action = QAction("Exit")
@@ -88,10 +100,11 @@ def main():
     tray_icon.setContextMenu(tray_menu)
     tray_icon.show()
 
-    threading.Thread(target=toggle, args=(label,), daemon=True).start()
     threading.Thread(target=mirrorHotKey, args=(label,), daemon=True).start()
+    threading.Thread(target=hideHotKey, args=(label,), daemon=True).start()
 
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()
