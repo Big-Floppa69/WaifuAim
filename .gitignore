@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv
+
+# PyQt
+*.ui.autosave
+*.qrc.autosave
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Compiled executables
+*.exe
+*.app
+*.dmg
+*.msi
+
+# Logs
+*.log
+
+# PyInstaller
+*.spec
+build/
+dist/
+
+# User images (optional - uncomment if you want to exclude custom crosshair images)
+# *.png
+# *.jpg
+# *.jpeg
+# *.webp
+# !astra_yao.png
+# !astra_yao_tray.png
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Test files
+test_*.py
+*_test.py
+tests/
