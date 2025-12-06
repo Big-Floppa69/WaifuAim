@@ -9,6 +9,7 @@ from PyQt6.QtCore import Qt
 from utils import mirror_vertical, mirror_horizontal, get_art_list, transparent
 from image_manager import ImageManagerDialog
 from hotkey_manager import HotkeyManagerDialog
+from standard_crosshair import StandardCrosshairDialog
 
 
 class DarkControlPanel(QWidget):
@@ -24,6 +25,7 @@ class DarkControlPanel(QWidget):
         self.opacity_actions = {}
         self.image_manager = None
         self.hotkey_manager = None
+        self.crosshair_dialog = None
         self.init_ui()
         
     def init_ui(self):
@@ -157,6 +159,11 @@ class DarkControlPanel(QWidget):
         self.toggle_btn = self.create_button("👁️ Hide Crosshair", "#4CAF50")
         self.toggle_btn.clicked.connect(self.toggle_crosshair)
         content_layout.addWidget(self.toggle_btn)
+
+        # Standard crosshair button
+        standard_btn = self.create_button("🎯 Standard Crosshair", "#00BCD4")
+        standard_btn.clicked.connect(self.open_standard_crosshair_dialog)
+        content_layout.addWidget(standard_btn)
         
         # Mirror Vertical button
         mirror_v_btn = self.create_button("🔄 Mirror Vertical", "#2196F3")
@@ -366,6 +373,15 @@ class DarkControlPanel(QWidget):
         self.hotkey_manager.show()
         self.hotkey_manager.raise_()
         self.hotkey_manager.activateWindow()
+
+    def open_standard_crosshair_dialog(self):
+        """Open the standard crosshair configuration dialog."""
+        if self.crosshair_dialog is None:
+            self.crosshair_dialog = StandardCrosshairDialog(self.label, self)
+            self.crosshair_dialog.destroyed.connect(lambda: setattr(self, "crosshair_dialog", None))
+        self.crosshair_dialog.show()
+        self.crosshair_dialog.raise_()
+        self.crosshair_dialog.activateWindow()
     
     def _refresh_hotkey_display(self, hotkeys):
         """Refresh the hotkey info display after changes."""
