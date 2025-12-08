@@ -9,15 +9,16 @@ from PyQt6.QtCore import Qt
 from utils import mirror_vertical, mirror_horizontal, get_art_list, transparent
 from image_manager import ImageManagerDialog
 from hotkey_manager import HotkeyManagerDialog
-from standard_crosshair import StandardCrosshairDialog
+from standard_crosshair import StandardCrosshairDialog, save_crosshair_visibility
 
 
 class DarkControlPanel(QWidget):
     """A dark-themed control panel for managing crosshair settings."""
     
-    def __init__(self, label, parent=None):
+    def __init__(self, image_label, crosshair_label, parent=None):
         super().__init__(parent)
-        self.label = label
+        self.image_label = image_label
+        self.crosshair_label = crosshair_label
         self.is_visible = False
         self.drag_position = None
         self.current_image_index = 0
@@ -155,10 +156,16 @@ class DarkControlPanel(QWidget):
         content_layout.setContentsMargins(20, 15, 20, 20)
         content_layout.setSpacing(15)
         
-        # Visibility toggle button
-        self.toggle_btn = self.create_button("👁️ Hide Crosshair", "#4CAF50")
-        self.toggle_btn.clicked.connect(self.toggle_crosshair)
-        content_layout.addWidget(self.toggle_btn)
+        # Visibility toggle buttons
+        self.image_toggle_btn = self.create_button("🖼️ Hide Image", "#4CAF50")
+        self.image_toggle_btn.clicked.connect(self.toggle_image_visibility)
+        content_layout.addWidget(self.image_toggle_btn)
+
+        self.crosshair_toggle_btn = self.create_button("🎯 Show Crosshair", "#607D8B")
+        self.crosshair_toggle_btn.clicked.connect(self.toggle_crosshair_visibility)
+        content_layout.addWidget(self.crosshair_toggle_btn)
+        self._update_image_toggle_text()
+        self._update_crosshair_toggle_text()
 
         # Standard crosshair button
         standard_btn = self.create_button("🎯 Standard Crosshair", "#00BCD4")
@@ -167,12 +174,12 @@ class DarkControlPanel(QWidget):
         
         # Mirror Vertical button
         mirror_v_btn = self.create_button("🔄 Mirror Vertical", "#2196F3")
-        mirror_v_btn.clicked.connect(lambda: mirror_vertical(self.label, self.label.pixmap()))
+        mirror_v_btn.clicked.connect(lambda: mirror_vertical(self.image_label, self.image_label.pixmap()))
         content_layout.addWidget(mirror_v_btn)
         
         # Mirror Horizontal button
         mirror_h_btn = self.create_button("↔️ Mirror Horizontal", "#03A9F4")
-        mirror_h_btn.clicked.connect(lambda: mirror_horizontal(self.label, self.label.pixmap()))
+        mirror_h_btn.clicked.connect(lambda: mirror_horizontal(self.image_label, self.image_label.pixmap()))
         content_layout.addWidget(mirror_h_btn)
         
         # Switch image button
@@ -322,19 +329,42 @@ class DarkControlPanel(QWidget):
         color.setHsv(h, s, v, a)
         return color.name()
     
-    def toggle_crosshair(self):
-        """Toggle crosshair visibility."""
-        if self.label.isVisible():
-            self.label.hide()
-            self.toggle_btn.setText("👁️ Show Crosshair")
+    def _update_image_toggle_text(self):
+        if hasattr(self, "image_toggle_btn"):
+            text = "🖼️ Hide Image" if self.image_label.isVisible() else "🖼️ Show Image"
+            self.image_toggle_btn.setText(text)
+
+    def _update_crosshair_toggle_text(self):
+        if hasattr(self, "crosshair_toggle_btn"):
+            text = "🎯 Hide Crosshair" if self.crosshair_label.isVisible() else "🎯 Show Crosshair"
+            self.crosshair_toggle_btn.setText(text)
+
+    def toggle_image_visibility(self):
+        """Toggle imported image visibility."""
+        if self.image_label.isVisible():
+            self.image_label.hide()
         else:
-            self.label.show()
-            self.toggle_btn.setText("👁️ Hide Crosshair")
+            self.image_label.show()
+        self._update_image_toggle_text()
     
+    def toggle_crosshair_visibility(self):
+        """Toggle generated crosshair visibility."""
+        currently_visible = self.crosshair_label.isVisible()
+        if currently_visible:
+            self.crosshair_label.hide()
+        else:
+            self.crosshair_label.show()
+            self.crosshair_label.raise_()
+        self._update_crosshair_toggle_text()
+        save_crosshair_visibility(self.crosshair_label.isVisible())
+        if self.crosshair_dialog is not None:
+            self.crosshair_dialog.sync_with_label()
+
     def change_opacity(self, value):
         """Change the opacity of the crosshair."""
         opacity = value / 100.0
-        transparent(self.label, opacity)
+        transparent(self.image_label, opacity)
+        transparent(self.crosshair_label, opacity)
         self.opacity_value.setText(f"{value}%")
         
         # Update check marks in tray menu
@@ -354,7 +384,7 @@ class DarkControlPanel(QWidget):
             return
         self.current_image_index = (self.current_image_index + 1) % len(self.image_list)
         pix = QPixmap(self.image_list[self.current_image_index])
-        self.label.setPixmap(pix)
+        self.image_label.setPixmap(pix)
     
     def open_image_manager(self):
         """Open the image manager dialog."""
@@ -377,11 +407,21 @@ class DarkControlPanel(QWidget):
     def open_standard_crosshair_dialog(self):
         """Open the standard crosshair configuration dialog."""
         if self.crosshair_dialog is None:
-            self.crosshair_dialog = StandardCrosshairDialog(self.label, self)
+            self.crosshair_dialog = StandardCrosshairDialog(self.crosshair_label, self)
+            self.crosshair_dialog.visibility_changed.connect(self._on_crosshair_dialog_visibility)
             self.crosshair_dialog.destroyed.connect(lambda: setattr(self, "crosshair_dialog", None))
+        self.crosshair_dialog.sync_with_label()
         self.crosshair_dialog.show()
         self.crosshair_dialog.raise_()
         self.crosshair_dialog.activateWindow()
+
+    def _on_crosshair_dialog_visibility(self, visible):
+        """Keep control panel toggle text in sync with dialog."""
+        self.crosshair_label.setVisible(visible)
+        if visible:
+            self.crosshair_label.raise_()
+        self._update_crosshair_toggle_text()
+        save_crosshair_visibility(self.crosshair_label.isVisible())
     
     def _refresh_hotkey_display(self, hotkeys):
         """Refresh the hotkey info display after changes."""

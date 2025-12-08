@@ -1,0 +1,18 @@
+{
+  "center_dot": true,
+  "length": 24,
+  "thickness": 1,
+  "gap": 10,
+  "outline": 0,
+  "red": 54,
+  "green": 196,
+  "blue": 242,
+  "alpha": 255,
+  "visible": true,
+  "dot_shape": "square",
+  "dot_size": 6,
+  "show_left": true,
+  "show_right": true,
+  "show_top": false,
+  "show_bottom": false
+}

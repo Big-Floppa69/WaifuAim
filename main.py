@@ -12,15 +12,20 @@ from PyQt6.QtCore import Qt
 from control_panel import DarkControlPanel
 from tray_icon import create_tray_icon
 from hotkeys import setup_hotkeys
+from standard_crosshair import initialize_standard_crosshair
 
 
 def create_crosshair_label(app, image_path="display_images/astra_yao.png"):
-    """Create and configure the crosshair label."""
+    """Create and configure a full-screen overlay label."""
     screen = app.primaryScreen()
     screen_geometry = screen.geometry()
 
     label = QLabel()
-    pixmap = QPixmap(image_path)
+    if image_path:
+        pixmap = QPixmap(image_path)
+    else:
+        pixmap = QPixmap(screen_geometry.width(), screen_geometry.height())
+        pixmap.fill(Qt.GlobalColor.transparent)
 
     label.setFixedWidth(screen_geometry.width())
     label.setFixedHeight(screen_geometry.height())
@@ -43,24 +48,28 @@ def main():
     app.setQuitOnLastWindowClosed(False)  # Important for tray applications
 
     # Create crosshair label
-    label = create_crosshair_label(app)
-    label.show()
+    image_label = create_crosshair_label(app)
+    image_label.show()
+
+    # Create separate label for generated crosshair overlay and load saved settings
+    crosshair_label = create_crosshair_label(app, image_path=None)
+    initialize_standard_crosshair(crosshair_label)
 
     # Ensure GUI is initialized
     app.processEvents()
     time.sleep(0.1)
 
     # Create control panel
-    control_panel = DarkControlPanel(label)
+    control_panel = DarkControlPanel(image_label, crosshair_label)
 
     # Add additional delay before creating tray icon
     time.sleep(0.5)
 
     # Create system tray icon
-    tray_icon = create_tray_icon(app, label, control_panel)
+    tray_icon = create_tray_icon(app, image_label, control_panel)
 
     # Setup keyboard hotkeys
-    setup_hotkeys(label)
+    setup_hotkeys(image_label)
 
     sys.exit(app.exec())
 
