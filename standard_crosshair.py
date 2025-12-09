@@ -4,6 +4,7 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import List, Optional
 from uuid import uuid4
+from copy import deepcopy
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -28,7 +29,7 @@ from PyQt6.QtWidgets import (
     QStackedWidget,
     QAbstractItemView,
 )
-from PyQt6.QtGui import QColor, QPainter, QPixmap, QPainterPath
+from PyQt6.QtGui import QColor, QPainter, QPixmap, QPainterPath, QPen
 from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal, QTimer
 
 CONFIG_PATH = Path(__file__).resolve().with_name("standard_crosshair_settings.json")
@@ -153,6 +154,8 @@ class StandardCrosshairSettings:
     line_profiles: dict[str, dict[str, float]] = field(default_factory=dict)
     line_components: dict[str, list[dict]] = field(default_factory=dict)
     line_layers: List[dict] = field(default_factory=list)
+    draggable_mode: bool = False
+    grid_snap_size: int = 5
 
 
 def load_settings_from_disk() -> StandardCrosshairSettings:
@@ -718,7 +721,7 @@ class StandardCrosshairDialog(QWidget):
             layout,
             "Rotation",
             0,
-            359,
+            360,
             int(self.settings.rotation),
             self._on_rotation,
             suffix="°",
@@ -772,8 +775,8 @@ class StandardCrosshairDialog(QWidget):
         self.fan_speed_slider = self._add_slider(
             layout,
             "Fan Speed",
-            -360,
-            360,
+            -720,
+            720,
             self.settings.fan_speed,
             self._on_fan_speed,
             suffix="°/s",
@@ -1496,6 +1499,71 @@ class StandardCrosshairDialog(QWidget):
             self._fan_timer.stop()
         self._fan_angle = 0.0
 
+    def _update_overlay_draggable_state(self) -> None:
+        """Toggle the WindowTransparentForInput flag based on draggable mode."""
+        current_flags = self.label.windowFlags()
+        if self.settings.draggable_mode:
+            # Remove WindowTransparentForInput to enable mouse events
+            new_flags = current_flags & ~Qt.WindowType.WindowTransparentForInput
+            self.label.setWindowFlags(new_flags)
+            self.label.show()
+            # Install event filter for mouse handling
+            if not hasattr(self.label, '_dragging_installed'):
+                self.label.mousePressEvent = self._overlay_mouse_press
+                self.label.mouseMoveEvent = self._overlay_mouse_move
+                self.label.mouseReleaseEvent = self._overlay_mouse_release
+                self.label._drag_start = None
+                self.label._dragging_installed = True
+        else:
+            # Re-add WindowTransparentForInput to ignore mouse events
+            new_flags = current_flags | Qt.WindowType.WindowTransparentForInput
+            self.label.setWindowFlags(new_flags)
+            self.label.show()
+
+    def _overlay_mouse_press(self, event) -> None:
+        """Handle mouse press on overlay label."""
+        if event.button() == Qt.MouseButton.LeftButton and self.settings.draggable_mode:
+            self.label._drag_start = event.globalPosition().toPoint()
+            event.accept()
+
+    def _overlay_mouse_move(self, event) -> None:
+        """Handle mouse move on overlay label."""
+        if self.label._drag_start is not None and self.settings.draggable_mode:
+            delta = event.globalPosition().toPoint() - self.label._drag_start
+            self.label._drag_start = event.globalPosition().toPoint()
+            
+            # Apply delta to offset
+            new_x = self.settings.offset_x + delta.x()
+            new_y = self.settings.offset_y + delta.y()
+            
+            # Apply grid snapping
+            if self.settings.grid_snap_size > 1:
+                new_x = round(new_x / self.settings.grid_snap_size) * self.settings.grid_snap_size
+                new_y = round(new_y / self.settings.grid_snap_size) * self.settings.grid_snap_size
+            
+            self.settings.offset_x = new_x
+            self.settings.offset_y = new_y
+            
+            # Update UI controls if they exist
+            if hasattr(self, 'offset_x_slider'):
+                self.offset_x_slider.blockSignals(True)
+                self.offset_x_slider.setValue(new_x)
+                self.offset_x_slider.blockSignals(False)
+            if hasattr(self, 'offset_y_slider'):
+                self.offset_y_slider.blockSignals(True)
+                self.offset_y_slider.setValue(new_y)
+                self.offset_y_slider.blockSignals(False)
+            
+            self._render_current_state()
+            event.accept()
+
+    def _overlay_mouse_release(self, event) -> None:
+        """Handle mouse release on overlay label."""
+        if event.button() == Qt.MouseButton.LeftButton and self.settings.draggable_mode:
+            self.label._drag_start = None
+            save_settings_to_disk(self.settings)
+            event.accept()
+
     def _on_fan_tick(self) -> None:
         if not self.settings.fan_enabled:
             return
@@ -1905,6 +1973,11 @@ class LineBuilderDialog(QWidget):
         self.circle_fields: dict[str, QDoubleSpinBox] = {}
         self.component_insert_buttons: list[QPushButton] = []
         self.component_modify_buttons: list[QPushButton] = []
+        self.show_grid = True
+        self.grid_size = 20
+        self.grid_snap_enabled = True
+        self.dragging_component = None
+        self.drag_start_pos = None
 
         self.setWindowTitle("Advanced Line Builder")
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
@@ -2041,13 +2114,60 @@ class LineBuilderDialog(QWidget):
         )
         layout = QVBoxLayout(frame)
         layout.setSpacing(3)
-        layout.addWidget(self._subheading("Live Preview"))
+        
+        header_row = QHBoxLayout()
+        header_row.addWidget(self._subheading("Live Preview"))
+        
+        self.grid_toggle = QCheckBox()
+        self.grid_toggle.setChecked(self.show_grid)
+        self.grid_toggle.setStyleSheet("QCheckBox { color: #E0E0E0; font-size: 10px; font-weight: bold; }")
+        self.grid_toggle.toggled.connect(self._on_grid_toggle)
+        header_row.addWidget(self.grid_toggle)
+        
+        self.snap_toggle = QCheckBox("⚲ Snap")
+        self.snap_toggle.setChecked(self.grid_snap_enabled)
+        self.snap_toggle.setStyleSheet("QCheckBox { color: #E0E0E0; font-size: 11px; font-weight: bold; }")
+        self.snap_toggle.toggled.connect(self._on_snap_toggle)
+        header_row.addWidget(self.snap_toggle)
+        
+        grid_size_wrapper = QWidget()
+        grid_size_layout = QHBoxLayout(grid_size_wrapper)
+        grid_size_layout.setContentsMargins(0, 0, 0, 0)
+        grid_size_layout.setSpacing(5)
+        
+        grid_size_label = QLabel("Grid Size")
+        grid_size_label.setStyleSheet("color: #B0B0B0; font-size: 12px;")
+        grid_size_layout.addWidget(grid_size_label)
+        
+        self.grid_size_spin = QSpinBox()
+        self.grid_size_spin.setRange(5, 100)
+        self.grid_size_spin.setValue(self.grid_size)
+        self.grid_size_spin.setFixedWidth(50)
+        self.grid_size_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.grid_size_spin.setStyleSheet(
+            "QSpinBox { background-color: rgba(40, 40, 50, 200); border: 1px solid rgba(100, 100, 120, 120); border-radius: 5px; padding: 2px 4px; color: #E0E0E0; }"
+        )
+        self.grid_size_spin.valueChanged.connect(self._on_grid_size_changed)
+        grid_size_layout.addWidget(self.grid_size_spin)
+        
+        px_label = QLabel("px")
+        px_label.setStyleSheet("color: #B0B0B0; font-size: 10px;")
+        grid_size_layout.addWidget(px_label)
+    
+        header_row.addWidget(grid_size_wrapper)
+        header_row.addStretch()
+        
+        layout.addLayout(header_row)
+        
         self.preview_label = QLabel()
         self.preview_label.setMinimumSize(200, 200)
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_label.setStyleSheet(
             "QLabel { background-color: rgba(10, 10, 15, 220); border: 1px solid rgba(255, 255, 255, 40); border-radius: 10px; }"
         )
+        self.preview_label.mousePressEvent = self._preview_mouse_press
+        self.preview_label.mouseMoveEvent = self._preview_mouse_move
+        self.preview_label.mouseReleaseEvent = self._preview_mouse_release
         layout.addWidget(self.preview_label)
         return frame
 
@@ -2061,6 +2181,8 @@ class LineBuilderDialog(QWidget):
         scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         scroll_area.setStyleSheet("QScrollArea { background: transparent; border: none; }")
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setMinimumHeight(200)
+        scroll_area.setMaximumHeight(400)
         
         scroll_widget = QWidget()
         form = QFormLayout(scroll_widget)
@@ -2075,11 +2197,15 @@ class LineBuilderDialog(QWidget):
         self.layer_enabled_check.toggled.connect(self._on_layer_enabled_toggled)
         form.addRow("", self.layer_enabled_check)
 
-        self.layer_angle_spin = self._make_spin(0.0, 359.0, 1.0, 1)
+        self.layer_draggable_check = QCheckBox("Draggable")
+        self.layer_draggable_check.toggled.connect(self._on_layer_draggable_toggled)
+        form.addRow("", self.layer_draggable_check)
+
+        self.layer_angle_spin = self._make_spin(-720.0, 720.0, 1.0, 1)
         self.layer_angle_spin.valueChanged.connect(self._on_layer_angle_changed)
         form.addRow("Angle", self._wrap_with_unit(self.layer_angle_spin, "°"))
 
-        self.layer_angle_offset_spin = self._make_spin(-180.0, 180.0, 1.0, 1)
+        self.layer_angle_offset_spin = self._make_spin(-720.0, 720.0, 1.0, 1)
         self.layer_angle_offset_spin.valueChanged.connect(self._on_layer_angle_offset_changed)
         form.addRow("Offset", self._wrap_with_unit(self.layer_angle_offset_spin, "°"))
 
@@ -2139,39 +2265,41 @@ class LineBuilderDialog(QWidget):
         button_row.setSpacing(3)
         add_segment_btn = QPushButton("＋ Segment")
         add_segment_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        add_segment_btn.setStyleSheet("QPushButton { background-color: rgba(0,188,212,160); color: white; border: none; border-radius: 6px; padding: 4px 8px; font-weight: bold; }")
+        add_segment_btn.setStyleSheet("QPushButton { background-color: rgba(0,188,212,160); color: white; border: none; border-radius: 6px; padding: 4px 8px; font-weight: bold; min-width: 0; }")
         add_segment_btn.clicked.connect(lambda: self._add_component("segment"))
-        button_row.addWidget(add_segment_btn)
+        button_row.addWidget(add_segment_btn, 1)
 
         add_circle_btn = QPushButton("＋ Circle")
         add_circle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        add_circle_btn.setStyleSheet("QPushButton { background-color: rgba(92,107,192,160); color: white; border: none; border-radius: 6px; padding: 4px 8px; font-weight: bold; }")
+        add_circle_btn.setStyleSheet("QPushButton { background-color: rgba(92,107,192,160); color: white; border: none; border-radius: 6px; padding: 4px 8px; font-weight: bold; min-width: 0; }")
         add_circle_btn.clicked.connect(lambda: self._add_component("circle"))
-        button_row.addWidget(add_circle_btn)
+        button_row.addWidget(add_circle_btn, 1)
 
         duplicate_btn = QPushButton("⧉ Duplicate")
         duplicate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        duplicate_btn.setStyleSheet("QPushButton { background-color: rgba(120,144,156,160); color: white; border: none; border-radius: 6px; padding: 4px 8px; font-weight: bold; }")
+        duplicate_btn.setStyleSheet("QPushButton { background-color: rgba(120,144,156,160); color: white; border: none; border-radius: 6px; padding: 4px 8px; font-weight: bold; min-width: 0; }")
         duplicate_btn.clicked.connect(self._duplicate_component)
-        button_row.addWidget(duplicate_btn)
+        button_row.addWidget(duplicate_btn, 1)
 
         remove_btn = QPushButton("✖ Remove")
         remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        remove_btn.setStyleSheet("QPushButton { background-color: rgba(244,67,54,180); color: white; border: none; border-radius: 6px; padding: 4px 8px; font-weight: bold; }")
+        remove_btn.setStyleSheet("QPushButton { background-color: rgba(244,67,54,180); color: white; border: none; border-radius: 6px; padding: 4px 8px; font-weight: bold; min-width: 0; }")
         remove_btn.clicked.connect(self._remove_component)
-        button_row.addWidget(remove_btn)
+        button_row.addWidget(remove_btn, 1)
 
         move_up_btn = QPushButton("↑")
         move_up_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         move_up_btn.setFixedWidth(32)
+        move_up_btn.setMinimumWidth(32)
         move_up_btn.clicked.connect(lambda: self._move_component(-1))
-        button_row.addWidget(move_up_btn)
+        button_row.addWidget(move_up_btn, 0)
 
         move_down_btn = QPushButton("↓")
         move_down_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         move_down_btn.setFixedWidth(32)
+        move_down_btn.setMinimumWidth(32)
         move_down_btn.clicked.connect(lambda: self._move_component(1))
-        button_row.addWidget(move_down_btn)
+        button_row.addWidget(move_down_btn, 0)
 
         list_column.addLayout(button_row)
         self.component_insert_buttons = [add_segment_btn, add_circle_btn]
@@ -2190,6 +2318,12 @@ class LineBuilderDialog(QWidget):
         segment_editor = QWidget()
         segment_form = QFormLayout(segment_editor)
         segment_form.setSpacing(4)
+        
+        self.segment_draggable = QCheckBox("Draggable")
+        self.segment_draggable.setStyleSheet("QCheckBox { color: #E0E0E0; font-weight: bold; }")
+        self.segment_draggable.toggled.connect(lambda v: self._on_component_draggable_changed("segment", v))
+        segment_form.addRow("", self.segment_draggable)
+        
         for field in ("offset", "length", "thickness", "angle_offset", "tip_offset"):
             spin = self._create_component_spinbox("segment", field)
             self.segment_fields[field] = spin
@@ -2199,6 +2333,12 @@ class LineBuilderDialog(QWidget):
         circle_editor = QWidget()
         circle_form = QFormLayout(circle_editor)
         circle_form.setSpacing(4)
+        
+        self.circle_draggable = QCheckBox("Draggable")
+        self.circle_draggable.setStyleSheet("QCheckBox { color: #E0E0E0; font-weight: bold; }")
+        self.circle_draggable.toggled.connect(lambda v: self._on_component_draggable_changed("circle", v))
+        circle_form.addRow("", self.circle_draggable)
+        
         for field in ("offset", "radius"):
             spin = self._create_component_spinbox("circle", field)
             self.circle_fields[field] = spin
@@ -2354,6 +2494,9 @@ class LineBuilderDialog(QWidget):
             self.layer_enabled_check.blockSignals(True)
             self.layer_enabled_check.setChecked(layer.get("enabled", True))
             self.layer_enabled_check.blockSignals(False)
+            self.layer_draggable_check.blockSignals(True)
+            self.layer_draggable_check.setChecked(layer.get("draggable", False))
+            self.layer_draggable_check.blockSignals(False)
             for widget, value in (
                 (self.layer_angle_spin, layer.get("angle", 0.0)),
                 (self.layer_angle_offset_spin, layer.get("angle_offset", 0.0)),
@@ -2374,6 +2517,9 @@ class LineBuilderDialog(QWidget):
             self.layer_enabled_check.blockSignals(True)
             self.layer_enabled_check.setChecked(True)
             self.layer_enabled_check.blockSignals(False)
+            self.layer_draggable_check.blockSignals(True)
+            self.layer_draggable_check.setChecked(False)
+            self.layer_draggable_check.blockSignals(False)
         else:
             self._set_metadata_enabled(False)
             self.layer_label_input.blockSignals(True)
@@ -2382,6 +2528,9 @@ class LineBuilderDialog(QWidget):
             self.layer_enabled_check.blockSignals(True)
             self.layer_enabled_check.setChecked(True)
             self.layer_enabled_check.blockSignals(False)
+            self.layer_draggable_check.blockSignals(True)
+            self.layer_draggable_check.setChecked(False)
+            self.layer_draggable_check.blockSignals(False)
 
     def _current_component_stack(self) -> Optional[list]:
         if self.active_scope_kind == "standard" and self.active_scope_id:
@@ -2413,6 +2562,14 @@ class LineBuilderDialog(QWidget):
         for layer in self.settings.line_layers:
             if layer.get("id") == self.active_scope_id:
                 return layer
+        return None
+
+    def _current_component(self) -> Optional[dict]:
+        """Get the currently selected component."""
+        row = self.components_list.currentRow()
+        stack = self._current_component_stack()
+        if stack and 0 <= row < len(stack):
+            return stack[row]
         return None
 
     def _refresh_component_list(self) -> None:
@@ -2464,18 +2621,40 @@ class LineBuilderDialog(QWidget):
         ctype = component.get("type")
         if ctype == "segment":
             self.component_editor_stack.setCurrentIndex(1)
+            self.segment_draggable.blockSignals(True)
+            self.segment_draggable.setChecked(component.get("draggable", False))
+            self.segment_draggable.blockSignals(False)
             for field, spin in self.segment_fields.items():
                 spin.blockSignals(True)
                 spin.setValue(float(component.get(field, 0.0)))
                 spin.blockSignals(False)
         elif ctype == "circle":
             self.component_editor_stack.setCurrentIndex(2)
+            self.circle_draggable.blockSignals(True)
+            self.circle_draggable.setChecked(component.get("draggable", False))
+            self.circle_draggable.blockSignals(False)
             for field, spin in self.circle_fields.items():
                 spin.blockSignals(True)
                 spin.setValue(float(component.get(field, 0.0)))
                 spin.blockSignals(False)
         else:
             self.component_editor_stack.setCurrentIndex(0)
+
+    def _sync_component_form(self, component: Optional[dict]) -> None:
+        """Update form fields to match component data (used during dragging)."""
+        if component is None:
+            return
+        ctype = component.get("type")
+        if ctype == "segment":
+            for field, spin in self.segment_fields.items():
+                spin.blockSignals(True)
+                spin.setValue(float(component.get(field, 0.0)))
+                spin.blockSignals(False)
+        elif ctype == "circle":
+            for field, spin in self.circle_fields.items():
+                spin.blockSignals(True)
+                spin.setValue(float(component.get(field, 0.0)))
+                spin.blockSignals(False)
 
     def _component_buttons_enabled(self, has_layer: bool, has_component: bool) -> None:
         for btn in self.component_insert_buttons:
@@ -2616,6 +2795,97 @@ class LineBuilderDialog(QWidget):
     def _current_scope_custom_id(self) -> Optional[str]:
         return self.active_scope_id if self.active_scope_kind == "custom" else None
 
+    def _on_grid_toggle(self, enabled: bool) -> None:
+        self.show_grid = enabled
+        self._update_preview()
+
+    def _on_grid_size_changed(self, value: int) -> None:
+        self.grid_size = value
+        self._update_preview()
+
+    def _on_snap_toggle(self, enabled: bool) -> None:
+        self.grid_snap_enabled = enabled
+
+    def _on_component_draggable_changed(self, comp_type: str, enabled: bool) -> None:
+        component = self._current_component()
+        if component:
+            component["draggable"] = enabled
+            self._persist(self._current_scope_standard_key(), self._current_scope_custom_id())
+
+    def _preview_mouse_press(self, event) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        
+        # Check if current component is draggable
+        component = self._current_component()
+        if component and component.get("draggable", False):
+            self.dragging_component = component
+            self.drag_start_pos = event.pos()
+            event.accept()
+
+    def _preview_mouse_move(self, event) -> None:
+        if self.dragging_component is None or self.drag_start_pos is None:
+            return
+        
+        delta = event.pos() - self.drag_start_pos
+        self.drag_start_pos = event.pos()
+        
+        # Get the base angle for this component's line
+        layer = self._current_custom_layer()
+        if layer:
+            base_angle = layer.get("angle", 0.0)
+            angle_offset = layer.get("angle_offset", 0.0)
+        else:
+            # For standard lines, get the angle from the active scope
+            if self.active_scope_id in ["show_left", "show_right"]:
+                base_angle = 180 if self.active_scope_id == "show_left" else 0
+            elif self.active_scope_id in ["show_top", "show_bottom"]:
+                base_angle = 90 if self.active_scope_id == "show_top" else 270
+            else:
+                base_angle = 0
+            angle_offset = 0
+        
+        # Get component's own angle offset
+        component_angle = self.dragging_component.get("angle_offset", 0.0)
+        total_angle = base_angle + angle_offset + component_angle
+        
+        # Convert angle to radians
+        import math
+        angle_rad = math.radians(total_angle)
+        
+        # Project mouse movement onto the line's direction (radial movement)
+        # Use dot product to get movement along the line
+        offset_delta = delta.x() * math.cos(angle_rad) + delta.y() * math.sin(angle_rad)
+        
+        # Update offset
+        current_offset = self.dragging_component.get("offset", 0.0)
+        new_offset = current_offset + offset_delta
+        
+        # Apply magnetic snapping to grid lines when snap is enabled
+        if self.grid_snap_enabled and self.grid_size > 1:
+            snap_threshold = self.grid_size / 3
+            nearest_grid = round(new_offset / self.grid_size) * self.grid_size
+            distance = abs(new_offset - nearest_grid)
+            
+            if distance < snap_threshold:
+                new_offset = nearest_grid
+        
+        # Update the offset
+        self.dragging_component["offset"] = new_offset
+        
+        # Sync UI and preview
+        self._sync_component_form(self.dragging_component)
+        self._update_preview()
+        event.accept()
+        event.accept()
+
+    def _preview_mouse_release(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.dragging_component is not None:
+            self.dragging_component = None
+            self.drag_start_pos = None
+            self._persist(self._current_scope_standard_key(), self._current_scope_custom_id())
+            event.accept()
+
     def _on_add_custom_line(self) -> None:
         layer = self._create_default_layer()
         self.settings.line_layers.append(layer)
@@ -2710,11 +2980,19 @@ class LineBuilderDialog(QWidget):
         self._refresh_custom_item_text(layer["id"])
         self._persist(custom_id=layer["id"])
 
+    def _on_layer_draggable_toggled(self, enabled: bool) -> None:
+        layer = self._current_custom_layer()
+        if layer is None:
+            return
+        layer["draggable"] = enabled
+        self._persist(custom_id=layer["id"])
+
     def _on_layer_angle_changed(self, value: float) -> None:
         layer = self._current_custom_layer()
         if layer is None:
             return
-        layer["angle"] = value % 360
+        # Don't reset offset when changing angle - just update the angle
+        layer["angle"] = value
         self._refresh_custom_item_text(layer["id"])
         self._persist(custom_id=layer["id"])
 
@@ -2806,7 +3084,61 @@ class LineBuilderDialog(QWidget):
 
     def _update_preview(self) -> None:
         size = self.preview_label.size()
-        pixmap = generate_crosshair_pixmap(max(size.width(), 240), max(size.height(), 240), self.settings)
+        w = max(size.width(), 240)
+        h = max(size.height(), 240)
+        
+        pixmap = QPixmap(w, h)
+        pixmap.fill(QColor(10, 10, 15, 220))
+        
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Draw grid if enabled
+        if self.show_grid:
+            painter.setPen(QPen(QColor(255, 255, 255, 60), 1))
+            center_x = w // 2
+            center_y = h // 2
+            
+            # Vertical lines
+            x = center_x
+            while x < w:
+                painter.drawLine(x, 0, x, h)
+                x += self.grid_size
+            x = center_x - self.grid_size
+            while x >= 0:
+                painter.drawLine(x, 0, x, h)
+                x -= self.grid_size
+            
+            # Horizontal lines
+            y = center_y
+            while y < h:
+                painter.drawLine(0, y, w, y)
+                y += self.grid_size
+            y = center_y - self.grid_size
+            while y >= 0:
+                painter.drawLine(0, y, w, y)
+                y -= self.grid_size
+            
+            # Center crosshair
+            painter.setPen(QPen(QColor(255, 255, 255, 120), 1, Qt.PenStyle.DashLine))
+            painter.drawLine(center_x, 0, center_x, h)
+            painter.drawLine(0, center_y, w, center_y)
+        
+        painter.end()
+        
+        # Render crosshair on top using the existing function
+        temp_settings = deepcopy(self.settings)
+        temp_settings.offset_x = 0
+        temp_settings.offset_y = 0
+        temp_settings.visible = True
+        
+        crosshair_pixmap = generate_crosshair_pixmap(w, h, temp_settings)
+        
+        # Composite the crosshair onto the grid
+        painter = QPainter(pixmap)
+        painter.drawPixmap(0, 0, crosshair_pixmap)
+        painter.end()
+        
         self.preview_label.setPixmap(
             pixmap.scaled(size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         )
