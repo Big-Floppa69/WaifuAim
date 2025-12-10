@@ -90,6 +90,7 @@ COMPONENT_TYPES = {"segment", "circle"}
 COMPONENT_FIELD_LIMITS = {
     "segment": {
         "offset": (-400.0, 600.0, "px"),
+        "perp_offset": (-400.0, 400.0, "px"),
         "length": (0.0, 600.0, "px"),
         "thickness": (1.0, 120.0, "px"),
         "angle_offset": (-90.0, 90.0, "°"),
@@ -97,6 +98,7 @@ COMPONENT_FIELD_LIMITS = {
     },
     "circle": {
         "offset": (-400.0, 600.0, "px"),
+        "perp_offset": (-400.0, 400.0, "px"),
         "radius": (1.0, 200.0, "px"),
     },
 }
@@ -381,7 +383,7 @@ def generate_crosshair_pixmap(
     painter.setPen(Qt.PenStyle.NoPen)
     angle_map = STYLE_ANGLES.get(settings.crosshair_style, STYLE_ANGLES["plus"])
 
-    def draw_segment_shape(total_angle: float, start: float, length: float, thickness: float, tip_offset: float) -> None:
+    def draw_segment_shape(total_angle: float, start: float, length: float, thickness: float, tip_offset: float, perp_offset: float = 0.0, component_rotation: float = 0.0) -> None:
         length = max(0.0, length)
         thickness = max(0.1, thickness)
         start_pos = start
@@ -392,6 +394,12 @@ def generate_crosshair_pixmap(
         painter.save()
         painter.translate(center_x, center_y)
         painter.rotate(total_angle + total_rotation)
+        painter.translate(0.0, perp_offset)
+        # Apply component rotation around its own center (at start position)
+        if abs(component_rotation) > 0.01:
+            painter.translate(start + length / 2, 0)
+            painter.rotate(component_rotation)
+            painter.translate(-(start + length / 2), 0)
 
         def paint_path(begin: float, finish: float, half_size: float, tip: float, brush: QColor) -> None:
             painter.setBrush(brush)
@@ -412,12 +420,13 @@ def generate_crosshair_pixmap(
         paint_path(start_pos, end_pos, half, tip_offset, color)
         painter.restore()
 
-    def draw_circle_shape(total_angle: float, offset: float, radius: float) -> None:
+    def draw_circle_shape(total_angle: float, offset: float, radius: float, perp_offset: float = 0.0, component_rotation: float = 0.0) -> None:
         radius = max(0.1, radius)
         painter.save()
         painter.translate(center_x, center_y)
         painter.rotate(total_angle + total_rotation)
-        painter.translate(offset, 0.0)
+        painter.translate(offset, perp_offset)
+        # Circles don't need rotation, but parameter kept for consistency
         if outline > 0:
             painter.setBrush(outline_color)
             painter.drawEllipse(QPointF(0, 0), radius + outline, radius + outline)
@@ -436,16 +445,18 @@ def generate_crosshair_pixmap(
             try:
                 if ctype == "segment":
                     offset = float(component.get("offset", 0.0))
+                    perp_offset = float(component.get("perp_offset", 0.0))
                     length = float(component.get("length", 0.0))
                     thickness = float(component.get("thickness", fallback_thickness))
                     component_angle = float(component.get("angle_offset", 0.0))
                     component_tip = float(component.get("tip_offset", 0.0))
-                    draw_segment_shape(base_angle + angle_offset + component_angle, offset, length, thickness, component_tip)
+                    draw_segment_shape(base_angle + angle_offset, offset, length, thickness, component_tip, perp_offset, component_angle)
                     rendered = True
                 elif ctype == "circle":
                     offset = float(component.get("offset", 0.0))
+                    perp_offset = float(component.get("perp_offset", 0.0))
                     radius = float(component.get("radius", fallback_thickness / 2))
-                    draw_circle_shape(base_angle + angle_offset, offset, radius)
+                    draw_circle_shape(base_angle + angle_offset, offset, radius, perp_offset)
                     rendered = True
             except (TypeError, ValueError):
                 continue
@@ -1978,6 +1989,12 @@ class LineBuilderDialog(QWidget):
         self.grid_snap_enabled = True
         self.dragging_component = None
         self.drag_start_pos = None
+        self.selected_component = None
+        self.selection_handles = []
+        self.hover_handle = None
+        self.rotating = False
+        self.rotation_start_angle = 0
+        self.resize_mode = None
 
         self.setWindowTitle("Advanced Line Builder")
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
@@ -2324,7 +2341,7 @@ class LineBuilderDialog(QWidget):
         self.segment_draggable.toggled.connect(lambda v: self._on_component_draggable_changed("segment", v))
         segment_form.addRow("", self.segment_draggable)
         
-        for field in ("offset", "length", "thickness", "angle_offset", "tip_offset"):
+        for field in ("offset", "perp_offset", "length", "thickness", "angle_offset", "tip_offset"):
             spin = self._create_component_spinbox("segment", field)
             self.segment_fields[field] = spin
             segment_form.addRow(self._component_label(field), self._wrap_with_unit(spin, COMPONENT_FIELD_LIMITS["segment"][field][2]))
@@ -2339,7 +2356,7 @@ class LineBuilderDialog(QWidget):
         self.circle_draggable.toggled.connect(lambda v: self._on_component_draggable_changed("circle", v))
         circle_form.addRow("", self.circle_draggable)
         
-        for field in ("offset", "radius"):
+        for field in ("offset", "perp_offset", "radius"):
             spin = self._create_component_spinbox("circle", field)
             self.circle_fields[field] = spin
             circle_form.addRow(self._component_label(field), self._wrap_with_unit(spin, COMPONENT_FIELD_LIMITS["circle"][field][2]))
@@ -2361,7 +2378,11 @@ class LineBuilderDialog(QWidget):
         return spin
 
     def _component_label(self, field: str) -> QLabel:
-        label = QLabel(field.replace("_", " ").title())
+        label_map = {
+            "perp_offset": "Perp Offset"
+        }
+        text = label_map.get(field, field.replace("_", " ").title())
+        label = QLabel(text)
         label.setStyleSheet("color: #B0B0B0; font-size: 11px; font-weight: bold;")
         return label
 
@@ -2816,14 +2837,89 @@ class LineBuilderDialog(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         
-        # Check if current component is draggable
+        pos = QPointF(event.pos())
+        
+        # Check if clicking on a selection handle
+        if self.selected_component and self.selection_handles:
+            for handle_type, handle_rect in self.selection_handles:
+                if handle_rect.contains(pos):
+                    if handle_type == "delete":
+                        self._delete_current_component()
+                        self.selected_component = None
+                        self._update_preview()
+                        return
+                    elif handle_type == "rotate":
+                        self.rotating = True
+                        self.drag_start_pos = event.pos()
+                        import math
+                        # Calculate initial angle from component center to mouse
+                        self.rotation_start_angle = self.selected_component.get("angle_offset", 0.0)
+                        event.accept()
+                        return
+                    elif handle_type.startswith("resize"):
+                        self.dragging_component = self.selected_component
+                        self.drag_start_pos = event.pos()
+                        self.resize_mode = handle_type
+                        event.accept()
+                        return
+        
+        # Check if current component is draggable - select it
         component = self._current_component()
         if component and component.get("draggable", False):
+            self.selected_component = component
             self.dragging_component = component
             self.drag_start_pos = event.pos()
+            self._update_preview()
             event.accept()
+        else:
+            # Deselect if clicking empty area
+            if self.selected_component:
+                self.selected_component = None
+                self._update_preview()
 
     def _preview_mouse_move(self, event) -> None:
+        import math
+        
+        # Handle rotation
+        if self.rotating and self.drag_start_pos and self.selected_component:
+            delta = event.pos() - self.drag_start_pos
+            # Simple rotation based on horizontal movement
+            angle_change = delta.x() * 0.5  # Sensitivity factor
+            new_angle = self.rotation_start_angle + angle_change
+            
+            # Snap to 15-degree increments if shift is held
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                new_angle = round(new_angle / 15) * 15
+            
+            self.selected_component["angle_offset"] = new_angle
+            self._sync_component_form(self.selected_component)
+            self._update_preview()
+            event.accept()
+            return
+        
+        # Handle resizing
+        if hasattr(self, 'resize_mode') and self.resize_mode and self.dragging_component and self.drag_start_pos:
+            delta = event.pos() - self.drag_start_pos
+            self.drag_start_pos = event.pos()
+            
+            if self.resize_mode == "resize_length":
+                current_length = self.dragging_component.get("length", 40.0)
+                new_length = max(1.0, current_length + delta.x())
+                self.dragging_component["length"] = new_length
+                self._sync_component_form(self.dragging_component)
+                self._update_preview()
+                event.accept()
+                return
+            elif self.resize_mode == "resize_thickness":
+                current_thickness = self.dragging_component.get("thickness", 4.0)
+                new_thickness = max(1.0, current_thickness + delta.y())
+                self.dragging_component["thickness"] = new_thickness
+                self._sync_component_form(self.dragging_component)
+                self._update_preview()
+                event.accept()
+                return
+        
+        # Handle normal dragging
         if self.dragging_component is None or self.drag_start_pos is None:
             return
         
@@ -2853,25 +2949,42 @@ class LineBuilderDialog(QWidget):
         import math
         angle_rad = math.radians(total_angle)
         
-        # Project mouse movement onto the line's direction (radial movement)
-        # Use dot product to get movement along the line
+        # Project mouse movement onto the line's direction (parallel to line)
         offset_delta = delta.x() * math.cos(angle_rad) + delta.y() * math.sin(angle_rad)
         
-        # Update offset
+        # Project mouse movement perpendicular to the line (for angle_offset)
+        # Perpendicular is 90 degrees from the line angle
+        perp_angle_rad = angle_rad + math.pi / 2
+        angle_offset_delta = delta.x() * math.cos(perp_angle_rad) + delta.y() * math.sin(perp_angle_rad)
+        
+        # Update offset (parallel movement)
         current_offset = self.dragging_component.get("offset", 0.0)
         new_offset = current_offset + offset_delta
         
+        # Update perp_offset (perpendicular movement) instead of angle_offset
+        current_perp_offset = self.dragging_component.get("perp_offset", 0.0)
+        new_perp_offset = current_perp_offset + angle_offset_delta
+        
         # Apply magnetic snapping to grid lines when snap is enabled
         if self.grid_snap_enabled and self.grid_size > 1:
-            snap_threshold = self.grid_size / 3
-            nearest_grid = round(new_offset / self.grid_size) * self.grid_size
-            distance = abs(new_offset - nearest_grid)
+            snap_threshold_parallel = self.grid_size / 5
+            snap_threshold_perp = self.grid_size / 8  # Even smaller threshold for more responsive perpendicular movement
             
-            if distance < snap_threshold:
-                new_offset = nearest_grid
+            # Snap parallel offset
+            nearest_grid_offset = round(new_offset / self.grid_size) * self.grid_size
+            distance_offset = abs(new_offset - nearest_grid_offset)
+            if distance_offset < snap_threshold_parallel:
+                new_offset = nearest_grid_offset
+            
+            # Snap perpendicular offset
+            nearest_grid_perp = round(new_perp_offset / self.grid_size) * self.grid_size
+            distance_perp = abs(new_perp_offset - nearest_grid_perp)
+            if distance_perp < snap_threshold_perp:
+                new_perp_offset = nearest_grid_perp
         
-        # Update the offset
+        # Update both offset and perp_offset
         self.dragging_component["offset"] = new_offset
+        self.dragging_component["perp_offset"] = new_perp_offset
         
         # Sync UI and preview
         self._sync_component_form(self.dragging_component)
@@ -2880,11 +2993,20 @@ class LineBuilderDialog(QWidget):
         event.accept()
 
     def _preview_mouse_release(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton and self.dragging_component is not None:
-            self.dragging_component = None
-            self.drag_start_pos = None
-            self._persist(self._current_scope_standard_key(), self._current_scope_custom_id())
-            event.accept()
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self.dragging_component is not None:
+                self.dragging_component = None
+                self.drag_start_pos = None
+                self._persist(self._current_scope_standard_key(), self._current_scope_custom_id())
+                event.accept()
+            if self.rotating:
+                self.rotating = False
+                self.drag_start_pos = None
+                self._persist(self._current_scope_standard_key(), self._current_scope_custom_id())
+                event.accept()
+            if hasattr(self, 'resize_mode'):
+                self.resize_mode = None
+                self.drag_start_pos = None
 
     def _on_add_custom_line(self) -> None:
         layer = self._create_default_layer()
@@ -3137,9 +3259,127 @@ class LineBuilderDialog(QWidget):
         # Composite the crosshair onto the grid
         painter = QPainter(pixmap)
         painter.drawPixmap(0, 0, crosshair_pixmap)
+        
+        # Draw selection handles if a component is selected
+        if self.selected_component:
+            self._draw_selection_handles(painter, w, h)
+        
+        
         painter.end()
         
         self.preview_label.setPixmap(
             pixmap.scaled(size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         )
+
+    def _draw_selection_handles(self, painter, w: int, h: int) -> None:
+        """Draw selection handles around the selected component"""
+        import math
+        
+        # Get component position
+        layer = self._current_custom_layer()
+        if layer:
+            base_angle = layer.get("angle", 0.0)
+        else:
+            if self.active_scope_id in ["show_left", "show_right"]:
+                base_angle = 180 if self.active_scope_id == "show_left" else 0
+            elif self.active_scope_id in ["show_top", "show_bottom"]:
+                base_angle = 90 if self.active_scope_id == "show_top" else 270
+            else:
+                base_angle = 0
+        
+        offset = self.selected_component.get("offset", 0.0)
+        perp_offset = self.selected_component.get("perp_offset", 0.0)
+        component_angle = self.selected_component.get("angle_offset", 0.0)
+        total_angle = base_angle + component_angle
+        
+        # Calculate component center position
+        center_x = w // 2
+        center_y = h // 2
+        angle_rad = math.radians(total_angle)
+        
+        comp_x = center_x + offset * math.cos(angle_rad) - perp_offset * math.sin(angle_rad)
+        comp_y = center_y + offset * math.sin(angle_rad) + perp_offset * math.cos(angle_rad)
+        
+        # Get component size
+        if self.selected_component.get("type") == "segment":
+            length = self.selected_component.get("length", 40.0)
+            thickness = self.selected_component.get("thickness", 4.0)
+            half_len = length / 2
+            half_thick = thickness / 2 + 15
+        else:  # circle
+            radius = self.selected_component.get("radius", 10.0)
+            half_len = radius + 15
+            half_thick = radius + 15
+        
+        # Store handle positions for hit testing
+        self.selection_handles = []
+        handle_size = 24
+        button_size = 28
+        
+        # Calculate positions relative to component angle
+        cos_a = math.cos(angle_rad)
+        sin_a = math.sin(angle_rad)
+        
+        # Rotate handle for rotation
+        rotate_x = comp_x - half_thick * sin_a
+        rotate_y = comp_y + half_thick * cos_a
+        
+        # Delete handle (top-right corner)
+        delete_x = comp_x + half_len * cos_a - half_thick * sin_a
+        delete_y = comp_y + half_len * sin_a + half_thick * cos_a
+        
+        # Resize handle (right side for length)
+        resize_x = comp_x + (half_len + 20) * cos_a
+        resize_y = comp_y + (half_len + 20) * sin_a
+        
+        # Thickness handle (bottom)
+        thick_x = comp_x + (half_thick + 20) * sin_a
+        thick_y = comp_y - (half_thick + 20) * cos_a
+        
+        # Draw handles with icons
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Rotate handle
+        painter.setBrush(QColor(100, 150, 255))
+        painter.setPen(QPen(QColor(255, 255, 255), 2))
+        rotate_rect = QRectF(rotate_x - button_size/2, rotate_y - button_size/2, button_size, button_size)
+        painter.drawEllipse(rotate_rect)
+        self.selection_handles.append(("rotate", rotate_rect))
+        
+        # Draw rotate icon
+        painter.setPen(QPen(QColor(255, 255, 255), 2))
+        icon_radius = 6
+        painter.drawArc(QRectF(rotate_x - icon_radius, rotate_y - icon_radius, icon_radius * 2, icon_radius * 2), 
+                       45 * 16, 270 * 16)
+        
+        # Delete handle
+        painter.setBrush(QColor(255, 80, 80))
+        painter.setPen(QPen(QColor(255, 255, 255), 2))
+        delete_rect = QRectF(delete_x - button_size/2, delete_y - button_size/2, button_size, button_size)
+        painter.drawEllipse(delete_rect)
+        self.selection_handles.append(("delete", delete_rect))
+        
+        # Draw X icon
+        painter.drawLine(QPointF(delete_x - 6, delete_y - 6), QPointF(delete_x + 6, delete_y + 6))
+        painter.drawLine(QPointF(delete_x + 6, delete_y - 6), QPointF(delete_x - 6, delete_y + 6))
+        
+        if self.selected_component.get("type") == "segment":
+            # Resize length handle
+            painter.setBrush(QColor(100, 255, 150))
+            painter.setPen(QPen(QColor(255, 255, 255), 2))
+            resize_rect = QRectF(resize_x - handle_size/2, resize_y - handle_size/2, handle_size, handle_size)
+            painter.drawRect(resize_rect)
+            self.selection_handles.append(("resize_length", resize_rect))
+            
+            # Draw arrows icon
+            painter.drawLine(QPointF(resize_x - 6, resize_y), QPointF(resize_x + 6, resize_y))
+            painter.drawLine(QPointF(resize_x + 3, resize_y - 3), QPointF(resize_x + 6, resize_y))
+            painter.drawLine(QPointF(resize_x + 3, resize_y + 3), QPointF(resize_x + 6, resize_y))
+            
+            # Thickness handle
+            painter.setBrush(QColor(255, 200, 100))
+            thick_rect = QRectF(thick_x - handle_size/2, thick_y - handle_size/2, handle_size, handle_size)
+            painter.drawRect(thick_rect)
+            self.selection_handles.append(("resize_thickness", thick_rect))
+
 

@@ -44,10 +44,11 @@
       "components": [
         {
           "type": "segment",
-          "offset": 50.0,
+          "offset": -60,
+          "perp_offset": -40,
           "length": 40.0,
-          "thickness": 6.0,
-          "angle_offset": 0.0,
+          "thickness": 4.0,
+          "angle_offset": 90.0,
           "tip_offset": 0.0,
           "draggable": true
         }
