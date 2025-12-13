@@ -3,13 +3,22 @@ Control panel widget for managing crosshair settings.
 """
 from PyQt6.QtWidgets import (QApplication, QLabel, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QSlider, QFrame, 
-                             QGraphicsDropShadowEffect)
+                             QGraphicsDropShadowEffect, QComboBox)
 from PyQt6.QtGui import QPixmap, QColor
 from PyQt6.QtCore import Qt
 from utils import mirror_vertical, mirror_horizontal, get_art_list, transparent
 from image_manager import ImageManagerDialog
 from hotkey_manager import HotkeyManagerDialog
-from standard_crosshair import StandardCrosshairDialog, save_crosshair_visibility
+from standard_crosshair import (
+    StandardCrosshairDialog,
+    load_settings_from_disk,
+    render_crosshair_on_label,
+    save_crosshair_visibility,
+    save_settings_to_disk,
+    _apply_preset_dict_to_settings,
+    _bind_settings_to_label,
+    _sync_fan_timer_state,
+)
 
 
 class DarkControlPanel(QWidget):
@@ -27,6 +36,7 @@ class DarkControlPanel(QWidget):
         self.image_manager = None
         self.hotkey_manager = None
         self.crosshair_dialog = None
+        self.crosshair_preset_combo = None
         self.init_ui()
         
     def init_ui(self):
@@ -167,6 +177,69 @@ class DarkControlPanel(QWidget):
         self._update_image_toggle_text()
         self._update_crosshair_toggle_text()
 
+        # Standard crosshair preset/profile picker
+        preset_container = QFrame()
+        preset_container.setStyleSheet(
+            """
+            QFrame {
+                background-color: rgba(40, 40, 50, 150);
+                border-radius: 10px;
+                padding: 10px;
+            }
+            """
+        )
+        preset_layout = QHBoxLayout(preset_container)
+        preset_layout.setContentsMargins(10, 10, 10, 10)
+        preset_layout.setSpacing(10)
+
+        preset_label = QLabel("Preset")
+        preset_label.setStyleSheet(
+            """
+            QLabel {
+                color: #B0B0B0;
+                font-size: 13px;
+                background: transparent;
+                min-width: 52px;
+            }
+            """
+        )
+
+        self.crosshair_preset_combo = QComboBox()
+        self.crosshair_preset_combo.setFixedHeight(30)
+        self.crosshair_preset_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.crosshair_preset_combo.setStyleSheet(
+            """
+            QComboBox {
+                background-color: rgba(30, 30, 35, 230);
+                color: #E0E0E0;
+                border: 1px solid rgba(100, 100, 120, 120);
+                border-radius: 6px;
+                padding: 4px 8px;
+                font-size: 12px;
+            }
+            QComboBox:hover {
+                border: 1px solid rgba(160, 160, 180, 160);
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 18px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: rgba(30, 30, 35, 245);
+                color: #E0E0E0;
+                selection-background-color: rgba(0, 188, 212, 160);
+                selection-color: white;
+                border: 1px solid rgba(100, 100, 120, 120);
+                outline: none;
+            }
+            """
+        )
+        self.crosshair_preset_combo.currentTextChanged.connect(self._on_crosshair_preset_selected)
+
+        preset_layout.addWidget(preset_label)
+        preset_layout.addWidget(self.crosshair_preset_combo, 1)
+        content_layout.addWidget(preset_container)
+
         # Standard crosshair button
         standard_btn = self.create_button("🎯 Standard Crosshair", "#00BCD4")
         standard_btn.clicked.connect(self.open_standard_crosshair_dialog)
@@ -221,8 +294,66 @@ class DarkControlPanel(QWidget):
             }
         """)
         content_layout.addWidget(info_label)
+
+        self._refresh_crosshair_presets_ui()
         
         return content_frame
+
+    def _refresh_crosshair_presets_ui(self):
+        """Refresh the preset/profile dropdown from persisted settings."""
+        if self.crosshair_preset_combo is None:
+            return
+        try:
+            settings = load_settings_from_disk()
+            presets = getattr(settings, "presets", {})
+            names = list(presets.keys()) if isinstance(presets, dict) else []
+            if not names:
+                names = ["Default"]
+
+            active = getattr(settings, "active_preset", "Default")
+            if active not in names:
+                active = names[0]
+
+            self.crosshair_preset_combo.blockSignals(True)
+            self.crosshair_preset_combo.clear()
+            self.crosshair_preset_combo.addItems(names)
+            idx = self.crosshair_preset_combo.findText(active)
+            if idx >= 0:
+                self.crosshair_preset_combo.setCurrentIndex(idx)
+            self.crosshair_preset_combo.blockSignals(False)
+        except Exception:
+            self.crosshair_preset_combo.blockSignals(False)
+
+    def _on_crosshair_preset_selected(self, preset_name: str):
+        """Apply the selected preset immediately."""
+        preset_name = (preset_name or "").strip()
+        if not preset_name:
+            return
+
+        try:
+            settings = load_settings_from_disk()
+            presets = getattr(settings, "presets", {})
+            if not isinstance(presets, dict) or preset_name not in presets:
+                return
+
+            settings.active_preset = preset_name
+            _apply_preset_dict_to_settings(settings, presets.get(preset_name, {}))
+            save_settings_to_disk(settings)
+
+            _bind_settings_to_label(self.crosshair_label, settings)
+            _sync_fan_timer_state(self.crosshair_label, settings)
+            render_crosshair_on_label(self.crosshair_label, settings)
+
+            self.crosshair_label.setVisible(bool(getattr(settings, "visible", True)))
+            if self.crosshair_label.isVisible():
+                self.crosshair_label.raise_()
+            self._update_crosshair_toggle_text()
+
+            if self.crosshair_dialog is not None:
+                self.crosshair_dialog.settings = settings
+                self.crosshair_dialog.sync_with_label()
+        except Exception:
+            return
     
     def _add_opacity_controls(self, layout):
         """Add opacity slider and label to the layout."""
@@ -409,11 +540,17 @@ class DarkControlPanel(QWidget):
         if self.crosshair_dialog is None:
             self.crosshair_dialog = StandardCrosshairDialog(self.crosshair_label, self)
             self.crosshair_dialog.visibility_changed.connect(self._on_crosshair_dialog_visibility)
-            self.crosshair_dialog.destroyed.connect(lambda: setattr(self, "crosshair_dialog", None))
+            if hasattr(self.crosshair_dialog, "presets_changed"):
+                self.crosshair_dialog.presets_changed.connect(self._refresh_crosshair_presets_ui)
+            self.crosshair_dialog.destroyed.connect(self._on_crosshair_dialog_destroyed)
         self.crosshair_dialog.sync_with_label()
         self.crosshair_dialog.show()
         self.crosshair_dialog.raise_()
         self.crosshair_dialog.activateWindow()
+
+    def _on_crosshair_dialog_destroyed(self, *args):
+        self.crosshair_dialog = None
+        self._refresh_crosshair_presets_ui()
 
     def _on_crosshair_dialog_visibility(self, visible):
         """Keep control panel toggle text in sync with dialog."""

@@ -1,5 +1,5 @@
 {
-    "toggle_visibility": "f1",
+    "toggle_visibility": "ctrl+alt",
     "mirror_vertical": "f3",
     "mirror_horizontal": "f4",
     "switch_image": "f2"

@@ -1,0 +1,34 @@
+{
+  "presets": {
+    "My Green Plus": {
+      "crosshair_style": "plus",
+      "length": 24,
+      "gap": 6,
+      "thickness": 6,
+      "rotation": 0,
+      "center_dot": false,
+      "dot_size": 6,
+      "dot_shape": "circle",
+      "custom_color": "#00FF7A",
+      "outline": true,
+      "outline_thickness": 2,
+      "outline_color": "#000000",
+      "line_rounding": 8
+    },
+    "Dot Only": {
+      "crosshair_style": "plus",
+      "length": 0,
+      "gap": 0,
+      "thickness": 6,
+      "rotation": 0,
+      "center_dot": true,
+      "dot_size": 10,
+      "dot_shape": "circle",
+      "custom_color": "#FFFFFF",
+      "outline": true,
+      "outline_thickness": 2,
+      "outline_color": "#000000",
+      "line_rounding": 10
+    }
+  }
+}

@@ -28,11 +28,15 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QStackedWidget,
     QAbstractItemView,
+    QComboBox,
+    QInputDialog,
+    QSizePolicy,
 )
-from PyQt6.QtGui import QColor, QPainter, QPixmap, QPainterPath, QPen
+from PyQt6.QtGui import QColor, QPainter, QPixmap, QPainterPath, QPen, QKeySequence, QShortcut
 from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal, QTimer
 
 CONFIG_PATH = Path(__file__).resolve().with_name("standard_crosshair_settings.json")
+PROFILES_IMPORT_PATH = Path(__file__).resolve().with_name("crosshair_profiles.json")
 MAX_CUSTOM_COLORS = 16
 ALLOWED_DOT_SHAPES = {"circle", "square", "diamond"}
 ALLOWED_CROSSHAIR_STYLES = {"plus", "x"}
@@ -77,7 +81,7 @@ LINE_FIELD_LIMITS = {
     "length": (5, 200, "px"),
     "gap": (0, 120, "px"),
     "thickness": (1, 30, "px"),
-    "angle_offset": (-90, 90, "°"),
+    "angle_offset": (-720, 720, "°"),
     "tip_offset": (-80, 80, "px"),
 }
 LINE_LABELS = {
@@ -86,14 +90,13 @@ LINE_LABELS = {
     "top": "Top",
     "bottom": "Bottom",
 }
-COMPONENT_TYPES = {"segment", "circle"}
 COMPONENT_FIELD_LIMITS = {
     "segment": {
         "offset": (-400.0, 600.0, "px"),
         "perp_offset": (-400.0, 400.0, "px"),
         "length": (0.0, 600.0, "px"),
         "thickness": (1.0, 120.0, "px"),
-        "angle_offset": (-90.0, 90.0, "°"),
+        "angle_offset": (-720.0, 720.0, "°"),
         "tip_offset": (-120.0, 120.0, "px"),
     },
     "circle": {
@@ -101,7 +104,183 @@ COMPONENT_FIELD_LIMITS = {
         "perp_offset": (-400.0, 400.0, "px"),
         "radius": (1.0, 200.0, "px"),
     },
+    "polygon": {
+        "offset": (-400.0, 600.0, "px"),
+        "perp_offset": (-400.0, 400.0, "px"),
+        "radius": (1.0, 240.0, "px"),
+        "sides": (3.0, 12.0, ""),
+        "angle_offset": (-720.0, 720.0, "°"),
+    },
 }
+
+
+def _coerce_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        raw = value.strip().lower()
+        if raw in ("1", "true", "yes", "y", "on"):
+            return True
+        if raw in ("0", "false", "no", "n", "off", ""):
+            return False
+    return default
+
+
+def _unique_preset_name(existing: dict, name: str) -> str:
+    base = (name or "Imported").strip()[:32] or "Imported"
+    if base not in existing:
+        return base
+    i = 2
+    while True:
+        candidate = f"{base} ({i})"
+        if candidate not in existing:
+            return candidate
+        i += 1
+
+
+def _merge_external_presets(settings: "StandardCrosshairSettings") -> None:
+    """Merge presets from `crosshair_profiles.json` into settings.presets.
+
+    Supported formats:
+    - {"presets": {"Name": { ...preset dict... }, ...}}
+    - {"Name": { ...preset dict... }, ...}
+    - [{"name": "Name", ...preset dict...}, ...]
+
+    Name conflicts are resolved by renaming ("Name (2)", "Name (3)", ...).
+    """
+    try:
+        if not PROFILES_IMPORT_PATH.exists():
+            return
+        raw = json.loads(PROFILES_IMPORT_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return
+
+    if not isinstance(getattr(settings, "presets", None), dict):
+        settings.presets = {}
+    target: dict[str, dict] = settings.presets
+
+    def maybe_add(name: str, preset: object) -> None:
+        if not isinstance(name, str) or not name.strip():
+            return
+        if not isinstance(preset, dict):
+            return
+        final_name = _unique_preset_name(target, name.strip())
+        target[final_name] = dict(preset)
+
+    if isinstance(raw, dict):
+        container = raw.get("presets") if isinstance(raw.get("presets"), dict) else raw
+        if isinstance(container, dict):
+            for n, p in container.items():
+                maybe_add(str(n), p)
+        elif isinstance(raw.get("presets"), list):
+            for entry in raw.get("presets", []):
+                if isinstance(entry, dict) and "name" in entry:
+                    name = str(entry.get("name", "")).strip()
+                    preset = dict(entry)
+                    preset.pop("name", None)
+                    maybe_add(name, preset)
+    elif isinstance(raw, list):
+        for entry in raw:
+            if isinstance(entry, dict) and "name" in entry:
+                name = str(entry.get("name", "")).strip()
+                preset = dict(entry)
+                preset.pop("name", None)
+                maybe_add(name, preset)
+
+
+# Extend supported types. Internally we keep "segment" for backward compatibility
+# but present it as "Line" in the UI.
+COMPONENT_TYPES = {"segment", "circle", "square", "triangle", "polygon", "curve"}
+COMPONENT_FIELD_LIMITS.update(
+    {
+        "square": {
+            "offset": (-400.0, 600.0, "px"),
+            "perp_offset": (-400.0, 400.0, "px"),
+            "size": (1.0, 300.0, "px"),
+            "angle_offset": (-720.0, 720.0, "°"),
+        },
+        "triangle": {
+            "offset": (-400.0, 600.0, "px"),
+            "perp_offset": (-400.0, 400.0, "px"),
+            "radius": (1.0, 240.0, "px"),
+            "angle_offset": (-720.0, 720.0, "°"),
+        },
+        "curve": {
+            "offset": (-400.0, 600.0, "px"),
+            "perp_offset": (-400.0, 400.0, "px"),
+            "thickness": (0.5, 120.0, "px"),
+            "angle_offset": (-720.0, 720.0, "°"),
+            "start_dx": (-600.0, 600.0, "px"),
+            "start_dy": (-600.0, 600.0, "px"),
+            "ctrl_dx": (-600.0, 600.0, "px"),
+            "ctrl_dy": (-600.0, 600.0, "px"),
+            "end_dx": (-600.0, 600.0, "px"),
+            "end_dy": (-600.0, 600.0, "px"),
+        },
+    }
+)
+
+
+def _default_component_field_value(comp_type: str, field_name: str) -> float:
+    if comp_type == "segment":
+        defaults = {
+            "offset": 0.0,
+            "perp_offset": 0.0,
+            "length": 40.0,
+            "thickness": 6.0,
+            "angle_offset": 0.0,
+            "tip_offset": 0.0,
+        }
+        return float(defaults.get(field_name, 0.0))
+    if comp_type == "circle":
+        defaults = {
+            "offset": 20.0,
+            "perp_offset": 0.0,
+            "radius": 6.0,
+        }
+        return float(defaults.get(field_name, 0.0))
+    if comp_type == "polygon":
+        defaults = {
+            "offset": 20.0,
+            "perp_offset": 0.0,
+            "radius": 10.0,
+            "sides": 3.0,
+            "angle_offset": 0.0,
+        }
+        return float(defaults.get(field_name, 0.0))
+    if comp_type == "square":
+        defaults = {
+            "offset": 20.0,
+            "perp_offset": 0.0,
+            "size": 18.0,
+            "angle_offset": 0.0,
+        }
+        return float(defaults.get(field_name, 0.0))
+    if comp_type == "triangle":
+        defaults = {
+            "offset": 20.0,
+            "perp_offset": 0.0,
+            "radius": 12.0,
+            "angle_offset": 0.0,
+        }
+        return float(defaults.get(field_name, 0.0))
+    if comp_type == "curve":
+        defaults = {
+            "offset": 0.0,
+            "perp_offset": 0.0,
+            "thickness": 3.0,
+            "angle_offset": 0.0,
+            "start_dx": -20.0,
+            "start_dy": 0.0,
+            "ctrl_dx": 0.0,
+            "ctrl_dy": 0.0,
+            "end_dx": 20.0,
+            "end_dy": 0.0,
+        }
+        return float(defaults.get(field_name, 0.0))
+    return 0.0
 
 
 def clamp(value: int, minimum: int, maximum: int) -> int:
@@ -159,6 +338,68 @@ class StandardCrosshairSettings:
     draggable_mode: bool = False
     grid_snap_size: int = 5
 
+    # Presets
+    active_preset: str = "Default"
+    presets: dict[str, dict] = field(default_factory=dict)
+
+
+def _settings_to_preset_dict(settings: StandardCrosshairSettings) -> dict:
+    data = asdict(settings)
+    data.pop("presets", None)
+    data.pop("active_preset", None)
+    return data
+
+
+def _apply_preset_dict_to_settings(settings: StandardCrosshairSettings, preset: dict) -> None:
+    if not isinstance(preset, dict):
+        return
+    for key, value in preset.items():
+        if key in ("presets", "active_preset"):
+            continue
+        if hasattr(settings, key):
+            setattr(settings, key, value)
+
+
+def _bind_settings_to_label(label: QLabel, settings: StandardCrosshairSettings) -> None:
+    setattr(label, "_standard_crosshair_settings", settings)
+
+
+def _ensure_fan_timer(label: QLabel) -> QTimer:
+    timer = getattr(label, "_standard_crosshair_fan_timer", None)
+    if isinstance(timer, QTimer):
+        return timer
+
+    timer = QTimer(label)
+    timer.setInterval(16)
+
+    def on_tick() -> None:
+        settings = getattr(label, "_standard_crosshair_settings", None)
+        if not isinstance(settings, StandardCrosshairSettings):
+            return
+        if not getattr(settings, "fan_enabled", False):
+            return
+        interval_seconds = timer.interval() / 1000.0
+        angle = float(getattr(label, "_standard_crosshair_fan_angle", 0.0))
+        angle = (angle + float(getattr(settings, "fan_speed", 0)) * interval_seconds) % 360
+        setattr(label, "_standard_crosshair_fan_angle", angle)
+        render_crosshair_on_label(label, settings, extra_rotation=angle)
+
+    timer.timeout.connect(on_tick)
+    setattr(label, "_standard_crosshair_fan_timer", timer)
+    setattr(label, "_standard_crosshair_fan_angle", 0.0)
+    return timer
+
+
+def _sync_fan_timer_state(label: QLabel, settings: StandardCrosshairSettings) -> None:
+    timer = _ensure_fan_timer(label)
+    if getattr(settings, "fan_enabled", False):
+        if not timer.isActive():
+            timer.start()
+    else:
+        if timer.isActive():
+            timer.stop()
+        setattr(label, "_standard_crosshair_fan_angle", 0.0)
+
 
 def load_settings_from_disk() -> StandardCrosshairSettings:
     """Load saved crosshair settings if available."""
@@ -171,6 +412,20 @@ def load_settings_from_disk() -> StandardCrosshairSettings:
                     setattr(settings, key, value)
         except Exception:
             pass
+
+    # Seed presets (templates) for older configs or first-run.
+    presets_ok = isinstance(getattr(settings, "presets", None), dict) and bool(settings.presets)
+    if not presets_ok:
+        _seed_builtin_presets(settings)
+
+    # Optional: merge presets from external import file.
+    _merge_external_presets(settings)
+
+    # Apply active preset before sanitizing.
+    presets = settings.presets if isinstance(settings.presets, dict) else {}
+    active_name = settings.active_preset if isinstance(settings.active_preset, str) else "Default"
+    if presets and active_name in presets and isinstance(presets.get(active_name), dict):
+        _apply_preset_dict_to_settings(settings, presets[active_name])
     settings.gap = max(0, settings.gap)
     settings.dot_size = clamp(settings.dot_size, 2, 32)
     if settings.dot_shape not in ALLOWED_DOT_SHAPES:
@@ -224,24 +479,44 @@ def load_settings_from_disk() -> StandardCrosshairSettings:
             if not isinstance(comp, dict):
                 continue
             comp_type = comp.get("type")
+            # Migrate old polygon -> triangle (per new UX).
+            if comp_type == "polygon":
+                comp_type = "triangle"
             if comp_type not in COMPONENT_TYPES:
                 continue
             limits = COMPONENT_FIELD_LIMITS[comp_type]
             sanitized_comp = {"type": comp_type}
-            valid = True
             for field_name, (minimum, maximum, _) in limits.items():
-                if field_name not in comp:
-                    valid = False
-                    break
-                try:
-                    value = float(comp[field_name])
-                except (TypeError, ValueError):
-                    valid = False
-                    break
-                value = max(minimum, min(maximum, value))
-                sanitized_comp[field_name] = value
-            if valid:
-                component_list.append(sanitized_comp)
+                raw_value = comp.get(field_name, None)
+                if raw_value is None:
+                    value = _default_component_field_value(comp_type, field_name)
+                else:
+                    try:
+                        value = float(raw_value)
+                    except (TypeError, ValueError):
+                        value = _default_component_field_value(comp_type, field_name)
+                sanitized_comp[field_name] = max(minimum, min(maximum, value))
+            if comp_type == "curve" and "points" in comp:
+                pts = comp.get("points")
+                if isinstance(pts, list):
+                    sanitized_pts: list[list[float]] = []
+                    for p in pts:
+                        if (
+                            isinstance(p, (list, tuple))
+                            and len(p) == 2
+                            and isinstance(p[0], (int, float))
+                            and isinstance(p[1], (int, float))
+                        ):
+                            sanitized_pts.append([float(p[0]), float(p[1])])
+                    if len(sanitized_pts) >= 2:
+                        sanitized_comp["points"] = sanitized_pts
+            if "draggable" in comp:
+                sanitized_comp["draggable"] = _coerce_bool(comp.get("draggable"), default=True)
+            if "_standard_base" in comp:
+                sanitized_comp["_standard_base"] = _coerce_bool(comp.get("_standard_base"), default=False)
+            if "_standard_linked" in comp:
+                sanitized_comp["_standard_linked"] = _coerce_bool(comp.get("_standard_linked"), default=True)
+            component_list.append(sanitized_comp)
         if component_list:
             sanitized_components[key] = component_list
     settings.line_components = sanitized_components
@@ -271,28 +546,50 @@ def load_settings_from_disk() -> StandardCrosshairSettings:
                 if not isinstance(component, dict):
                     continue
                 comp_type = component.get("type")
+                # Migrate old polygon -> triangle (per new UX).
+                if comp_type == "polygon":
+                    comp_type = "triangle"
                 if comp_type not in COMPONENT_TYPES:
                     continue
                 limits = COMPONENT_FIELD_LIMITS[comp_type]
                 sanitized_component = {"type": comp_type}
-                valid_component = True
                 for field_name, (minimum, maximum, _) in limits.items():
-                    if field_name not in component:
-                        valid_component = False
-                        break
-                    try:
-                        value = float(component[field_name])
-                    except (TypeError, ValueError):
-                        valid_component = False
-                        break
+                    raw_value = component.get(field_name, None)
+                    if raw_value is None:
+                        value = _default_component_field_value(comp_type, field_name)
+                    else:
+                        try:
+                            value = float(raw_value)
+                        except (TypeError, ValueError):
+                            value = _default_component_field_value(comp_type, field_name)
                     sanitized_component[field_name] = max(minimum, min(maximum, value))
-                if valid_component:
-                    sanitized_stack.append(sanitized_component)
+                if comp_type == "curve" and "points" in component:
+                    pts = component.get("points")
+                    if isinstance(pts, list):
+                        sanitized_pts: list[list[float]] = []
+                        for p in pts:
+                            if (
+                                isinstance(p, (list, tuple))
+                                and len(p) == 2
+                                and isinstance(p[0], (int, float))
+                                and isinstance(p[1], (int, float))
+                            ):
+                                sanitized_pts.append([float(p[0]), float(p[1])])
+                        if len(sanitized_pts) >= 2:
+                            sanitized_component["points"] = sanitized_pts
+                if "draggable" in component:
+                    sanitized_component["draggable"] = _coerce_bool(component.get("draggable"), default=True)
+                if "_standard_base" in component:
+                    sanitized_component["_standard_base"] = _coerce_bool(component.get("_standard_base"), default=False)
+                if "_standard_linked" in component:
+                    sanitized_component["_standard_linked"] = _coerce_bool(component.get("_standard_linked"), default=True)
+                sanitized_stack.append(sanitized_component)
         sanitized_layers.append(
             {
                 "id": layer_id,
                 "label": label[:48],
-                "enabled": bool(entry.get("enabled", True)),
+                "enabled": _coerce_bool(entry.get("enabled", True), default=True),
+                "draggable": _coerce_bool(entry.get("draggable", False), default=False),
                 "angle": angle,
                 "angle_offset": angle_offset,
                 "gap": max(0.0, gap_value),
@@ -303,7 +600,78 @@ def load_settings_from_disk() -> StandardCrosshairSettings:
             }
         )
     settings.line_layers = sanitized_layers
+
+    # Normalize presets and ensure at least one exists.
+    normalized_presets: dict[str, dict] = {}
+    for name, preset in (presets.items() if isinstance(presets, dict) else []):
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if isinstance(preset, dict):
+            normalized_presets[name.strip()[:32]] = dict(preset)
+    if not normalized_presets:
+        normalized_presets = {"Default": _settings_to_preset_dict(settings)}
+        active_name = "Default"
+    if active_name not in normalized_presets:
+        active_name = next(iter(normalized_presets.keys()))
+    settings.presets = normalized_presets
+    settings.active_preset = active_name
     return settings
+
+
+def _seed_builtin_presets(settings: StandardCrosshairSettings) -> None:
+    """Populate the built-in preset list.
+
+    This should match the presets users see on first run.
+    """
+    base = _settings_to_preset_dict(settings)
+    templates: dict[str, dict] = {"Default": base}
+
+    dot = dict(base)
+    dot.update(
+        {
+            "crosshair_style": "plus",
+            "center_dot": True,
+            "dot_shape": "circle",
+            "dot_size": 6,
+            "length": 0,
+            "gap": 0,
+            "thickness": 0,
+            "outline": 0,
+        }
+    )
+    templates["Dot"] = dot
+
+    small_plus = dict(base)
+    small_plus.update(
+        {
+            "crosshair_style": "plus",
+            "center_dot": False,
+            "length": 18,
+            "gap": 6,
+            "thickness": 3,
+            "outline": 1,
+        }
+    )
+    templates["Small Plus"] = small_plus
+
+    circle_dot = dict(base)
+    circle_dot.update(
+        {
+            "crosshair_style": "circle",
+            "center_dot": True,
+            "dot_shape": "circle",
+            "dot_size": 5,
+            "length": 22,
+            "gap": 8,
+            "thickness": 3,
+            "outline": 1,
+        }
+    )
+    templates["Circle + Dot"] = circle_dot
+
+    settings.presets = templates
+    if not isinstance(getattr(settings, "active_preset", None), str) or settings.active_preset not in templates:
+        settings.active_preset = "Default"
 
 
 def save_settings_to_disk(settings: StandardCrosshairSettings) -> None:
@@ -337,6 +705,8 @@ def render_crosshair_on_label(
 def initialize_standard_crosshair(label: QLabel) -> StandardCrosshairSettings:
     """Apply saved settings to the label at startup."""
     settings = load_settings_from_disk()
+    _bind_settings_to_label(label, settings)
+    _sync_fan_timer_state(label, settings)
     render_crosshair_on_label(label, settings)
     label.setVisible(settings.visible)
     if settings.visible:
@@ -434,6 +804,172 @@ def generate_crosshair_pixmap(
         painter.drawEllipse(QPointF(0, 0), radius, radius)
         painter.restore()
 
+    def draw_polygon_shape(
+        total_angle: float,
+        offset: float,
+        radius: float,
+        sides: int,
+        perp_offset: float = 0.0,
+        component_rotation: float = 0.0,
+    ) -> None:
+        import math
+
+        radius = max(0.1, float(radius))
+        sides = int(max(3, min(12, sides)))
+        painter.save()
+        painter.translate(center_x, center_y)
+        painter.rotate(total_angle + total_rotation)
+        painter.translate(offset, perp_offset)
+        if abs(component_rotation) > 0.01:
+            painter.rotate(component_rotation)
+
+        step = (2.0 * math.pi) / float(sides)
+        path = QPainterPath()
+        for i in range(sides):
+            a = (i * step) - (math.pi / 2.0)  # start at top
+            x = radius * math.cos(a)
+            y = radius * math.sin(a)
+            if i == 0:
+                path.moveTo(x, y)
+            else:
+                path.lineTo(x, y)
+        path.closeSubpath()
+
+        if outline > 0:
+            painter.setBrush(outline_color)
+            painter.drawPath(path)
+        painter.setBrush(color)
+        painter.drawPath(path)
+        painter.restore()
+
+    def draw_square_shape(
+        total_angle: float,
+        offset: float,
+        size: float,
+        perp_offset: float = 0.0,
+        component_rotation: float = 0.0,
+    ) -> None:
+        size = max(0.1, float(size))
+        half = size / 2.0
+        painter.save()
+        painter.translate(center_x, center_y)
+        painter.rotate(total_angle + total_rotation)
+        painter.translate(offset, perp_offset)
+        if abs(component_rotation) > 0.01:
+            painter.rotate(component_rotation)
+
+        rect = QRectF(-half, -half, size, size)
+        if outline > 0:
+            painter.setBrush(outline_color)
+            painter.drawRect(rect.adjusted(-outline, -outline, outline, outline))
+        painter.setBrush(color)
+        painter.drawRect(rect)
+        painter.restore()
+
+    def draw_curve_shape(
+        total_angle: float,
+        offset: float,
+        perp_offset: float,
+        start_dx: float,
+        start_dy: float,
+        ctrl_dx: float,
+        ctrl_dy: float,
+        end_dx: float,
+        end_dy: float,
+        thickness: float,
+        component_rotation: float = 0.0,
+    ) -> None:
+        thickness = max(0.1, float(thickness))
+        painter.save()
+        painter.translate(center_x, center_y)
+        painter.rotate(total_angle + total_rotation)
+        painter.translate(offset, perp_offset)
+        if abs(component_rotation) > 0.01:
+            painter.rotate(component_rotation)
+
+        path = QPainterPath()
+        path.moveTo(QPointF(float(start_dx), float(start_dy)))
+        path.quadTo(QPointF(float(ctrl_dx), float(ctrl_dy)), QPointF(float(end_dx), float(end_dy)))
+
+        cap = Qt.PenCapStyle.RoundCap if rounding > 0 else Qt.PenCapStyle.SquareCap
+        join = Qt.PenJoinStyle.RoundJoin if rounding > 0 else Qt.PenJoinStyle.MiterJoin
+
+        if outline > 0:
+            pen_o = QPen(outline_color)
+            pen_o.setCapStyle(cap)
+            pen_o.setJoinStyle(join)
+            pen_o.setWidthF(thickness + (2.0 * outline))
+            painter.setPen(pen_o)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(path)
+
+        pen = QPen(color)
+        pen.setCapStyle(cap)
+        pen.setJoinStyle(join)
+        pen.setWidthF(thickness)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+        painter.restore()
+
+    def draw_curve_poly_shape(
+        total_angle: float,
+        offset: float,
+        perp_offset: float,
+        points: list[list[float]],
+        thickness: float,
+        component_rotation: float = 0.0,
+    ) -> None:
+        thickness = max(0.1, float(thickness))
+        if not points or len(points) < 2:
+            return
+        painter.save()
+        painter.translate(center_x, center_y)
+        painter.rotate(total_angle + total_rotation)
+        painter.translate(offset, perp_offset)
+        if abs(component_rotation) > 0.01:
+            painter.rotate(component_rotation)
+
+        pts: list[QPointF] = []
+        for p in points:
+            if isinstance(p, (list, tuple)) and len(p) == 2 and isinstance(p[0], (int, float)) and isinstance(p[1], (int, float)):
+                pts.append(QPointF(float(p[0]), float(p[1])))
+        if len(pts) < 2:
+            painter.restore()
+            return
+
+        path = QPainterPath()
+        path.moveTo(pts[0])
+        if len(pts) == 2:
+            path.lineTo(pts[1])
+        else:
+            # Smooth freehand polyline using quadratic midpoints.
+            for i in range(1, len(pts) - 1):
+                mid = QPointF((pts[i].x() + pts[i + 1].x()) / 2.0, (pts[i].y() + pts[i + 1].y()) / 2.0)
+                path.quadTo(pts[i], mid)
+            path.lineTo(pts[-1])
+
+        cap = Qt.PenCapStyle.RoundCap if rounding > 0 else Qt.PenCapStyle.SquareCap
+        join = Qt.PenJoinStyle.RoundJoin if rounding > 0 else Qt.PenJoinStyle.MiterJoin
+
+        if outline > 0:
+            pen_o = QPen(outline_color)
+            pen_o.setCapStyle(cap)
+            pen_o.setJoinStyle(join)
+            pen_o.setWidthF(thickness + (2.0 * outline))
+            painter.setPen(pen_o)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(path)
+
+        pen = QPen(color)
+        pen.setCapStyle(cap)
+        pen.setJoinStyle(join)
+        pen.setWidthF(thickness)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+        painter.restore()
+
     def render_component_stack(component_stack, base_angle: float, angle_offset: float, fallback_thickness: float) -> bool:
         if not isinstance(component_stack, list) or not component_stack:
             return False
@@ -457,6 +993,71 @@ def generate_crosshair_pixmap(
                     perp_offset = float(component.get("perp_offset", 0.0))
                     radius = float(component.get("radius", fallback_thickness / 2))
                     draw_circle_shape(base_angle + angle_offset, offset, radius, perp_offset)
+                    rendered = True
+                elif ctype == "polygon":
+                    offset = float(component.get("offset", 0.0))
+                    perp_offset = float(component.get("perp_offset", 0.0))
+                    radius = float(component.get("radius", fallback_thickness / 2))
+                    sides = int(round(float(component.get("sides", 3.0))))
+                    component_angle = float(component.get("angle_offset", 0.0))
+                    # Legacy: polygon is treated as triangle in the new UX.
+                    draw_polygon_shape(base_angle + angle_offset, offset, radius, 3, perp_offset, component_angle)
+                    rendered = True
+                elif ctype == "triangle":
+                    offset = float(component.get("offset", 0.0))
+                    perp_offset = float(component.get("perp_offset", 0.0))
+                    radius = float(component.get("radius", fallback_thickness / 2))
+                    component_angle = float(component.get("angle_offset", 0.0))
+                    draw_polygon_shape(base_angle + angle_offset, offset, radius, 3, perp_offset, component_angle)
+                    rendered = True
+                elif ctype == "square":
+                    offset = float(component.get("offset", 0.0))
+                    perp_offset = float(component.get("perp_offset", 0.0))
+                    size = float(component.get("size", fallback_thickness * 2.0))
+                    component_angle = float(component.get("angle_offset", 0.0))
+                    draw_square_shape(base_angle + angle_offset, offset, size, perp_offset, component_angle)
+                    rendered = True
+                elif ctype == "curve":
+                    offset = float(component.get("offset", 0.0))
+                    perp_offset = float(component.get("perp_offset", 0.0))
+                    thickness = float(component.get("thickness", fallback_thickness))
+                    component_angle = float(component.get("angle_offset", 0.0))
+                    pts = component.get("points")
+                    if isinstance(pts, list):
+                        if len(pts) >= 2:
+                            draw_curve_poly_shape(
+                                base_angle + angle_offset,
+                                offset,
+                                perp_offset,
+                                pts,
+                                thickness,
+                                component_angle,
+                            )
+                            rendered = True
+                            continue
+                        # If points exist but are too short, don't draw legacy bezier.
+                        continue
+
+                    else:
+                        start_dx = float(component.get("start_dx", -20.0))
+                        start_dy = float(component.get("start_dy", 0.0))
+                        ctrl_dx = float(component.get("ctrl_dx", 0.0))
+                        ctrl_dy = float(component.get("ctrl_dy", 0.0))
+                        end_dx = float(component.get("end_dx", 20.0))
+                        end_dy = float(component.get("end_dy", 0.0))
+                        draw_curve_shape(
+                            base_angle + angle_offset,
+                            offset,
+                            perp_offset,
+                            start_dx,
+                            start_dy,
+                            ctrl_dx,
+                            ctrl_dy,
+                            end_dx,
+                            end_dy,
+                            thickness,
+                            component_angle,
+                        )
                     rendered = True
             except (TypeError, ValueError):
                 continue
@@ -550,11 +1151,14 @@ class StandardCrosshairDialog(QWidget):
     """Floating dialog that lets users tweak a basic crosshair."""
 
     visibility_changed = pyqtSignal(bool)
+    presets_changed = pyqtSignal()
 
     def __init__(self, label: QLabel, parent=None):
         super().__init__(parent)
         self.label = label
         self.settings = load_settings_from_disk()
+        _bind_settings_to_label(self.label, self.settings)
+        _sync_fan_timer_state(self.label, self.settings)
         self.drag_position = None
         self.hex_input = None
         self._hex_syncing = False
@@ -607,7 +1211,9 @@ class StandardCrosshairDialog(QWidget):
         wrapper_layout.setContentsMargins(0, 0, 0, 0)
         wrapper_layout.addWidget(main_frame)
 
-        self.setFixedSize(440, 520)
+        # Wider by default so preset controls fit, but allow resizing.
+        self.setMinimumSize(440, 520)
+        self.resize(500, 520)
 
     def _create_title_bar(self) -> QFrame:
         title_bar = QFrame()
@@ -646,13 +1252,91 @@ class StandardCrosshairDialog(QWidget):
         frame = QFrame()
         frame.setStyleSheet("QFrame { background: transparent; }")
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(20, 15, 20, 20)
+        layout.setContentsMargins(16, 15, 16, 18)
         layout.setSpacing(12)
 
         info = QLabel("Configure a simple crosshair without importing images.")
         info.setWordWrap(True)
         info.setStyleSheet("color: rgba(200, 200, 200, 170);")
         layout.addWidget(info)
+
+        # Presets
+        presets_frame = QFrame()
+        presets_frame.setStyleSheet(
+            """
+            QFrame {
+                background-color: rgba(30, 30, 35, 200);
+                border-radius: 12px;
+                padding: 10px;
+            }
+        """
+        )
+        presets_outer = QVBoxLayout(presets_frame)
+        presets_outer.setContentsMargins(10, 6, 10, 6)
+        presets_outer.setSpacing(6)
+
+        top_row = QHBoxLayout()
+        top_row.setSpacing(8)
+        preset_label = QLabel("Preset")
+        preset_label.setStyleSheet("color: rgba(220, 220, 220, 210); font-weight: bold; font-size: 11px;")
+        top_row.addWidget(preset_label)
+
+        self.preset_combo = QComboBox()
+        self.preset_combo.setStyleSheet(
+            """
+            QComboBox {
+                background-color: rgba(40, 40, 50, 200);
+                border: 1px solid rgba(100, 100, 120, 120);
+                border-radius: 7px;
+                padding: 4px 8px;
+                color: #E0E0E0;
+            }
+            QComboBox::drop-down { border: none; width: 22px; }
+            QComboBox QAbstractItemView {
+                background-color: rgba(30, 30, 35, 240);
+                color: #E0E0E0;
+                selection-background-color: rgba(92, 107, 192, 180);
+            }
+        """
+        )
+        self.preset_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.preset_combo.setFixedHeight(28)
+        top_row.addWidget(self.preset_combo, 1)
+        presets_outer.addLayout(top_row)
+
+        def make_small_btn(text: str, bg: str) -> QPushButton:
+            btn = QPushButton(text)
+            btn.setFixedHeight(28)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                f"""
+                QPushButton {{
+                    background-color: {bg};
+                    color: white;
+                    border: none;
+                    border-radius: 8px;
+                    padding: 4px 10px;
+                    font-weight: bold;
+                }}
+                QPushButton:hover {{ background-color: rgba(255, 255, 255, 40); }}
+                """
+            )
+            return btn
+
+        self.preset_save_btn = make_small_btn("Save", "rgba(76, 175, 80, 180)")
+        self.preset_save_as_btn = make_small_btn("Save As", "rgba(96, 125, 139, 180)")
+        self.preset_delete_btn = make_small_btn("Delete", "rgba(200, 50, 50, 180)")
+        self.preset_reset_btn = make_small_btn("Reset", "rgba(255, 152, 0, 180)")
+
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(8)
+        bottom_row.addStretch()
+        bottom_row.addWidget(self.preset_reset_btn)
+        bottom_row.addWidget(self.preset_save_btn)
+        bottom_row.addWidget(self.preset_save_as_btn)
+        bottom_row.addWidget(self.preset_delete_btn)
+        presets_outer.addLayout(bottom_row)
+        layout.addWidget(presets_frame)
 
         self.visibility_btn = self._create_primary_button("👁️ Hide Crosshair", "#607D8B")
         self.visibility_btn.setCheckable(True)
@@ -677,6 +1361,95 @@ class StandardCrosshairDialog(QWidget):
 
         layout.addLayout(buttons_row)
         return frame
+
+    def _refresh_presets_ui(self) -> None:
+        if not hasattr(self, "preset_combo"):
+            return
+        if not isinstance(self.settings.presets, dict) or not self.settings.presets:
+            self.settings.presets = {"Default": _settings_to_preset_dict(self.settings)}
+            self.settings.active_preset = "Default"
+        if self.settings.active_preset not in self.settings.presets:
+            self.settings.active_preset = next(iter(self.settings.presets.keys()))
+
+        names = sorted(self.settings.presets.keys(), key=lambda s: s.lower())
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.clear()
+        self.preset_combo.addItems(names)
+        idx = self.preset_combo.findText(self.settings.active_preset)
+        if idx >= 0:
+            self.preset_combo.setCurrentIndex(idx)
+        self.preset_combo.blockSignals(False)
+
+        if not getattr(self, "_presets_wired", False):
+            self.preset_combo.currentTextChanged.connect(self._on_preset_selected)
+            self.preset_save_btn.clicked.connect(self._save_to_current_preset)
+            self.preset_save_as_btn.clicked.connect(self._save_as_preset)
+            self.preset_delete_btn.clicked.connect(self._delete_current_preset)
+            self.preset_reset_btn.clicked.connect(self._reset_presets)
+            self._presets_wired = True
+
+    def _on_preset_selected(self, name: str) -> None:
+        if not name or name not in self.settings.presets:
+            return
+        self.settings.active_preset = name
+        _apply_preset_dict_to_settings(self.settings, self.settings.presets[name])
+        self._sync_controls_from_settings()
+        self._persist_and_render()
+        self.presets_changed.emit()
+
+    def _save_to_current_preset(self) -> None:
+        name = self.settings.active_preset
+        if not name:
+            return
+        self.settings.presets[name] = _settings_to_preset_dict(self.settings)
+        self._persist_and_render()
+        self.presets_changed.emit()
+
+    def _save_as_preset(self) -> None:
+        name, ok = QInputDialog.getText(self, "Save Preset", "Preset name:")
+        if not ok:
+            return
+        name = (name or "").strip()[:32]
+        if not name:
+            return
+        self.settings.presets[name] = _settings_to_preset_dict(self.settings)
+        self.settings.active_preset = name
+        self._refresh_presets_ui()
+        self._persist_and_render()
+        self.presets_changed.emit()
+
+    def _delete_current_preset(self) -> None:
+        if not isinstance(self.settings.presets, dict) or len(self.settings.presets) <= 1:
+            return
+        name = self.settings.active_preset
+        if not name or name not in self.settings.presets:
+            return
+        self.settings.presets.pop(name, None)
+        self.settings.active_preset = next(iter(self.settings.presets.keys()))
+        self._refresh_presets_ui()
+        self._on_preset_selected(self.settings.active_preset)
+        self.presets_changed.emit()
+
+    def _reset_presets(self) -> None:
+        """Reset presets and settings to factory defaults."""
+        # Preserve current visibility so Reset doesn't unexpectedly hide/show.
+        current_visible = bool(getattr(self.settings, "visible", True))
+        defaults = StandardCrosshairSettings()
+        defaults.visible = current_visible
+        _seed_builtin_presets(defaults)
+        defaults.active_preset = "Default"
+
+        try:
+            for key, value in asdict(defaults).items():
+                if hasattr(self.settings, key):
+                    setattr(self.settings, key, value)
+        except Exception:
+            self.settings = defaults
+
+        self._refresh_presets_ui()
+        self._sync_controls_from_settings()
+        self._persist_and_render()
+        self.presets_changed.emit()
 
     def _create_slider_group(self) -> QFrame:
         frame = QFrame()
@@ -866,270 +1639,39 @@ class StandardCrosshairDialog(QWidget):
         layout.setSpacing(10)
         layout.addWidget(self._section_label("Lines & Custom Shapes"))
 
-        rows = [
-            ("Left", "show_left"),
-            ("Right", "show_right"),
-            ("Top", "show_top"),
-            ("Bottom", "show_bottom"),
-        ]
-        for label_text, attr in rows:
-            line_key = ATTR_TO_LINE_KEY.get(attr, attr)
-            section = QFrame()
-            section.setStyleSheet(
-                """
-                QFrame {
-                    background-color: rgba(40, 40, 50, 120);
-                    border-radius: 10px;
-                    padding: 6px;
-                }
-            """
-            )
-            section_layout = QVBoxLayout(section)
-            section_layout.setContentsMargins(8, 6, 8, 6)
-            section_layout.setSpacing(6)
-
-            header = QHBoxLayout()
-            checkbox = QCheckBox(label_text)
-            checkbox.setChecked(getattr(self.settings, attr))
-            checkbox.setStyleSheet(
-                """
-                QCheckBox { color: #E0E0E0; font-weight: bold; }
-                QCheckBox::indicator {
-                    width: 16px;
-                    height: 16px;
-                }
-                QCheckBox::indicator:unchecked {
-                    border: 2px solid rgba(120, 120, 140, 200);
-                    border-radius: 4px;
-                }
-                QCheckBox::indicator:checked {
-                    background-color: #4CAF50;
-                    border: 2px solid #357a38;
-                    border-radius: 4px;
-                }
-            """
-            )
-            checkbox.toggled.connect(lambda checked, name=attr: self._on_line_toggle(name, checked))
-            self.line_checkboxes[attr] = checkbox
-            header.addWidget(checkbox)
-            header.addStretch()
-
-            clone_button = QToolButton()
-            clone_button.setText("Clone")
-            clone_button.setCursor(Qt.CursorShape.PointingHandCursor)
-            clone_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-            clone_button.setStyleSheet(
-                """
-                QToolButton {
-                    background-color: rgba(96, 125, 139, 180);
-                    color: white;
-                    border: none;
-                    border-radius: 6px;
-                    padding: 4px 10px;
-                    font-weight: bold;
-                }
-                QToolButton:hover { background-color: rgba(120, 150, 160, 200); }
-            """
-            )
-            clone_menu = QMenu(clone_button)
-            clone_actions = []
-            for _, target_attr in rows:
-                target_key = ATTR_TO_LINE_KEY.get(target_attr, target_attr)
-                if target_key == line_key:
-                    continue
-                action = clone_menu.addAction(target_key.title())
-                action.triggered.connect(
-                    lambda _, src=line_key, dest=target_key: self._clone_line_profile(src, dest)
-                )
-                clone_actions.append((action, target_key))
-            if clone_actions:
-                clone_menu.addSeparator()
-                clone_all_action = clone_menu.addAction("Clone to All")
-                clone_all_action.triggered.connect(lambda _, src=line_key: self._clone_line_profile(src, None))
-                clone_actions.append((clone_all_action, None))
-            clone_button.setMenu(clone_menu)
-            header.addWidget(clone_button)
-
-            customize_btn = QToolButton()
-            customize_btn.setText("Customize")
-            customize_btn.setCheckable(True)
-            customize_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            customize_btn.setStyleSheet(
-                """
-                QToolButton {
-                    background-color: rgba(92, 107, 192, 180);
-                    color: white;
-                    border: none;
-                    border-radius: 6px;
-                    padding: 4px 10px;
-                    font-weight: bold;
-                }
-                QToolButton:checked { background-color: rgba(76, 175, 80, 200); }
-            """
-            )
-            header.addWidget(customize_btn)
-            section_layout.addLayout(header)
-
-            custom_frame = QFrame()
-            custom_frame.setStyleSheet(
-                """
-                QFrame {
-                    background-color: rgba(30, 30, 35, 160);
-                    border-radius: 8px;
-                    padding: 6px;
-                }
-            """
-            )
-            custom_frame.setVisible(False)
-            customize_btn.toggled.connect(custom_frame.setVisible)
-
-            custom_layout = QVBoxLayout(custom_frame)
-            custom_layout.setContentsMargins(4, 4, 4, 4)
-            custom_layout.setSpacing(6)
-
-            custom_toggle = QCheckBox("Enable custom shape")
-            custom_toggle.setStyleSheet("QCheckBox { color: #E0E0E0; font-weight: bold; }")
-            custom_toggle.toggled.connect(lambda checked, key=line_key: self._on_line_custom_toggle(key, checked))
-            custom_layout.addWidget(custom_toggle)
-
-            grid = QGridLayout()
-            grid.setVerticalSpacing(6)
-            grid.setHorizontalSpacing(10)
-            spins: dict[str, QSpinBox] = {}
-            field_order = [
-                ("Length", "length"),
-                ("Gap", "gap"),
-                ("Thickness", "thickness"),
-                ("Angle", "angle_offset"),
-                ("Bend Offset", "tip_offset"),
-            ]
-            for row_index, (title, field_name) in enumerate(field_order):
-                minimum, maximum, unit = LINE_FIELD_LIMITS[field_name]
-                clamp_min = int(minimum)
-                clamp_max = int(maximum)
-                span = clamp_max - clamp_min
-                buffer = max(100, abs(span) * 2 if span else 200)
-                label = QLabel(title)
-                label.setStyleSheet("color: #B0B0B0; font-size: 11px;")
-                spin = QSpinBox()
-                spin.setRange(clamp_min - buffer, clamp_max + buffer)
-                spin.setSingleStep(1)
-                spin.setAccelerated(True)
-                spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
-                spin.setStyleSheet(
-                    """
-                    QSpinBox {
-                        background-color: rgba(40, 40, 50, 200);
-                        border: 1px solid rgba(100, 100, 120, 120);
-                        border-radius: 6px;
-                        padding: 4px 8px;
-                        color: #E0E0E0;
-                        min-width: 70px;
-                    }
-                    QSpinBox:disabled {
-                        background-color: rgba(50, 50, 60, 120);
-                        color: rgba(220, 220, 220, 80);
-                    }
-                """
-                )
-                spin.valueChanged.connect(
-                    lambda val, key=line_key, field=field_name, cmin=clamp_min, cmax=clamp_max:
-                    self._on_line_profile_value_if_valid(key, field, val, cmin, cmax)
-                )
-
-                def make_edit_handler(spin_box: QSpinBox, key: str, field: str, min_val: float, max_val: float):
-                    def handler() -> None:
-                        val = spin_box.value()
-                        clamped = int(max(min_val, min(max_val, val)))
-                        if clamped != val:
-                            spin_box.blockSignals(True)
-                            spin_box.setValue(clamped)
-                            spin_box.blockSignals(False)
-                        self._on_line_profile_value_changed(key, field, clamped)
-
-                    return handler
-
-                spin.editingFinished.connect(make_edit_handler(spin, line_key, field_name, minimum, maximum))
-                grid.addWidget(label, row_index, 0)
-                grid.addWidget(spin, row_index, 1)
-                if unit:
-                    unit_label = QLabel(unit)
-                    unit_label.setStyleSheet("color: #B0B0B0; font-size: 11px; padding-left: 4px;")
-                    grid.addWidget(unit_label, row_index, 2)
-                spins[field_name] = spin
-            custom_layout.addLayout(grid)
-
-            buttons_row = QHBoxLayout()
-            reset_btn = QPushButton("Reset Line")
-            reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            reset_btn.setStyleSheet(
-                """
-                QPushButton {
-                    background-color: rgba(255, 152, 0, 180);
-                    color: white;
-                    border: none;
-                    border-radius: 6px;
-                    padding: 6px 12px;
-                    font-weight: bold;
-                }
-                QPushButton:hover { background-color: rgba(255, 171, 64, 200); }
-            """
-            )
-            reset_btn.clicked.connect(lambda _, key=line_key: self._reset_line_profile(key))
-            buttons_row.addWidget(reset_btn)
-            buttons_row.addStretch()
-            custom_layout.addLayout(buttons_row)
-
-            section_layout.addWidget(custom_frame)
-            layout.addWidget(section)
-
-            self.line_controls[line_key] = {
-                "checkbox": checkbox,
-                "custom_frame": custom_frame,
-                "custom_button": customize_btn,
-                "custom_toggle": custom_toggle,
-                "spins": spins,
-                "clone_actions": clone_actions,
-            }
-
         builder_card = QFrame()
         builder_card.setStyleSheet(
             """
             QFrame {
-                background-color: rgba(0, 188, 212, 30);
+                background-color: rgba(40, 40, 50, 120);
                 border-radius: 12px;
-                border: 1px solid rgba(0, 188, 212, 140);
-                padding: 12px;
+                border: 1px solid rgba(100, 100, 120, 100);
+                padding: 10px;
             }
         """
         )
         builder_row = QHBoxLayout(builder_card)
-        builder_row.setSpacing(12)
-        builder_row.setContentsMargins(8, 4, 8, 4)
-        helper = QLabel(
-            "Open the advanced line builder to stack extra spokes, drag their order, and drop geometric objects much like the image editor."
-        )
-        helper.setWordWrap(True)
-        helper.setStyleSheet("color: rgba(230, 255, 255, 200); font-weight: bold;")
-        builder_row.addWidget(helper, 1)
+        builder_row.setSpacing(0)
+        builder_row.setContentsMargins(8, 6, 8, 6)
         builder_btn = QPushButton("Open Line Builder")
         builder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        builder_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         builder_btn.setStyleSheet(
             """
             QPushButton {
-                background-color: rgba(0, 188, 212, 220);
-                color: white;
-                border: none;
-                border-radius: 8px;
-                padding: 10px 18px;
+                background-color: rgba(70, 70, 80, 180);
+                color: #E0E0E0;
+                border: 1px solid rgba(100, 100, 120, 120);
+                border-radius: 10px;
+                padding: 12px 18px;
                 font-size: 13px;
                 font-weight: bold;
             }
-            QPushButton:hover { background-color: rgba(0, 200, 220, 240); }
+            QPushButton:hover { background-color: rgba(90, 90, 110, 200); }
         """
         )
         builder_btn.clicked.connect(self._open_line_builder)
-        builder_row.addWidget(builder_btn, 0, Qt.AlignmentFlag.AlignTop)
+        builder_row.addWidget(builder_btn, 1)
         layout.addWidget(builder_card)
         return frame
 
@@ -1235,12 +1777,12 @@ class StandardCrosshairDialog(QWidget):
             QFrame {
                 background-color: rgba(40, 40, 50, 150);
                 border-radius: 10px;
-                padding: 6px 10px;
+                padding: 4px 8px;
             }
         """
         )
         slider_layout = QHBoxLayout(slider_frame)
-        slider_layout.setContentsMargins(6, 4, 6, 4)
+        slider_layout.setContentsMargins(6, 3, 6, 3)
 
         clamp_min = minimum
         clamp_max = maximum
@@ -1255,17 +1797,17 @@ class StandardCrosshairDialog(QWidget):
             """
             QSlider::groove:horizontal {
                 border: none;
-                height: 8px;
+                height: 5px;
                 background: rgba(60, 60, 70, 200);
-                border-radius: 4px;
+                border-radius: 3px;
             }
             QSlider::handle:horizontal {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                     stop:0 #667eea, stop:1 #764ba2);
                 border: none;
-                width: 18px;
-                margin: -5px 0;
-                border-radius: 9px;
+                width: 14px;
+                margin: -6px 0;
+                border-radius: 7px;
             }
             QSlider::handle:horizontal:hover {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
@@ -1274,7 +1816,7 @@ class StandardCrosshairDialog(QWidget):
             QSlider::sub-page:horizontal {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                     stop:0 #667eea, stop:1 #764ba2);
-                border-radius: 4px;
+                border-radius: 3px;
             }
         """
         )
@@ -1293,9 +1835,9 @@ class StandardCrosshairDialog(QWidget):
                 background-color: rgba(40, 40, 50, 200);
                 border: 1px solid rgba(100, 100, 120, 120);
                 border-radius: 6px;
-                padding: 4px 10px;
+                padding: 3px 8px;
                 color: #E0E0E0;
-                min-width: 68px;
+                min-width: 62px;
             }
             QSpinBox:disabled {
                 background-color: rgba(55, 55, 65, 150);
@@ -1419,6 +1961,7 @@ class StandardCrosshairDialog(QWidget):
             spin.blockSignals(False)
 
     def _sync_controls_from_settings(self) -> None:
+        self._refresh_presets_ui()
         if hasattr(self, "center_dot_check"):
             self.center_dot_check.blockSignals(True)
             self.center_dot_check.setChecked(self.settings.center_dot)
@@ -1468,19 +2011,61 @@ class StandardCrosshairDialog(QWidget):
         if self.settings.visible:
             self.label.raise_()
         self._update_visibility_button()
-        if self.settings.fan_enabled:
-            self._start_fan_timer()
-        else:
-            self._stop_fan_timer()
+        _bind_settings_to_label(self.label, self.settings)
+        _sync_fan_timer_state(self.label, self.settings)
         self._render_current_state()
 
     def _render_current_state(self) -> None:
-        extra_rotation = self._fan_angle if self.settings.fan_enabled else 0.0
+        self._sync_linked_standard_base_components()
+        extra_rotation = float(getattr(self.label, "_standard_crosshair_fan_angle", 0.0)) if self.settings.fan_enabled else 0.0
         render_crosshair_on_label(self.label, self.settings, extra_rotation=extra_rotation)
 
     def _persist_and_render(self) -> None:
         self._render_current_state()
         save_settings_to_disk(self.settings)
+
+    def _sync_linked_standard_base_components(self) -> None:
+        """Keep seeded standard base objects in sync with global/per-line values.
+
+        This preserves the behavior of the main Length/Gap/Thickness sliders even
+        after the standard lines are represented as editable objects in the builder.
+        """
+        components = self.settings.line_components
+        if not isinstance(components, dict):
+            return
+        profiles = self.settings.line_profiles if isinstance(self.settings.line_profiles, dict) else {}
+
+        default_gap = float(max(0, self.settings.gap))
+        default_length = float(max(0, self.settings.length))
+        default_thickness = float(max(1, self.settings.thickness))
+
+        for line_key in LINE_KEYS:
+            stack = components.get(line_key)
+            if not isinstance(stack, list) or not stack:
+                continue
+            base = stack[0]
+            if not isinstance(base, dict):
+                continue
+            if not bool(base.get("_standard_base", False)):
+                continue
+            if not bool(base.get("_standard_linked", True)):
+                continue
+            if base.get("type") != "segment":
+                continue
+
+            profile = profiles.get(line_key, {}) if isinstance(profiles, dict) else {}
+            use_custom = bool(profile.get("enabled", False))
+            gap = float(profile.get("gap", default_gap)) if use_custom else default_gap
+            length = float(profile.get("length", default_length)) if use_custom else default_length
+            thickness = float(profile.get("thickness", default_thickness)) if use_custom else default_thickness
+            tip = float(profile.get("tip_offset", 0.0)) if use_custom else 0.0
+
+            base["offset"] = gap
+            base["length"] = max(0.0, length)
+            base["thickness"] = max(1.0, thickness)
+            base["tip_offset"] = tip
+            if "draggable" not in base:
+                base["draggable"] = True
 
     def _toggle_visibility(self) -> None:
         hidden = self.visibility_btn.isChecked()
@@ -1500,15 +2085,10 @@ class StandardCrosshairDialog(QWidget):
         self.visibility_btn.setText("👁️ Show Crosshair" if hidden else "👁️ Hide Crosshair")
 
     def _start_fan_timer(self) -> None:
-        if not self.settings.fan_enabled:
-            return
-        if not self._fan_timer.isActive():
-            self._fan_timer.start()
+        _sync_fan_timer_state(self.label, self.settings)
 
     def _stop_fan_timer(self) -> None:
-        if self._fan_timer.isActive():
-            self._fan_timer.stop()
-        self._fan_angle = 0.0
+        _sync_fan_timer_state(self.label, self.settings)
 
     def _update_overlay_draggable_state(self) -> None:
         """Toggle the WindowTransparentForInput flag based on draggable mode."""
@@ -1546,7 +2126,7 @@ class StandardCrosshairDialog(QWidget):
             # Apply delta to offset
             new_x = self.settings.offset_x + delta.x()
             new_y = self.settings.offset_y + delta.y()
-            
+
             # Apply grid snapping
             if self.settings.grid_snap_size > 1:
                 new_x = round(new_x / self.settings.grid_snap_size) * self.settings.grid_snap_size
@@ -1576,11 +2156,8 @@ class StandardCrosshairDialog(QWidget):
             event.accept()
 
     def _on_fan_tick(self) -> None:
-        if not self.settings.fan_enabled:
-            return
-        interval_seconds = self._fan_timer.interval() / 1000.0
-        self._fan_angle = (self._fan_angle + self.settings.fan_speed * interval_seconds) % 360
-        self._render_current_state()
+        # Fan ticks are handled by the label-attached timer.
+        return
 
     def sync_with_label(self) -> None:
         """Synchronize the dialog toggle with the current label visibility."""
@@ -1626,16 +2203,12 @@ class StandardCrosshairDialog(QWidget):
 
     def _on_fan_toggle(self, enabled: bool) -> None:
         self.settings.fan_enabled = enabled
-        if enabled:
-            self._start_fan_timer()
-        else:
-            self._stop_fan_timer()
+        _sync_fan_timer_state(self.label, self.settings)
         self._persist_and_render()
 
     def _on_fan_speed(self, value: int) -> None:
         self.settings.fan_speed = max(-360, min(360, value))
-        if self.settings.fan_enabled and not self._fan_timer.isActive():
-            self._start_fan_timer()
+        _sync_fan_timer_state(self.label, self.settings)
         self._persist_and_render()
 
     def _set_dot_shape(self, shape: str) -> None:
@@ -1942,7 +2515,30 @@ class StandardCrosshairDialog(QWidget):
     def _reset_defaults(self) -> None:
         current_visibility = self.settings.visible
         preserved_palette = list(self.settings.custom_colors)
-        self.settings = StandardCrosshairSettings(visible=current_visibility, custom_colors=preserved_palette)
+        preserved_presets = dict(self.settings.presets) if isinstance(self.settings.presets, dict) else {}
+        preserved_active = self.settings.active_preset if isinstance(self.settings.active_preset, str) else "Default"
+        self.settings = StandardCrosshairSettings(
+            visible=current_visibility,
+            custom_colors=preserved_palette,
+            presets=preserved_presets,
+            active_preset=preserved_active,
+        )
+        # Reset should also clear any line builder objects.
+        self.settings.line_components = {}
+        self.settings.line_layers = []
+        self.settings.line_profiles = {}
+        # Overwrite current preset with the reset state.
+        if isinstance(self.settings.presets, dict):
+            self.settings.presets[self.settings.active_preset] = _settings_to_preset_dict(self.settings)
+        # Close line builder so it re-opens with the new settings reference.
+        if self.line_builder_dialog is not None:
+            try:
+                self.line_builder_dialog.close()
+            except Exception:
+                pass
+            self.line_builder_dialog = None
+        _bind_settings_to_label(self.label, self.settings)
+        _sync_fan_timer_state(self.label, self.settings)
         self._sync_controls_from_settings()
         save_settings_to_disk(self.settings)
 
@@ -1982,6 +2578,9 @@ class LineBuilderDialog(QWidget):
         self.active_scope_id: Optional[str] = None
         self.segment_fields: dict[str, QDoubleSpinBox] = {}
         self.circle_fields: dict[str, QDoubleSpinBox] = {}
+        self.square_fields: dict[str, QDoubleSpinBox] = {}
+        self.triangle_fields: dict[str, QDoubleSpinBox] = {}
+        self.curve_fields: dict[str, QDoubleSpinBox] = {}
         self.component_insert_buttons: list[QPushButton] = []
         self.component_modify_buttons: list[QPushButton] = []
         self.show_grid = True
@@ -1995,16 +2594,88 @@ class LineBuilderDialog(QWidget):
         self.rotating = False
         self.rotation_start_angle = 0
         self.resize_mode = None
+        self._last_mouse_pos_pixmap: Optional[QPointF] = None
+        self._snap_guides: dict[str, float] = {}
+        self._preview_pixmap_size: tuple[int, int] = (0, 0)
+        self._preview_scale: float = 1.0
+        self._preview_offset: tuple[float, float] = (0.0, 0.0)
+        self._pending_checkpoint_key: Optional[str] = None
+        self._drag_grab_delta_along: float = 0.0
+        self._drag_grab_delta_perp: float = 0.0
+
+        # Draw mode (click-drag to create objects)
+        self.draw_mode_enabled: bool = False
+        self.draw_mode_type: str = "segment"  # segment/circle/square/triangle/curve
+        self._drawing_component: Optional[dict] = None
+        self._draw_start_pos: Optional[QPointF] = None
+        self._draw_start_along: float = 0.0
+        self._draw_start_perp: float = 0.0
+        self._draw_last_along: float = 0.0
+        self._draw_last_perp: float = 0.0
+
+        # Curve handle dragging
+        self._curve_drag_handle: Optional[str] = None
+
+        # Undo/redo history (snapshot-based)
+        self._undo_stack: list[dict] = []
+        self._redo_stack: list[dict] = []
+        self._history_suspended: bool = False
+        self._history_group_key: Optional[str] = None
+        self._history_group_timer: QTimer = QTimer(self)
+        self._history_group_timer.setSingleShot(True)
+        self._history_group_timer.timeout.connect(self._end_history_group)
 
         self.setWindowTitle("Advanced Line Builder")
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
         self.setMinimumSize(580, 440)
 
         self._build_ui()
+        self._ensure_standard_base_objects()
         self._build_standard_list()
         self._build_custom_list()
         self._select_initial_scope()
         self._update_preview()
+        self._update_history_buttons()
+
+    def _ensure_standard_base_objects(self) -> None:
+        """Seed each standard line with a base segment object if empty."""
+        if not isinstance(self.settings.line_components, dict):
+            self.settings.line_components = {}
+
+        profiles = self.settings.line_profiles if isinstance(self.settings.line_profiles, dict) else {}
+        default_gap = float(max(0, self.settings.gap))
+        default_length = float(max(0, self.settings.length))
+        default_thickness = float(max(1, self.settings.thickness))
+
+        for line_key in LINE_KEYS:
+            stack = self.settings.line_components.get(line_key)
+            if not isinstance(stack, list):
+                stack = []
+                self.settings.line_components[line_key] = stack
+            if stack:
+                continue
+
+            profile = profiles.get(line_key, {}) if isinstance(profiles, dict) else {}
+            use_custom = bool(profile.get("enabled", False))
+            gap = float(profile.get("gap", default_gap)) if use_custom else default_gap
+            length = float(profile.get("length", default_length)) if use_custom else default_length
+            thickness = float(profile.get("thickness", default_thickness)) if use_custom else default_thickness
+            tip = float(profile.get("tip_offset", 0.0)) if use_custom else 0.0
+
+            stack.append(
+                {
+                    "type": "segment",
+                    "offset": gap,
+                    "perp_offset": 0.0,
+                    "length": max(0.0, length),
+                    "thickness": max(1.0, thickness),
+                    "angle_offset": 0.0,
+                    "tip_offset": tip,
+                    "draggable": True,
+                    "_standard_base": True,
+                    "_standard_linked": True,
+                }
+            )
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -2066,7 +2737,38 @@ class LineBuilderDialog(QWidget):
         std_hint.setVisible(False)
         left_panel.addWidget(std_hint)
 
-        left_panel.addWidget(self._subheading("Custom Lines"))
+        custom_header = QWidget()
+        custom_header_layout = QHBoxLayout(custom_header)
+        custom_header_layout.setContentsMargins(0, 0, 0, 0)
+        custom_header_layout.setSpacing(6)
+        custom_header_layout.addWidget(self._subheading("Custom Lines"))
+        custom_header_layout.addStretch()
+
+        def make_header_btn(text: str, bg: str, tooltip: str) -> QPushButton:
+            btn = QPushButton(text)
+            btn.setToolTip(tooltip)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFixedHeight(22)
+            btn.setMinimumWidth(28)
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {bg}; color: white; border: none; border-radius: 6px; padding: 2px 8px; font-weight: bold; }}"
+                "QPushButton:disabled { background-color: rgba(90,90,110,120); color: rgba(255,255,255,120); }"
+            )
+            return btn
+
+        self.add_line_btn = make_header_btn("＋", "rgba(0,188,212,180)", "Add a custom line")
+        self.add_line_btn.clicked.connect(self._on_add_custom_line)
+        custom_header_layout.addWidget(self.add_line_btn)
+
+        self.duplicate_line_btn = make_header_btn("⧉", "rgba(92,107,192,180)", "Duplicate selected custom line")
+        self.duplicate_line_btn.clicked.connect(self._on_duplicate_custom_line)
+        custom_header_layout.addWidget(self.duplicate_line_btn)
+
+        self.remove_line_btn = make_header_btn("✖", "rgba(244,67,54,180)", "Remove selected custom line")
+        self.remove_line_btn.clicked.connect(self._on_remove_custom_line)
+        custom_header_layout.addWidget(self.remove_line_btn)
+
+        left_panel.addWidget(custom_header)
         self.custom_list = QListWidget()
         self.custom_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.custom_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
@@ -2083,26 +2785,19 @@ class LineBuilderDialog(QWidget):
         custom_hint.setVisible(False)
         left_panel.addWidget(custom_hint)
 
-        custom_buttons = QHBoxLayout()
-        custom_buttons.setSpacing(4)
-        self.add_line_btn = QPushButton("＋ Add Line")
-        self.add_line_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.add_line_btn.setStyleSheet("QPushButton { background-color: rgba(0,188,212,180); color: white; border: none; border-radius: 6px; padding: 4px 8px; font-weight: bold; }")
-        self.add_line_btn.clicked.connect(self._on_add_custom_line)
-        custom_buttons.addWidget(self.add_line_btn)
+        # Show all objects (segments/circles) for the current line scope.
+        left_panel.addWidget(self._subheading("Objects"))
+        self.components_list = QListWidget()
+        self.components_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.components_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.components_list.setStyleSheet(
+            "QListWidget { background-color: rgba(34,34,44,240); border-radius: 8px; border: 1px solid rgba(255,255,255,40); }"
+        )
+        self.components_list.currentRowChanged.connect(self._on_component_selection_changed)
+        self.components_list.model().rowsMoved.connect(self._on_component_rows_moved)
+        left_panel.addWidget(self.components_list, 1)
 
-        self.duplicate_line_btn = QPushButton("⧉ Duplicate")
-        self.duplicate_line_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.duplicate_line_btn.setStyleSheet("QPushButton { background-color: rgba(92,107,192,180); color: white; border: none; border-radius: 6px; padding: 4px 8px; font-weight: bold; }")
-        self.duplicate_line_btn.clicked.connect(self._on_duplicate_custom_line)
-        custom_buttons.addWidget(self.duplicate_line_btn)
-
-        self.remove_line_btn = QPushButton("✖ Remove")
-        self.remove_line_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.remove_line_btn.setStyleSheet("QPushButton { background-color: rgba(244,67,54,180); color: white; border: none; border-radius: 6px; padding: 4px 8px; font-weight: bold; }")
-        self.remove_line_btn.clicked.connect(self._on_remove_custom_line)
-        custom_buttons.addWidget(self.remove_line_btn)
-        left_panel.addLayout(custom_buttons)
+        # (Buttons moved into the Custom Lines header.)
 
         right_panel = QVBoxLayout()
         right_panel.setSpacing(6)
@@ -2186,6 +2881,7 @@ class LineBuilderDialog(QWidget):
         self.preview_label.mouseMoveEvent = self._preview_mouse_move
         self.preview_label.mouseReleaseEvent = self._preview_mouse_release
         layout.addWidget(self.preview_label)
+
         return frame
 
     def _create_metadata_panel(self) -> QFrame:
@@ -2202,7 +2898,12 @@ class LineBuilderDialog(QWidget):
         scroll_area.setMaximumHeight(400)
         
         scroll_widget = QWidget()
-        form = QFormLayout(scroll_widget)
+        scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.setSpacing(8)
+
+        form_widget = QWidget()
+        form = QFormLayout(form_widget)
         form.setSpacing(4)
 
         self.layer_label_input = QLineEdit()
@@ -2213,10 +2914,6 @@ class LineBuilderDialog(QWidget):
         self.layer_enabled_check = QCheckBox("Visible")
         self.layer_enabled_check.toggled.connect(self._on_layer_enabled_toggled)
         form.addRow("", self.layer_enabled_check)
-
-        self.layer_draggable_check = QCheckBox("Draggable")
-        self.layer_draggable_check.toggled.connect(self._on_layer_draggable_toggled)
-        form.addRow("", self.layer_draggable_check)
 
         self.layer_angle_spin = self._make_spin(-720.0, 720.0, 1.0, 1)
         self.layer_angle_spin.valueChanged.connect(self._on_layer_angle_changed)
@@ -2242,6 +2939,95 @@ class LineBuilderDialog(QWidget):
         self.layer_tip_spin.valueChanged.connect(self._on_layer_tip_changed)
         form.addRow("Tip", self._wrap_with_unit(self.layer_tip_spin, "px"))
 
+        scroll_layout.addWidget(form_widget)
+
+        # Selected object options live here (clearer, close to metadata).
+        scroll_layout.addWidget(self._subheading("Selected Object"))
+
+        self.component_editor_stack = QStackedWidget()
+        placeholder = QLabel("Select an object to edit it.")
+        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        placeholder.setStyleSheet("color: rgba(220, 220, 220, 150);")
+        self.component_editor_stack.addWidget(placeholder)
+
+        segment_editor = QWidget()
+        segment_form = QFormLayout(segment_editor)
+        segment_form.setSpacing(4)
+
+        self.segment_draggable = QCheckBox("Draggable")
+        self.segment_draggable.setStyleSheet("QCheckBox { color: #E0E0E0; font-weight: bold; }")
+        self.segment_draggable.toggled.connect(lambda v: self._on_component_draggable_changed("segment", v))
+        segment_form.addRow("", self.segment_draggable)
+
+        for field in ("offset", "perp_offset", "length", "thickness", "angle_offset", "tip_offset"):
+            spin = self._create_component_spinbox("segment", field)
+            self.segment_fields[field] = spin
+            segment_form.addRow(self._component_label(field), self._wrap_with_unit(spin, COMPONENT_FIELD_LIMITS["segment"][field][2]))
+        self.component_editor_stack.addWidget(segment_editor)
+
+        circle_editor = QWidget()
+        circle_form = QFormLayout(circle_editor)
+        circle_form.setSpacing(4)
+
+        self.circle_draggable = QCheckBox("Draggable")
+        self.circle_draggable.setStyleSheet("QCheckBox { color: #E0E0E0; font-weight: bold; }")
+        self.circle_draggable.toggled.connect(lambda v: self._on_component_draggable_changed("circle", v))
+        circle_form.addRow("", self.circle_draggable)
+
+        for field in ("offset", "perp_offset", "radius"):
+            spin = self._create_component_spinbox("circle", field)
+            self.circle_fields[field] = spin
+            circle_form.addRow(self._component_label(field), self._wrap_with_unit(spin, COMPONENT_FIELD_LIMITS["circle"][field][2]))
+        self.component_editor_stack.addWidget(circle_editor)
+
+        square_editor = QWidget()
+        square_form = QFormLayout(square_editor)
+        square_form.setSpacing(4)
+
+        self.square_draggable = QCheckBox("Draggable")
+        self.square_draggable.setStyleSheet("QCheckBox { color: #E0E0E0; font-weight: bold; }")
+        self.square_draggable.toggled.connect(lambda v: self._on_component_draggable_changed("square", v))
+        square_form.addRow("", self.square_draggable)
+
+        for field in ("offset", "perp_offset", "size", "angle_offset"):
+            spin = self._create_component_spinbox("square", field)
+            self.square_fields[field] = spin
+            square_form.addRow(self._component_label(field), self._wrap_with_unit(spin, COMPONENT_FIELD_LIMITS["square"][field][2]))
+        self.component_editor_stack.addWidget(square_editor)
+
+        triangle_editor = QWidget()
+        triangle_form = QFormLayout(triangle_editor)
+        triangle_form.setSpacing(4)
+
+        self.triangle_draggable = QCheckBox("Draggable")
+        self.triangle_draggable.setStyleSheet("QCheckBox { color: #E0E0E0; font-weight: bold; }")
+        self.triangle_draggable.toggled.connect(lambda v: self._on_component_draggable_changed("triangle", v))
+        triangle_form.addRow("", self.triangle_draggable)
+
+        for field in ("offset", "perp_offset", "radius", "angle_offset"):
+            spin = self._create_component_spinbox("triangle", field)
+            self.triangle_fields[field] = spin
+            triangle_form.addRow(self._component_label(field), self._wrap_with_unit(spin, COMPONENT_FIELD_LIMITS["triangle"][field][2]))
+        self.component_editor_stack.addWidget(triangle_editor)
+
+        curve_editor = QWidget()
+        curve_form = QFormLayout(curve_editor)
+        curve_form.setSpacing(4)
+
+        self.curve_draggable = QCheckBox("Draggable")
+        self.curve_draggable.setStyleSheet("QCheckBox { color: #E0E0E0; font-weight: bold; }")
+        self.curve_draggable.toggled.connect(lambda v: self._on_component_draggable_changed("curve", v))
+        curve_form.addRow("", self.curve_draggable)
+
+        # Keep curve point editing on-canvas; only expose basic transforms here.
+        for field in ("offset", "perp_offset", "thickness", "angle_offset"):
+            spin = self._create_component_spinbox("curve", field)
+            self.curve_fields[field] = spin
+            curve_form.addRow(self._component_label(field), self._wrap_with_unit(spin, COMPONENT_FIELD_LIMITS["curve"][field][2]))
+        self.component_editor_stack.addWidget(curve_editor)
+
+        scroll_layout.addWidget(self.component_editor_stack)
+
         scroll_area.setWidget(scroll_widget)
         
         wrapper_layout = QVBoxLayout(frame)
@@ -2257,112 +3043,142 @@ class LineBuilderDialog(QWidget):
             "QFrame { background-color: rgba(25, 25, 35, 230); border-radius: 8px; border: 1px solid rgba(255,255,255,30); padding: 6px; }"
         )
         layout = QVBoxLayout(frame)
-        layout.setSpacing(3)
-        layout.addWidget(self._subheading("Line Objects"))
+        layout.setSpacing(6)
+        layout.addWidget(self._subheading("Selected Object"))
 
-        editor_layout = QHBoxLayout()
-        editor_layout.setSpacing(6)
-        layout.addLayout(editor_layout, 1)
+        # Tools: add objects + switch shape + duplicate/delete.
+        tools_row = QHBoxLayout()
+        tools_row.setSpacing(6)
 
-        list_column = QVBoxLayout()
-        list_column.setSpacing(3)
-        editor_layout.addLayout(list_column, 1)
-
-        self.components_list = QListWidget()
-        self.components_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.components_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self.components_list.setStyleSheet(
-            "QListWidget { background-color: rgba(34,34,44,240); border-radius: 8px; border: 1px solid rgba(255,255,255,40); }"
+        self.quick_add_segment_btn = QPushButton("＋ Line")
+        self.quick_add_segment_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.quick_add_segment_btn.setStyleSheet(
+            "QPushButton { background-color: rgba(0,188,212,160); color: white; border: none; border-radius: 6px; padding: 3px 8px; font-weight: bold; }"
         )
-        self.components_list.currentRowChanged.connect(self._on_component_selection_changed)
-        self.components_list.model().rowsMoved.connect(self._on_component_rows_moved)
-        list_column.addWidget(self.components_list, 1)
+        self.quick_add_segment_btn.clicked.connect(lambda: self._add_component("segment", self._last_mouse_pos_pixmap))
+        tools_row.addWidget(self.quick_add_segment_btn)
 
-        button_row = QHBoxLayout()
-        button_row.setSpacing(3)
-        add_segment_btn = QPushButton("＋ Segment")
-        add_segment_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        add_segment_btn.setStyleSheet("QPushButton { background-color: rgba(0,188,212,160); color: white; border: none; border-radius: 6px; padding: 4px 8px; font-weight: bold; min-width: 0; }")
-        add_segment_btn.clicked.connect(lambda: self._add_component("segment"))
-        button_row.addWidget(add_segment_btn, 1)
+        self.quick_add_circle_btn = QPushButton("＋ Circle")
+        self.quick_add_circle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.quick_add_circle_btn.setStyleSheet(
+            "QPushButton { background-color: rgba(92,107,192,160); color: white; border: none; border-radius: 6px; padding: 3px 8px; font-weight: bold; }"
+        )
+        self.quick_add_circle_btn.clicked.connect(lambda: self._add_component("circle", self._last_mouse_pos_pixmap))
+        tools_row.addWidget(self.quick_add_circle_btn)
 
-        add_circle_btn = QPushButton("＋ Circle")
-        add_circle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        add_circle_btn.setStyleSheet("QPushButton { background-color: rgba(92,107,192,160); color: white; border: none; border-radius: 6px; padding: 4px 8px; font-weight: bold; min-width: 0; }")
-        add_circle_btn.clicked.connect(lambda: self._add_component("circle"))
-        button_row.addWidget(add_circle_btn, 1)
+        self.quick_add_square_btn = QPushButton("＋ Square")
+        self.quick_add_square_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.quick_add_square_btn.setStyleSheet(
+            "QPushButton { background-color: rgba(120,144,156,160); color: white; border: none; border-radius: 6px; padding: 3px 8px; font-weight: bold; }"
+        )
+        self.quick_add_square_btn.clicked.connect(lambda: self._add_component("square", self._last_mouse_pos_pixmap))
+        tools_row.addWidget(self.quick_add_square_btn)
 
-        duplicate_btn = QPushButton("⧉ Duplicate")
-        duplicate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        duplicate_btn.setStyleSheet("QPushButton { background-color: rgba(120,144,156,160); color: white; border: none; border-radius: 6px; padding: 4px 8px; font-weight: bold; min-width: 0; }")
-        duplicate_btn.clicked.connect(self._duplicate_component)
-        button_row.addWidget(duplicate_btn, 1)
+        self.quick_add_triangle_btn = QPushButton("＋ Triangle")
+        self.quick_add_triangle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.quick_add_triangle_btn.setStyleSheet(
+            "QPushButton { background-color: rgba(120,144,156,160); color: white; border: none; border-radius: 6px; padding: 3px 8px; font-weight: bold; }"
+        )
+        self.quick_add_triangle_btn.clicked.connect(lambda: self._add_component("triangle", self._last_mouse_pos_pixmap))
+        tools_row.addWidget(self.quick_add_triangle_btn)
 
-        remove_btn = QPushButton("✖ Remove")
-        remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        remove_btn.setStyleSheet("QPushButton { background-color: rgba(244,67,54,180); color: white; border: none; border-radius: 6px; padding: 4px 8px; font-weight: bold; min-width: 0; }")
-        remove_btn.clicked.connect(self._remove_component)
-        button_row.addWidget(remove_btn, 1)
+        self.selected_shape_combo = QComboBox()
+        self.selected_shape_combo.addItems(["Line", "Circle", "Square", "Triangle", "Curve"])
+        self.selected_shape_combo.setToolTip("Change selected object shape")
+        self.selected_shape_combo.setEnabled(False)
+        self.selected_shape_combo.setFixedHeight(22)
+        self.selected_shape_combo.setStyleSheet(
+            "QComboBox { background-color: rgba(40, 40, 50, 200); border: 1px solid rgba(100, 100, 120, 120); border-radius: 6px; padding: 2px 8px; color: #E0E0E0; }"
+            "QComboBox::drop-down { border: none; }"
+        )
+        self.selected_shape_combo.currentIndexChanged.connect(self._on_selected_shape_combo_changed)
+        tools_row.addWidget(self.selected_shape_combo)
 
-        move_up_btn = QPushButton("↑")
-        move_up_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        move_up_btn.setFixedWidth(32)
-        move_up_btn.setMinimumWidth(32)
-        move_up_btn.clicked.connect(lambda: self._move_component(-1))
-        button_row.addWidget(move_up_btn, 0)
+        self.draw_toggle = QToolButton()
+        self.draw_toggle.setText("✎ Draw")
+        self.draw_toggle.setCheckable(True)
+        self.draw_toggle.setToolTip("Click-drag on the canvas to draw a new object")
+        self.draw_toggle.setStyleSheet(
+            "QToolButton { background-color: rgba(0,188,212,120); color: white; border: none; border-radius: 6px; padding: 3px 8px; font-weight: bold; }"
+            "QToolButton:checked { background-color: rgba(0,188,212,200); }"
+        )
+        self.draw_toggle.toggled.connect(self._on_draw_mode_toggled)
+        tools_row.addWidget(self.draw_toggle)
 
-        move_down_btn = QPushButton("↓")
-        move_down_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        move_down_btn.setFixedWidth(32)
-        move_down_btn.setMinimumWidth(32)
-        move_down_btn.clicked.connect(lambda: self._move_component(1))
-        button_row.addWidget(move_down_btn, 0)
+        self.draw_type_combo = QComboBox()
+        self.draw_type_combo.addItems(["Line", "Circle", "Square", "Triangle", "Curve"])
+        self.draw_type_combo.setToolTip("Shape to draw")
+        self.draw_type_combo.setFixedHeight(22)
+        self.draw_type_combo.setStyleSheet(
+            "QComboBox { background-color: rgba(40, 40, 50, 200); border: 1px solid rgba(100, 100, 120, 120); border-radius: 6px; padding: 2px 8px; color: #E0E0E0; }"
+            "QComboBox::drop-down { border: none; }"
+        )
+        self.draw_type_combo.currentIndexChanged.connect(self._on_draw_type_changed)
+        tools_row.addWidget(self.draw_type_combo)
 
-        list_column.addLayout(button_row)
-        self.component_insert_buttons = [add_segment_btn, add_circle_btn]
-        self.component_modify_buttons = [duplicate_btn, remove_btn, move_up_btn, move_down_btn]
+        tools_row.addStretch()
 
-        editor_column = QVBoxLayout()
-        editor_column.setSpacing(3)
-        editor_layout.addLayout(editor_column, 1)
+        self.quick_duplicate_btn = QPushButton("⧉")
+        self.quick_duplicate_btn.setToolTip("Duplicate selected object")
+        self.quick_duplicate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.quick_duplicate_btn.setFixedWidth(34)
+        self.quick_duplicate_btn.setEnabled(False)
+        self.quick_duplicate_btn.setStyleSheet(
+            "QPushButton { background-color: rgba(120,144,156,160); color: white; border: none; border-radius: 6px; padding: 3px 6px; font-weight: bold; }"
+            "QPushButton:disabled { background-color: rgba(90,90,110,120); color: rgba(255,255,255,120); }"
+        )
+        self.quick_duplicate_btn.clicked.connect(self._duplicate_component)
+        tools_row.addWidget(self.quick_duplicate_btn)
 
-        self.component_editor_stack = QStackedWidget()
-        placeholder = QLabel("Select an object to edit it.")
-        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        placeholder.setStyleSheet("color: rgba(220, 220, 220, 150);")
-        self.component_editor_stack.addWidget(placeholder)
+        self.quick_delete_btn = QPushButton("✖")
+        self.quick_delete_btn.setToolTip("Delete selected object")
+        self.quick_delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.quick_delete_btn.setFixedWidth(34)
+        self.quick_delete_btn.setEnabled(False)
+        self.quick_delete_btn.setStyleSheet(
+            "QPushButton { background-color: rgba(244,67,54,180); color: white; border: none; border-radius: 6px; padding: 3px 6px; font-weight: bold; }"
+            "QPushButton:disabled { background-color: rgba(90,90,110,120); color: rgba(255,255,255,120); }"
+        )
+        self.quick_delete_btn.clicked.connect(self._remove_component)
+        tools_row.addWidget(self.quick_delete_btn)
 
-        segment_editor = QWidget()
-        segment_form = QFormLayout(segment_editor)
-        segment_form.setSpacing(4)
-        
-        self.segment_draggable = QCheckBox("Draggable")
-        self.segment_draggable.setStyleSheet("QCheckBox { color: #E0E0E0; font-weight: bold; }")
-        self.segment_draggable.toggled.connect(lambda v: self._on_component_draggable_changed("segment", v))
-        segment_form.addRow("", self.segment_draggable)
-        
-        for field in ("offset", "perp_offset", "length", "thickness", "angle_offset", "tip_offset"):
-            spin = self._create_component_spinbox("segment", field)
-            self.segment_fields[field] = spin
-            segment_form.addRow(self._component_label(field), self._wrap_with_unit(spin, COMPONENT_FIELD_LIMITS["segment"][field][2]))
-        self.component_editor_stack.addWidget(segment_editor)
+        self.undo_btn = QPushButton("↶")
+        self.undo_btn.setToolTip("Undo (Ctrl+Z)")
+        self.undo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.undo_btn.setFixedWidth(34)
+        self.undo_btn.setEnabled(False)
+        self.undo_btn.setStyleSheet(
+            "QPushButton { background-color: rgba(92,107,192,180); color: white; border: none; border-radius: 6px; padding: 3px 6px; font-weight: bold; }"
+            "QPushButton:disabled { background-color: rgba(90,90,110,120); color: rgba(255,255,255,120); }"
+        )
+        self.undo_btn.clicked.connect(self._undo)
+        tools_row.addWidget(self.undo_btn)
 
-        circle_editor = QWidget()
-        circle_form = QFormLayout(circle_editor)
-        circle_form.setSpacing(4)
-        
-        self.circle_draggable = QCheckBox("Draggable")
-        self.circle_draggable.setStyleSheet("QCheckBox { color: #E0E0E0; font-weight: bold; }")
-        self.circle_draggable.toggled.connect(lambda v: self._on_component_draggable_changed("circle", v))
-        circle_form.addRow("", self.circle_draggable)
-        
-        for field in ("offset", "perp_offset", "radius"):
-            spin = self._create_component_spinbox("circle", field)
-            self.circle_fields[field] = spin
-            circle_form.addRow(self._component_label(field), self._wrap_with_unit(spin, COMPONENT_FIELD_LIMITS["circle"][field][2]))
-        self.component_editor_stack.addWidget(circle_editor)
+        self.redo_btn = QPushButton("↷")
+        self.redo_btn.setToolTip("Redo (Ctrl+Y)")
+        self.redo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.redo_btn.setFixedWidth(34)
+        self.redo_btn.setEnabled(False)
+        self.redo_btn.setStyleSheet(
+            "QPushButton { background-color: rgba(92,107,192,180); color: white; border: none; border-radius: 6px; padding: 3px 6px; font-weight: bold; }"
+            "QPushButton:disabled { background-color: rgba(90,90,110,120); color: rgba(255,255,255,120); }"
+        )
+        self.redo_btn.clicked.connect(self._redo)
+        tools_row.addWidget(self.redo_btn)
 
-        editor_column.addWidget(self.component_editor_stack)
+        layout.addLayout(tools_row)
+
+        QShortcut(QKeySequence("Ctrl+Z"), self, activated=self._undo)
+        QShortcut(QKeySequence("Ctrl+Y"), self, activated=self._redo)
+
+        hint = QLabel("Select an object on the canvas (or in the left list) to edit its properties in Metadata.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: rgba(220, 220, 220, 120); font-size: 9px;")
+        layout.addWidget(hint)
+
+        # No visible insert/modify buttons (use left list + tools row).
+        self.component_insert_buttons = []
+        self.component_modify_buttons = []
         return frame
 
     def _make_spin(self, minimum: float, maximum: float, step: float, decimals: int = 1) -> QDoubleSpinBox:
@@ -2515,9 +3331,6 @@ class LineBuilderDialog(QWidget):
             self.layer_enabled_check.blockSignals(True)
             self.layer_enabled_check.setChecked(layer.get("enabled", True))
             self.layer_enabled_check.blockSignals(False)
-            self.layer_draggable_check.blockSignals(True)
-            self.layer_draggable_check.setChecked(layer.get("draggable", False))
-            self.layer_draggable_check.blockSignals(False)
             for widget, value in (
                 (self.layer_angle_spin, layer.get("angle", 0.0)),
                 (self.layer_angle_offset_spin, layer.get("angle_offset", 0.0)),
@@ -2538,9 +3351,6 @@ class LineBuilderDialog(QWidget):
             self.layer_enabled_check.blockSignals(True)
             self.layer_enabled_check.setChecked(True)
             self.layer_enabled_check.blockSignals(False)
-            self.layer_draggable_check.blockSignals(True)
-            self.layer_draggable_check.setChecked(False)
-            self.layer_draggable_check.blockSignals(False)
         else:
             self._set_metadata_enabled(False)
             self.layer_label_input.blockSignals(True)
@@ -2549,9 +3359,6 @@ class LineBuilderDialog(QWidget):
             self.layer_enabled_check.blockSignals(True)
             self.layer_enabled_check.setChecked(True)
             self.layer_enabled_check.blockSignals(False)
-            self.layer_draggable_check.blockSignals(True)
-            self.layer_draggable_check.setChecked(False)
-            self.layer_draggable_check.blockSignals(False)
 
     def _current_component_stack(self) -> Optional[list]:
         if self.active_scope_kind == "standard" and self.active_scope_id:
@@ -2594,6 +3401,7 @@ class LineBuilderDialog(QWidget):
         return None
 
     def _refresh_component_list(self) -> None:
+        prev_selected = self.selected_component
         self.components_list.blockSignals(True)
         self.components_list.clear()
         stack = self._current_component_stack()
@@ -2603,18 +3411,32 @@ class LineBuilderDialog(QWidget):
                 item.setData(Qt.ItemDataRole.UserRole, component)
                 self.components_list.addItem(item)
         self.components_list.blockSignals(False)
-        if self.components_list.count():
-            self.components_list.setCurrentRow(0)
+
+        # Preserve selection if possible; otherwise don't auto-select anything.
+        if prev_selected is not None and stack and prev_selected in stack:
+            self.selected_component = prev_selected
+            self._select_component_row_for(prev_selected)
+            self._set_component_editor_state(prev_selected)
+            if hasattr(self, "quick_duplicate_btn"):
+                self.quick_duplicate_btn.setEnabled(True)
+            if hasattr(self, "quick_delete_btn"):
+                self.quick_delete_btn.setEnabled(True)
         else:
+            self.selected_component = None
             self.components_list.clearSelection()
             self._set_component_editor_state(None)
+            if hasattr(self, "quick_duplicate_btn"):
+                self.quick_duplicate_btn.setEnabled(False)
+            if hasattr(self, "quick_delete_btn"):
+                self.quick_delete_btn.setEnabled(False)
+
         has_layer = stack is not None
         self._component_buttons_enabled(has_layer, self.components_list.currentRow() >= 0)
 
     def _component_summary(self, component: dict) -> str:
         ctype = component.get("type")
         if ctype == "segment":
-            return "Segment • offset={:.1f}px length={:.1f}px".format(
+            return "Line • offset={:.1f}px length={:.1f}px".format(
                 component.get("offset", 0.0),
                 component.get("length", 0.0),
             )
@@ -2623,6 +3445,15 @@ class LineBuilderDialog(QWidget):
                 component.get("offset", 0.0),
                 component.get("radius", 0.0),
             )
+        if ctype in ("polygon", "triangle"):
+            return "Triangle • r={:.1f}px".format(float(component.get("radius", 0.0)))
+        if ctype == "square":
+            return "Square • size={:.1f}px".format(float(component.get("size", 0.0)))
+        if ctype == "curve":
+            pts = component.get("points")
+            if isinstance(pts, list) and len(pts) >= 2:
+                return "Curve • pts={} thickness={:.1f}px".format(len(pts), float(component.get("thickness", 0.0)))
+            return "Curve • thickness={:.1f}px".format(float(component.get("thickness", 0.0)))
         return "Unknown object"
 
     def _on_component_selection_changed(self, row: int) -> None:
@@ -2630,9 +3461,39 @@ class LineBuilderDialog(QWidget):
         if stack and 0 <= row < len(stack):
             component = stack[row]
             self._set_component_editor_state(component)
+            self.selected_component = component
+            if hasattr(self, "quick_duplicate_btn"):
+                self.quick_duplicate_btn.setEnabled(True)
+            if hasattr(self, "quick_delete_btn"):
+                self.quick_delete_btn.setEnabled(True)
+            if hasattr(self, "selected_shape_combo"):
+                self.selected_shape_combo.blockSignals(True)
+                self.selected_shape_combo.setEnabled(True)
+                ctype = component.get("type")
+                if ctype == "segment":
+                    self.selected_shape_combo.setCurrentIndex(0)
+                elif ctype == "circle":
+                    self.selected_shape_combo.setCurrentIndex(1)
+                elif ctype == "square":
+                    self.selected_shape_combo.setCurrentIndex(2)
+                elif ctype in ("triangle", "polygon"):
+                    self.selected_shape_combo.setCurrentIndex(3)
+                else:  # curve
+                    self.selected_shape_combo.setCurrentIndex(4)
+                self.selected_shape_combo.blockSignals(False)
             self._component_buttons_enabled(True, True)
         else:
             self._set_component_editor_state(None)
+            self.selected_component = None
+            if hasattr(self, "quick_duplicate_btn"):
+                self.quick_duplicate_btn.setEnabled(False)
+            if hasattr(self, "quick_delete_btn"):
+                self.quick_delete_btn.setEnabled(False)
+            if hasattr(self, "selected_shape_combo"):
+                self.selected_shape_combo.blockSignals(True)
+                self.selected_shape_combo.setEnabled(False)
+                self.selected_shape_combo.setCurrentIndex(0)
+                self.selected_shape_combo.blockSignals(False)
             self._component_buttons_enabled(stack is not None, False)
 
     def _set_component_editor_state(self, component: Optional[dict]) -> None:
@@ -2643,7 +3504,7 @@ class LineBuilderDialog(QWidget):
         if ctype == "segment":
             self.component_editor_stack.setCurrentIndex(1)
             self.segment_draggable.blockSignals(True)
-            self.segment_draggable.setChecked(component.get("draggable", False))
+            self.segment_draggable.setChecked(component.get("draggable", True))
             self.segment_draggable.blockSignals(False)
             for field, spin in self.segment_fields.items():
                 spin.blockSignals(True)
@@ -2652,9 +3513,36 @@ class LineBuilderDialog(QWidget):
         elif ctype == "circle":
             self.component_editor_stack.setCurrentIndex(2)
             self.circle_draggable.blockSignals(True)
-            self.circle_draggable.setChecked(component.get("draggable", False))
+            self.circle_draggable.setChecked(component.get("draggable", True))
             self.circle_draggable.blockSignals(False)
             for field, spin in self.circle_fields.items():
+                spin.blockSignals(True)
+                spin.setValue(float(component.get(field, 0.0)))
+                spin.blockSignals(False)
+        elif ctype == "square":
+            self.component_editor_stack.setCurrentIndex(3)
+            self.square_draggable.blockSignals(True)
+            self.square_draggable.setChecked(component.get("draggable", True))
+            self.square_draggable.blockSignals(False)
+            for field, spin in self.square_fields.items():
+                spin.blockSignals(True)
+                spin.setValue(float(component.get(field, 0.0)))
+                spin.blockSignals(False)
+        elif ctype in ("triangle", "polygon"):
+            self.component_editor_stack.setCurrentIndex(4)
+            self.triangle_draggable.blockSignals(True)
+            self.triangle_draggable.setChecked(component.get("draggable", True))
+            self.triangle_draggable.blockSignals(False)
+            for field, spin in self.triangle_fields.items():
+                spin.blockSignals(True)
+                spin.setValue(float(component.get(field, 0.0)))
+                spin.blockSignals(False)
+        elif ctype == "curve":
+            self.component_editor_stack.setCurrentIndex(5)
+            self.curve_draggable.blockSignals(True)
+            self.curve_draggable.setChecked(component.get("draggable", True))
+            self.curve_draggable.blockSignals(False)
+            for field, spin in self.curve_fields.items():
                 spin.blockSignals(True)
                 spin.setValue(float(component.get(field, 0.0)))
                 spin.blockSignals(False)
@@ -2673,6 +3561,21 @@ class LineBuilderDialog(QWidget):
                 spin.blockSignals(False)
         elif ctype == "circle":
             for field, spin in self.circle_fields.items():
+                spin.blockSignals(True)
+                spin.setValue(float(component.get(field, 0.0)))
+                spin.blockSignals(False)
+        elif ctype == "square":
+            for field, spin in self.square_fields.items():
+                spin.blockSignals(True)
+                spin.setValue(float(component.get(field, 0.0)))
+                spin.blockSignals(False)
+        elif ctype in ("triangle", "polygon"):
+            for field, spin in self.triangle_fields.items():
+                spin.blockSignals(True)
+                spin.setValue(float(component.get(field, 0.0)))
+                spin.blockSignals(False)
+        elif ctype == "curve":
+            for field, spin in self.curve_fields.items():
                 spin.blockSignals(True)
                 spin.setValue(float(component.get(field, 0.0)))
                 spin.blockSignals(False)
@@ -2721,20 +3624,57 @@ class LineBuilderDialog(QWidget):
         stack = self._current_component_stack()
         row = self.components_list.currentRow()
         if stack and 0 <= row < len(stack):
+            self._checkpoint(f"component:{row}:{field}")
+            component = stack[row]
+            if isinstance(component, dict) and component.get("_standard_base") and component.get("_standard_linked", True):
+                if field in ("offset", "length", "thickness", "tip_offset", "perp_offset"):
+                    component["_standard_linked"] = False
             stack[row][field] = value
             self.components_list.item(row).setText(self._component_summary(stack[row]))
             self._persist(self._current_scope_standard_key(), self._current_scope_custom_id())
 
-    def _add_component(self, comp_type: str) -> None:
+    def _add_component(self, comp_type: str, pos: Optional[QPointF] = None) -> None:
         stack = self._current_component_stack()
         if comp_type not in COMPONENT_TYPES or stack is None:
             return
+        self._checkpoint("add_component")
         component = {"type": comp_type, **self._default_component_values(comp_type)}
+
+        # Add at cursor (like dropping an element onto the canvas).
+        if isinstance(pos, QPointF):
+            import math
+
+            w, h = self._preview_pixmap_size if isinstance(getattr(self, "_preview_pixmap_size", None), tuple) else (240, 240)
+            center_x = int(w) // 2
+            center_y = int(h) // 2
+            x_rel = float(pos.x()) - float(center_x)
+            y_rel = float(pos.y()) - float(center_y)
+
+            base_angle, layer_angle_offset = self._current_line_angles()
+            angle_rad = math.radians(base_angle + layer_angle_offset)
+            cos_a = math.cos(angle_rad)
+            sin_a = math.sin(angle_rad)
+
+            # Screen-space (x,y) -> (along, perp)
+            anchor_along = x_rel * cos_a + y_rel * sin_a
+            perp = -x_rel * sin_a + y_rel * cos_a
+
+            if comp_type == "segment":
+                length = float(component.get("length", 40.0))
+                component["offset"] = float(anchor_along) - (length / 2.0)
+            else:
+                component["offset"] = float(anchor_along)
+            component["perp_offset"] = float(perp)
         stack.append(component)
         item = QListWidgetItem(self._component_summary(component))
         item.setData(Qt.ItemDataRole.UserRole, component)
         self.components_list.addItem(item)
         self.components_list.setCurrentRow(self.components_list.count() - 1)
+        self.selected_component = component
+        if hasattr(self, "quick_duplicate_btn"):
+            self.quick_duplicate_btn.setEnabled(True)
+        if hasattr(self, "quick_delete_btn"):
+            self.quick_delete_btn.setEnabled(True)
         self._persist(self._current_scope_standard_key(), self._current_scope_custom_id())
 
     def _remove_component(self) -> None:
@@ -2742,14 +3682,23 @@ class LineBuilderDialog(QWidget):
         row = self.components_list.currentRow()
         if stack is None or row < 0 or row >= len(stack):
             return
+        self._checkpoint("remove_component")
         stack.pop(row)
         self.components_list.takeItem(row)
         next_row = min(row, self.components_list.count() - 1)
         if next_row >= 0:
             self.components_list.setCurrentRow(next_row)
         else:
+            # Ensure selection state is fully cleared.
+            self.components_list.setCurrentRow(-1)
             self.components_list.clearSelection()
+            self.selected_component = None
             self._set_component_editor_state(None)
+            if hasattr(self, "quick_duplicate_btn"):
+                self.quick_duplicate_btn.setEnabled(False)
+            if hasattr(self, "quick_delete_btn"):
+                self.quick_delete_btn.setEnabled(False)
+            self._component_buttons_enabled(stack is not None, False)
         self._persist(self._current_scope_standard_key(), self._current_scope_custom_id())
 
     def _duplicate_component(self) -> None:
@@ -2757,6 +3706,7 @@ class LineBuilderDialog(QWidget):
         row = self.components_list.currentRow()
         if stack is None or row < 0 or row >= len(stack):
             return
+        self._checkpoint("duplicate_component")
         copy_component = dict(stack[row])
         stack.insert(row + 1, copy_component)
         item = QListWidgetItem(self._component_summary(copy_component))
@@ -2785,6 +3735,7 @@ class LineBuilderDialog(QWidget):
         stack = self._current_component_stack()
         if stack is None:
             return
+        self._checkpoint("reorder_components")
         new_order = []
         for index in range(self.components_list.count()):
             component = self.components_list.item(index).data(Qt.ItemDataRole.UserRole)
@@ -2798,23 +3749,230 @@ class LineBuilderDialog(QWidget):
         if comp_type == "segment":
             return {
                 "offset": 0.0,
+                "perp_offset": 0.0,
                 "length": 40.0,
                 "thickness": 6.0,
                 "angle_offset": 0.0,
                 "tip_offset": 0.0,
+                "draggable": True,
             }
         if comp_type == "circle":
             return {
                 "offset": 20.0,
+                "perp_offset": 0.0,
                 "radius": 6.0,
+                "draggable": True,
+            }
+        if comp_type == "square":
+            return {
+                "offset": 20.0,
+                "perp_offset": 0.0,
+                "size": 18.0,
+                "angle_offset": 0.0,
+                "draggable": True,
+            }
+        if comp_type == "triangle":
+            return {
+                "offset": 20.0,
+                "perp_offset": 0.0,
+                "radius": 12.0,
+                "angle_offset": 0.0,
+                "draggable": True,
+            }
+        if comp_type == "curve":
+            return {
+                "offset": 0.0,
+                "perp_offset": 0.0,
+                "thickness": float(max(1, getattr(self.settings, "thickness", 6))),
+                "angle_offset": 0.0,
+                "start_dx": -20.0,
+                "start_dy": 0.0,
+                "ctrl_dx": 0.0,
+                "ctrl_dy": 0.0,
+                "end_dx": 20.0,
+                "end_dy": 0.0,
+                "draggable": True,
             }
         return {}
+
+    def _select_component_row_for(self, component: dict) -> None:
+        stack = self._current_component_stack()
+        if not stack:
+            return
+        try:
+            index = stack.index(component)
+        except ValueError:
+            # Fallback: try to match by identity in case of duplicates.
+            index = -1
+            for i, c in enumerate(stack):
+                if c is component:
+                    index = i
+                    break
+        if index >= 0 and self.components_list.currentRow() != index:
+            self.components_list.setCurrentRow(index)
+
+    def _hit_test_component(self, pos: QPointF) -> Optional[dict]:
+        import math
+
+        stack = self._current_component_stack()
+        if not stack:
+            return None
+
+        base_angle, angle_offset = self._current_line_angles()
+        line_angle = base_angle + angle_offset
+        line_rad = math.radians(line_angle)
+        w, h = self._preview_pixmap_size if isinstance(getattr(self, "_preview_pixmap_size", None), tuple) else (240, 240)
+        center_x = int(w) // 2
+        center_y = int(h) // 2
+
+        # Iterate topmost first (last drawn)
+        padding = 8.0
+        for component in reversed(stack):
+            ctype = component.get("type")
+            offset = float(component.get("offset", 0.0))
+            perp_offset = float(component.get("perp_offset", 0.0))
+
+            if ctype == "segment":
+                length = float(component.get("length", 0.0))
+                thickness = float(component.get("thickness", 1.0))
+                anchor_offset = offset + (length / 2.0)
+                comp_x = center_x + anchor_offset * math.cos(line_rad) - perp_offset * math.sin(line_rad)
+                comp_y = center_y + anchor_offset * math.sin(line_rad) + perp_offset * math.cos(line_rad)
+
+                orient_angle = line_angle + float(component.get("angle_offset", 0.0))
+                orient_rad = math.radians(orient_angle)
+                cos_a = math.cos(orient_rad)
+                sin_a = math.sin(orient_rad)
+                dx = float(pos.x()) - comp_x
+                dy = float(pos.y()) - comp_y
+                local_x = dx * cos_a + dy * sin_a
+                local_y = -dx * sin_a + dy * cos_a
+                if abs(local_x) <= (length / 2.0 + padding) and abs(local_y) <= (thickness / 2.0 + padding):
+                    return component
+
+            elif ctype == "circle":
+                radius = float(component.get("radius", 0.0))
+                anchor_offset = offset
+                comp_x = center_x + anchor_offset * math.cos(line_rad) - perp_offset * math.sin(line_rad)
+                comp_y = center_y + anchor_offset * math.sin(line_rad) + perp_offset * math.cos(line_rad)
+                dx = float(pos.x()) - comp_x
+                dy = float(pos.y()) - comp_y
+                if dx * dx + dy * dy <= (radius + padding) * (radius + padding):
+                    return component
+
+            elif ctype == "polygon":
+                # Legacy polygons treated as triangles (radius-based hit test).
+                radius = float(component.get("radius", 0.0))
+                anchor_offset = offset
+                comp_x = center_x + anchor_offset * math.cos(line_rad) - perp_offset * math.sin(line_rad)
+                comp_y = center_y + anchor_offset * math.sin(line_rad) + perp_offset * math.cos(line_rad)
+                dx = float(pos.x()) - comp_x
+                dy = float(pos.y()) - comp_y
+                if dx * dx + dy * dy <= (radius + padding) * (radius + padding):
+                    return component
+
+            elif ctype == "triangle":
+                radius = float(component.get("radius", 0.0))
+                anchor_offset = offset
+                comp_x = center_x + anchor_offset * math.cos(line_rad) - perp_offset * math.sin(line_rad)
+                comp_y = center_y + anchor_offset * math.sin(line_rad) + perp_offset * math.cos(line_rad)
+                dx = float(pos.x()) - comp_x
+                dy = float(pos.y()) - comp_y
+                if dx * dx + dy * dy <= (radius + padding) * (radius + padding):
+                    return component
+
+            elif ctype == "square":
+                size = float(component.get("size", 0.0))
+                anchor_offset = offset
+                comp_x = center_x + anchor_offset * math.cos(line_rad) - perp_offset * math.sin(line_rad)
+                comp_y = center_y + anchor_offset * math.sin(line_rad) + perp_offset * math.cos(line_rad)
+                dx = float(pos.x()) - comp_x
+                dy = float(pos.y()) - comp_y
+                # Approximate hit test using bounding circle.
+                radius = (size * 0.7071) if size > 0 else 0.0
+                if dx * dx + dy * dy <= (radius + padding) * (radius + padding):
+                    return component
+
+            elif ctype == "curve":
+                thickness = float(component.get("thickness", 3.0))
+                threshold = max(padding, (thickness / 2.0) + 6.0)
+                threshold2 = threshold * threshold
+
+                raw_pts = component.get("points")
+                if isinstance(raw_pts, list) and len(raw_pts) >= 2:
+                    offset = float(component.get("offset", 0.0))
+                    perp_offset = float(component.get("perp_offset", 0.0))
+                    poly: list[QPointF] = []
+                    for p in raw_pts:
+                        if not (isinstance(p, (list, tuple)) and len(p) == 2):
+                            continue
+                        if not (isinstance(p[0], (int, float)) and isinstance(p[1], (int, float))):
+                            continue
+                        poly.append(self._line_coords_to_pixmap(offset + float(p[0]), perp_offset + float(p[1])))
+                    for i in range(1, len(poly)):
+                        a = poly[i - 1]
+                        b = poly[i]
+                        vx = b.x() - a.x()
+                        vy = b.y() - a.y()
+                        wx = float(pos.x()) - a.x()
+                        wy = float(pos.y()) - a.y()
+                        seg_len2 = float(vx * vx + vy * vy)
+                        if seg_len2 > 1e-6:
+                            tproj = max(0.0, min(1.0, float((wx * vx + wy * vy) / seg_len2)))
+                            proj_x = a.x() + tproj * vx
+                            proj_y = a.y() + tproj * vy
+                            dx = float(pos.x()) - float(proj_x)
+                            dy = float(pos.y()) - float(proj_y)
+                            if dx * dx + dy * dy <= threshold2:
+                                return component
+                else:
+                    pts = self._curve_handle_points_pixmap(component)
+                    p0 = pts["start"]
+                    p1 = pts["ctrl"]
+                    p2 = pts["end"]
+
+                    prev = p0
+                    for i in range(1, 17):
+                        t = i / 16.0
+                        mt = 1.0 - t
+                        x = (mt * mt) * p0.x() + (2.0 * mt * t) * p1.x() + (t * t) * p2.x()
+                        y = (mt * mt) * p0.y() + (2.0 * mt * t) * p1.y() + (t * t) * p2.y()
+                        curr = QPointF(float(x), float(y))
+
+                        vx = curr.x() - prev.x()
+                        vy = curr.y() - prev.y()
+                        wx = float(pos.x()) - prev.x()
+                        wy = float(pos.y()) - prev.y()
+                        seg_len2 = float(vx * vx + vy * vy)
+                        if seg_len2 > 1e-6:
+                            tproj = max(0.0, min(1.0, float((wx * vx + wy * vy) / seg_len2)))
+                            proj_x = prev.x() + tproj * vx
+                            proj_y = prev.y() + tproj * vy
+                            dx = float(pos.x()) - float(proj_x)
+                            dy = float(pos.y()) - float(proj_y)
+                            if dx * dx + dy * dy <= threshold2:
+                                return component
+                        prev = curr
+
+        return None
 
     def _current_scope_standard_key(self) -> Optional[str]:
         return self.active_scope_id if self.active_scope_kind == "standard" else None
 
     def _current_scope_custom_id(self) -> Optional[str]:
         return self.active_scope_id if self.active_scope_kind == "custom" else None
+
+    def _current_line_angles(self) -> tuple[float, float]:
+        """Return (base_angle, angle_offset) for the active scope."""
+        layer = self._current_custom_layer()
+        if layer:
+            return float(layer.get("angle", 0.0)), float(layer.get("angle_offset", 0.0))
+
+        style_angles = STYLE_ANGLES.get(self.settings.crosshair_style, STYLE_ANGLES["plus"])
+        line_key = str(self.active_scope_id or "")
+        attr = LINE_KEY_TO_ATTR.get(line_key)
+        base_angle = float(style_angles.get(attr, 0.0)) if attr else 0.0
+        return base_angle, 0.0
 
     def _on_grid_toggle(self, enabled: bool) -> None:
         self.show_grid = enabled
@@ -2830,27 +3988,189 @@ class LineBuilderDialog(QWidget):
     def _on_component_draggable_changed(self, comp_type: str, enabled: bool) -> None:
         component = self._current_component()
         if component:
+            self._checkpoint("component_draggable")
             component["draggable"] = enabled
             self._persist(self._current_scope_standard_key(), self._current_scope_custom_id())
+
+    def _on_selected_shape_combo_changed(self, index: int) -> None:
+        mapping = {
+            0: "segment",
+            1: "circle",
+            2: "square",
+            3: "triangle",
+            4: "curve",
+        }
+        new_type = mapping.get(int(index), "segment")
+        self._convert_selected_component_type(new_type)
+
+    def _convert_selected_component_type(self, new_type: str) -> None:
+        stack = self._current_component_stack()
+        row = self.components_list.currentRow() if hasattr(self, "components_list") else -1
+        if not stack or row < 0 or row >= len(stack):
+            return
+
+        old = stack[row]
+        if not isinstance(old, dict):
+            return
+        if old.get("type") == new_type:
+            return
+
+        self._checkpoint("convert_shape")
+
+        converted = {"type": new_type, **self._default_component_values(new_type)}
+        converted["offset"] = float(old.get("offset", converted.get("offset", 0.0)))
+        converted["perp_offset"] = float(old.get("perp_offset", converted.get("perp_offset", 0.0)))
+        if "draggable" in old:
+            converted["draggable"] = _coerce_bool(old.get("draggable"), default=True)
+        if "_standard_base" in old:
+            converted["_standard_base"] = _coerce_bool(old.get("_standard_base"), default=False)
+        if "_standard_linked" in old:
+            converted["_standard_linked"] = _coerce_bool(old.get("_standard_linked"), default=True)
+
+        if new_type == "segment":
+            converted["thickness"] = float(old.get("thickness", max(1.0, float(old.get("radius", 6.0)))))
+            converted["angle_offset"] = float(old.get("angle_offset", 0.0))
+            converted["tip_offset"] = float(old.get("tip_offset", 0.0))
+        elif new_type == "circle":
+            converted["radius"] = float(old.get("radius", max(1.0, float(old.get("thickness", 6.0)))))
+        elif new_type == "square":
+            converted["size"] = float(old.get("size", max(1.0, float(old.get("radius", 10.0)) * 2.0)))
+            converted["angle_offset"] = float(old.get("angle_offset", 0.0))
+        elif new_type == "triangle":
+            converted["radius"] = float(old.get("radius", max(1.0, float(old.get("thickness", 6.0)))))
+            converted["angle_offset"] = float(old.get("angle_offset", 0.0))
+        else:  # curve
+            thickness = float(old.get("thickness", max(1.0, float(getattr(self.settings, "thickness", 6)))))
+            converted["thickness"] = thickness
+            converted["angle_offset"] = float(old.get("angle_offset", 0.0))
+
+            # If converting from a freehand curve, estimate length from endpoints.
+            length = float(old.get("length", 40.0))
+            if old.get("type") == "circle":
+                length = float(old.get("radius", 6.0)) * 4.0
+            elif old.get("type") in ("triangle", "polygon"):
+                length = float(old.get("radius", 12.0)) * 3.0
+            elif old.get("type") == "square":
+                length = float(old.get("size", 18.0))
+            elif old.get("type") == "curve":
+                pts = old.get("points")
+                if isinstance(pts, list) and len(pts) >= 2:
+                    try:
+                        x0, y0 = float(pts[0][0]), float(pts[0][1])
+                        x1, y1 = float(pts[-1][0]), float(pts[-1][1])
+                        length = ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
+                    except Exception:
+                        pass
+            length = max(1.0, length)
+            converted["start_dx"] = -length / 2.0
+            converted["start_dy"] = 0.0
+            converted["ctrl_dx"] = 0.0
+            converted["ctrl_dy"] = 0.0
+            converted["end_dx"] = length / 2.0
+            converted["end_dy"] = 0.0
+
+        stack[row] = converted
+        self.selected_component = converted
+
+        item = self.components_list.item(row) if hasattr(self, "components_list") else None
+        if item is not None:
+            item.setText(self._component_summary(converted))
+            item.setData(Qt.ItemDataRole.UserRole, converted)
+
+        self._set_component_editor_state(converted)
+        self._persist(self._current_scope_standard_key(), self._current_scope_custom_id())
+        self._update_preview()
 
     def _preview_mouse_press(self, event) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        
-        pos = QPointF(event.pos())
+
+        pos = self._map_label_to_pixmap(QPointF(event.pos()))
+
+        # Draw mode: click-drag creates a new object.
+        if getattr(self, "draw_mode_enabled", False):
+            stack = self._current_component_stack()
+            if stack is None:
+                return
+            self._checkpoint("draw")
+            self._snap_guides = {}
+            self._drawing_component = None
+            self._draw_start_pos = pos
+            along, perp = self._pixmap_to_line_coords(pos)
+            self._draw_start_along = along
+            self._draw_start_perp = perp
+            self._draw_last_along = along
+            self._draw_last_perp = perp
+
+            comp_type = self.draw_mode_type if self.draw_mode_type in ("segment", "circle", "square", "triangle", "curve") else "segment"
+            component = {"type": comp_type, **self._default_component_values(comp_type)}
+            component["draggable"] = _coerce_bool(component.get("draggable", True), default=True)
+
+            if comp_type == "segment":
+                component["offset"] = along
+                component["perp_offset"] = perp
+                component["length"] = 1.0
+                # start with current global thickness for convenience
+                component["thickness"] = float(max(1, getattr(self.settings, "thickness", 6)))
+                component["angle_offset"] = 0.0
+            elif comp_type == "circle":
+                component["offset"] = along
+                component["perp_offset"] = perp
+                component["radius"] = 1.0
+            elif comp_type == "square":
+                component["offset"] = along
+                component["perp_offset"] = perp
+                component["size"] = 1.0
+            elif comp_type == "triangle":
+                component["offset"] = along
+                component["perp_offset"] = perp
+                component["radius"] = 1.0
+            else:  # curve
+                component["offset"] = along
+                component["perp_offset"] = perp
+                component["thickness"] = float(max(1, getattr(self.settings, "thickness", 6)))
+                component["angle_offset"] = 0.0
+                # Freehand curve points relative to anchor (offset/perp_offset).
+                # Keep 2 points so a stroke appears immediately as you drag.
+                component["points"] = [[0.0, 0.0], [0.0, 0.0]]
+
+            stack.append(component)
+            item = QListWidgetItem(self._component_summary(component))
+            item.setData(Qt.ItemDataRole.UserRole, component)
+            self.components_list.addItem(item)
+            self.components_list.setCurrentRow(self.components_list.count() - 1)
+            self.selected_component = component
+            self._drawing_component = component
+            self._set_component_editor_state(component)
+            self._update_preview()
+            event.accept()
+            return
         
         # Check if clicking on a selection handle
         if self.selected_component and self.selection_handles:
             for handle_type, handle_rect in self.selection_handles:
                 if handle_rect.contains(pos):
+                    if handle_type in ("curve_start", "curve_ctrl", "curve_end"):
+                        if self.selected_component.get("type") == "curve":
+                            self._curve_drag_handle = handle_type
+                            self.drag_start_pos = pos
+                            self._pending_checkpoint_key = "curve_edit"
+                            event.accept()
+                            return
                     if handle_type == "delete":
-                        self._delete_current_component()
-                        self.selected_component = None
+                        self._remove_component()
+                        self.selected_component = self._current_component()
+                        self._update_preview()
+                        return
+                    elif handle_type == "duplicate":
+                        self._duplicate_component()
+                        self.selected_component = self._current_component()
                         self._update_preview()
                         return
                     elif handle_type == "rotate":
                         self.rotating = True
-                        self.drag_start_pos = event.pos()
+                        self.drag_start_pos = pos
+                        self._pending_checkpoint_key = "rotate"
                         import math
                         # Calculate initial angle from component center to mouse
                         self.rotation_start_angle = self.selected_component.get("angle_offset", 0.0)
@@ -2858,34 +4178,210 @@ class LineBuilderDialog(QWidget):
                         return
                     elif handle_type.startswith("resize"):
                         self.dragging_component = self.selected_component
-                        self.drag_start_pos = event.pos()
+                        self.drag_start_pos = pos
                         self.resize_mode = handle_type
+                        self._pending_checkpoint_key = "resize"
                         event.accept()
                         return
         
-        # Check if current component is draggable - select it
-        component = self._current_component()
-        if component and component.get("draggable", False):
-            self.selected_component = component
-            self.dragging_component = component
-            self.drag_start_pos = event.pos()
+        # Canva-like: click to select any object under the cursor.
+        hit = self._hit_test_component(pos)
+        if hit is not None:
+            self.selected_component = hit
+            self._select_component_row_for(hit)
+            if hasattr(self, "quick_duplicate_btn"):
+                self.quick_duplicate_btn.setEnabled(True)
+            if hasattr(self, "quick_delete_btn"):
+                self.quick_delete_btn.setEnabled(True)
+            # Only start dragging if this object is marked draggable.
+            if hit.get("draggable", True):
+                self.dragging_component = hit
+                self.drag_start_pos = pos
+                self._pending_checkpoint_key = "drag"
+
+                # Compute grab offset in line-local coordinates (absolute drag, not cumulative deltas).
+                mouse_along, mouse_perp = self._pixmap_to_line_coords(pos)
+                if hit.get("type") == "segment":
+                    length = float(hit.get("length", 40.0))
+                    anchor_along = float(hit.get("offset", 0.0)) + (length / 2.0)
+                else:
+                    anchor_along = float(hit.get("offset", 0.0))
+                anchor_perp = float(hit.get("perp_offset", 0.0))
+                self._drag_grab_delta_along = float(anchor_along) - float(mouse_along)
+                self._drag_grab_delta_perp = float(anchor_perp) - float(mouse_perp)
+            else:
+                self.dragging_component = None
+                self.drag_start_pos = None
             self._update_preview()
             event.accept()
-        else:
-            # Deselect if clicking empty area
-            if self.selected_component:
-                self.selected_component = None
-                self._update_preview()
+            return
+
+        # Deselect if clicking empty area
+        if self.selected_component:
+            self.selected_component = None
+            self.dragging_component = None
+            self.resize_mode = None
+            self.rotating = False
+            if hasattr(self, "quick_duplicate_btn"):
+                self.quick_duplicate_btn.setEnabled(False)
+            if hasattr(self, "quick_delete_btn"):
+                self.quick_delete_btn.setEnabled(False)
+            self._update_preview()
 
     def _preview_mouse_move(self, event) -> None:
         import math
+
+        raw_pos = self._map_label_to_pixmap(QPointF(event.pos()))
+        self._last_mouse_pos_pixmap = raw_pos
+        current_pos = raw_pos
+
+        # Draw mode in-progress update
+        if getattr(self, "draw_mode_enabled", False) and self._drawing_component is not None and self._draw_start_pos is not None:
+            comp = self._drawing_component
+            # Snap drawing to grid if enabled.
+            # Freehand curves should never snap (snapping makes the stroke feel point-to-point).
+            if comp.get("type") != "curve":
+                current_pos = self._snap_pixmap_point(current_pos)
+            dx = float(current_pos.x()) - float(self._draw_start_pos.x())
+            dy = float(current_pos.y()) - float(self._draw_start_pos.y())
+            dist = (dx * dx + dy * dy) ** 0.5
+
+            along2, perp2 = self._pixmap_to_line_coords(current_pos)
+
+            if comp.get("type") == "segment":
+                import math
+
+                a0 = float(self._draw_start_along)
+                p0 = float(self._draw_start_perp)
+                a1 = float(along2)
+                p1 = float(perp2)
+
+                da = a1 - a0
+                dp = p1 - p0
+                length = max(1.0, (da * da + dp * dp) ** 0.5)
+
+                # Place segment center at the midpoint between press and current.
+                center_along = (a0 + a1) / 2.0
+                center_perp = (p0 + p1) / 2.0
+                comp["offset"] = float(center_along) - (length / 2.0)
+                comp["perp_offset"] = float(center_perp)
+                comp["length"] = float(length)
+
+                # Rotate the segment so it matches the drag direction.
+                # (angle_offset is relative to the current scope axis.)
+                comp["angle_offset"] = float(math.degrees(math.atan2(dp, da))) if (abs(da) > 1e-6 or abs(dp) > 1e-6) else 0.0
+            elif comp.get("type") == "curve":
+                a1 = float(along2)
+                p1 = float(perp2)
+                # Freehand: append points relative to anchor (offset/perp_offset).
+                anchor_a = float(comp.get("offset", 0.0))
+                anchor_p = float(comp.get("perp_offset", 0.0))
+                rel_a = float(a1 - anchor_a)
+                rel_p = float(p1 - anchor_p)
+                pts = comp.get("points")
+                if not isinstance(pts, list):
+                    pts = [[0.0, 0.0], [0.0, 0.0]]
+                    comp["points"] = pts
+
+                # Always keep the last point at the cursor, and append samples as we move.
+                min_step = 0.75
+                if len(pts) < 2:
+                    pts.append([rel_a, rel_p])
+                else:
+                    # If we're far enough from the previous fixed sample, append; otherwise update the live tail.
+                    prev = pts[-2]
+                    try:
+                        pa = float(prev[0])
+                        pp = float(prev[1])
+                    except (TypeError, ValueError, IndexError):
+                        pa, pp = 0.0, 0.0
+                    ddx = rel_a - pa
+                    ddy = rel_p - pp
+                    if (ddx * ddx + ddy * ddy) >= (min_step * min_step):
+                        pts.append([rel_a, rel_p])
+                    else:
+                        pts[-1] = [rel_a, rel_p]
+            elif comp.get("type") == "circle":
+                comp["radius"] = max(1.0, dist)
+            elif comp.get("type") == "square":
+                comp["size"] = max(1.0, max(abs(dx), abs(dy)) * 2.0)
+            else:  # triangle
+                comp["radius"] = max(1.0, dist)
+
+            # Update list row text
+            row = self.components_list.currentRow()
+            if row >= 0:
+                item = self.components_list.item(row)
+                if item is not None:
+                    item.setText(self._component_summary(comp))
+                    item.setData(Qt.ItemDataRole.UserRole, comp)
+
+            self._sync_component_form(comp)
+            self._update_preview()
+            event.accept()
+            return
+
+        # Curve control-point drag
+        if (
+            self._curve_drag_handle
+            and self.selected_component
+            and self.selected_component.get("type") == "curve"
+            and self.drag_start_pos is not None
+        ):
+            if self._pending_checkpoint_key == "curve_edit":
+                self._checkpoint("curve_edit")
+                self._pending_checkpoint_key = None
+
+            cur = self.selected_component
+            current_pos = self._map_label_to_pixmap(QPointF(event.pos()))
+            current_pos = self._snap_pixmap_point(current_pos)
+
+            along, perp = self._pixmap_to_line_coords(current_pos)
+            anchor_along = float(cur.get("offset", 0.0))
+            anchor_perp = float(cur.get("perp_offset", 0.0))
+            rot = math.radians(float(cur.get("angle_offset", 0.0)))
+            cos_r = math.cos(rot)
+            sin_r = math.sin(rot)
+
+            rx = float(along) - anchor_along
+            ry = float(perp) - anchor_perp
+            # Invert rotation: rotate by -rot
+            dx_local = rx * cos_r + ry * sin_r
+            dy_local = -rx * sin_r + ry * cos_r
+
+            if self._curve_drag_handle == "curve_start":
+                cur["start_dx"] = float(dx_local)
+                cur["start_dy"] = float(dy_local)
+            elif self._curve_drag_handle == "curve_ctrl":
+                cur["ctrl_dx"] = float(dx_local)
+                cur["ctrl_dy"] = float(dy_local)
+            else:
+                cur["end_dx"] = float(dx_local)
+                cur["end_dy"] = float(dy_local)
+
+            row = self.components_list.currentRow()
+            if row >= 0:
+                item = self.components_list.item(row)
+                if item is not None:
+                    item.setText(self._component_summary(cur))
+                    item.setData(Qt.ItemDataRole.UserRole, cur)
+
+            self._sync_component_form(cur)
+            self._update_preview()
+            event.accept()
+            return
         
         # Handle rotation
         if self.rotating and self.drag_start_pos and self.selected_component:
-            delta = event.pos() - self.drag_start_pos
-            # Simple rotation based on horizontal movement
-            angle_change = delta.x() * 0.5  # Sensitivity factor
-            new_angle = self.rotation_start_angle + angle_change
+            if self._pending_checkpoint_key == "rotate":
+                self._checkpoint("rotate")
+                self._pending_checkpoint_key = None
+            self._snap_guides = {}
+            delta = current_pos - self.drag_start_pos
+            self.drag_start_pos = current_pos
+            # Simple rotation based on horizontal movement (invert so it matches cursor direction)
+            angle_change = -delta.x() * 0.5  # Sensitivity factor
+            new_angle = float(self.selected_component.get("angle_offset", 0.0)) + angle_change
             
             # Snap to 15-degree increments if shift is held
             if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
@@ -2899,20 +4395,45 @@ class LineBuilderDialog(QWidget):
         
         # Handle resizing
         if hasattr(self, 'resize_mode') and self.resize_mode and self.dragging_component and self.drag_start_pos:
-            delta = event.pos() - self.drag_start_pos
-            self.drag_start_pos = event.pos()
+            if self._pending_checkpoint_key == "resize":
+                self._checkpoint("resize")
+                self._pending_checkpoint_key = None
+            self._snap_guides = {}
+            delta = current_pos - self.drag_start_pos
+            self.drag_start_pos = current_pos
+
+            # Compute orientation (line angle + component rotation)
+            base_angle, layer_angle_offset = self._current_line_angles()
+
+            component_angle = float(self.dragging_component.get("angle_offset", 0.0))
+            orient_rad = math.radians(base_angle + layer_angle_offset + component_angle)
+            cos_o = math.cos(orient_rad)
+            sin_o = math.sin(orient_rad)
+
+            # Projections along the component axis and its normal
+            along = delta.x() * cos_o + delta.y() * sin_o
+            normal = -delta.x() * sin_o + delta.y() * cos_o
             
             if self.resize_mode == "resize_length":
-                current_length = self.dragging_component.get("length", 40.0)
-                new_length = max(1.0, current_length + delta.x())
+                current_length = float(self.dragging_component.get("length", 40.0))
+                new_length = max(1.0, current_length + along)
+                delta_len = new_length - current_length
+
+                # Keep segment midpoint fixed (offset + length/2 stays constant)
+                current_offset = float(self.dragging_component.get("offset", 0.0))
+                if self.dragging_component.get("_standard_base") and self.dragging_component.get("_standard_linked", True):
+                    self.dragging_component["_standard_linked"] = False
+                self.dragging_component["offset"] = current_offset - (delta_len / 2.0)
                 self.dragging_component["length"] = new_length
                 self._sync_component_form(self.dragging_component)
                 self._update_preview()
                 event.accept()
                 return
             elif self.resize_mode == "resize_thickness":
-                current_thickness = self.dragging_component.get("thickness", 4.0)
-                new_thickness = max(1.0, current_thickness + delta.y())
+                current_thickness = float(self.dragging_component.get("thickness", 4.0))
+                new_thickness = max(1.0, current_thickness + normal)
+                if self.dragging_component.get("_standard_base") and self.dragging_component.get("_standard_linked", True):
+                    self.dragging_component["_standard_linked"] = False
                 self.dragging_component["thickness"] = new_thickness
                 self._sync_component_form(self.dragging_component)
                 self._update_preview()
@@ -2922,67 +4443,100 @@ class LineBuilderDialog(QWidget):
         # Handle normal dragging
         if self.dragging_component is None or self.drag_start_pos is None:
             return
-        
-        delta = event.pos() - self.drag_start_pos
-        self.drag_start_pos = event.pos()
-        
-        # Get the base angle for this component's line
-        layer = self._current_custom_layer()
-        if layer:
-            base_angle = layer.get("angle", 0.0)
-            angle_offset = layer.get("angle_offset", 0.0)
+
+        if self._pending_checkpoint_key == "drag":
+            self._checkpoint("drag")
+            self._pending_checkpoint_key = None
+
+        # Absolute dragging in line-local coords (avoids jitter/roughness when snapping).
+        mouse_along, mouse_perp = self._pixmap_to_line_coords(current_pos)
+        desired_anchor_along = float(mouse_along) + float(self._drag_grab_delta_along)
+        desired_perp_offset = float(mouse_perp) + float(self._drag_grab_delta_perp)
+
+        if self.dragging_component.get("type") == "segment":
+            length = float(self.dragging_component.get("length", 40.0))
+            new_offset = desired_anchor_along - (length / 2.0)
+            anchor_offset = desired_anchor_along
         else:
-            # For standard lines, get the angle from the active scope
-            if self.active_scope_id in ["show_left", "show_right"]:
-                base_angle = 180 if self.active_scope_id == "show_left" else 0
-            elif self.active_scope_id in ["show_top", "show_bottom"]:
-                base_angle = 90 if self.active_scope_id == "show_top" else 270
-            else:
-                base_angle = 0
-            angle_offset = 0
-        
-        # Get component's own angle offset
-        component_angle = self.dragging_component.get("angle_offset", 0.0)
-        total_angle = base_angle + angle_offset + component_angle
-        
-        # Convert angle to radians
-        import math
-        angle_rad = math.radians(total_angle)
-        
-        # Project mouse movement onto the line's direction (parallel to line)
-        offset_delta = delta.x() * math.cos(angle_rad) + delta.y() * math.sin(angle_rad)
-        
-        # Project mouse movement perpendicular to the line (for angle_offset)
-        # Perpendicular is 90 degrees from the line angle
-        perp_angle_rad = angle_rad + math.pi / 2
-        angle_offset_delta = delta.x() * math.cos(perp_angle_rad) + delta.y() * math.sin(perp_angle_rad)
-        
-        # Update offset (parallel movement)
-        current_offset = self.dragging_component.get("offset", 0.0)
-        new_offset = current_offset + offset_delta
-        
-        # Update perp_offset (perpendicular movement) instead of angle_offset
-        current_perp_offset = self.dragging_component.get("perp_offset", 0.0)
-        new_perp_offset = current_perp_offset + angle_offset_delta
+            new_offset = desired_anchor_along
+            anchor_offset = desired_anchor_along
+
+        new_perp_offset = desired_perp_offset
         
         # Apply magnetic snapping to grid lines when snap is enabled
-        if self.grid_snap_enabled and self.grid_size > 1:
-            snap_threshold_parallel = self.grid_size / 5
-            snap_threshold_perp = self.grid_size / 8  # Even smaller threshold for more responsive perpendicular movement
-            
-            # Snap parallel offset
-            nearest_grid_offset = round(new_offset / self.grid_size) * self.grid_size
-            distance_offset = abs(new_offset - nearest_grid_offset)
-            if distance_offset < snap_threshold_parallel:
-                new_offset = nearest_grid_offset
-            
-            # Snap perpendicular offset
-            nearest_grid_perp = round(new_perp_offset / self.grid_size) * self.grid_size
-            distance_perp = abs(new_perp_offset - nearest_grid_perp)
-            if distance_perp < snap_threshold_perp:
-                new_perp_offset = nearest_grid_perp
+        grid_size = self._effective_grid_size()
+        if self.grid_snap_enabled and grid_size > 1:
+            # IMPORTANT: snap to the *visible* grid (axis-aligned in screen space),
+            # not to the line-local axes.
+            snap_threshold_x = max(4.0, float(grid_size) / 6.0)
+            snap_threshold_y = max(4.0, float(grid_size) / 6.0)
+
+            self._snap_guides = {}
+
+            base_angle, angle_offset = self._current_line_angles()
+            angle_rad = math.radians(base_angle + angle_offset)
+
+            cos_a = math.cos(angle_rad)
+            sin_a = math.sin(angle_rad)
+
+            # Snap using component anchor (segment midpoint / circle center).
+            anchor_offset = float(anchor_offset)
+
+            # Convert (anchor_along, perp) -> screen-space coords (relative to center)
+            x_rel = anchor_offset * cos_a - new_perp_offset * sin_a
+            y_rel = anchor_offset * sin_a + new_perp_offset * cos_a
+
+            # Snap X
+            nearest_x = round(x_rel / grid_size) * grid_size
+            if abs(x_rel - nearest_x) < snap_threshold_x:
+                x_rel = nearest_x
+                self._snap_guides["x"] = (self._preview_pixmap_size[0] / 2.0) + float(nearest_x)
+
+            # Snap Y
+            nearest_y = round(y_rel / grid_size) * grid_size
+            if abs(y_rel - nearest_y) < snap_threshold_y:
+                y_rel = nearest_y
+                self._snap_guides["y"] = (self._preview_pixmap_size[1] / 2.0) + float(nearest_y)
+
+            # Align-to-other object anchors (quick tidy-up guides).
+            stack = self._current_component_stack() or []
+            align_threshold = min(4.0, float(grid_size) / 8.0)
+            for other in stack:
+                if not isinstance(other, dict) or other is self.dragging_component:
+                    continue
+                other_type = other.get("type")
+                if other_type == "segment":
+                    other_len = float(other.get("length", 40.0))
+                    other_anchor = float(other.get("offset", 0.0)) + (other_len / 2.0)
+                else:
+                    other_anchor = float(other.get("offset", 0.0))
+                other_perp = float(other.get("perp_offset", 0.0))
+                other_x = other_anchor * cos_a - other_perp * sin_a
+                other_y = other_anchor * sin_a + other_perp * cos_a
+
+                if abs(x_rel - other_x) < align_threshold:
+                    x_rel = other_x
+                    self._snap_guides["x"] = (self._preview_pixmap_size[0] / 2.0) + float(other_x)
+                if abs(y_rel - other_y) < align_threshold:
+                    y_rel = other_y
+                    self._snap_guides["y"] = (self._preview_pixmap_size[1] / 2.0) + float(other_y)
+
+            # Convert back screen-space -> (anchor_along, perp)
+            anchor_offset = x_rel * cos_a + y_rel * sin_a
+            new_perp_offset = -x_rel * sin_a + y_rel * cos_a
+
+            # Convert anchor -> stored offset
+            if self.dragging_component.get("type") == "segment":
+                length = float(self.dragging_component.get("length", 40.0))
+                new_offset = anchor_offset - (length / 2.0)
+            else:
+                new_offset = anchor_offset
+        else:
+            self._snap_guides = {}
         
         # Update both offset and perp_offset
+        if self.dragging_component.get("_standard_base") and self.dragging_component.get("_standard_linked", True):
+            self.dragging_component["_standard_linked"] = False
         self.dragging_component["offset"] = new_offset
         self.dragging_component["perp_offset"] = new_perp_offset
         
@@ -2990,25 +4544,58 @@ class LineBuilderDialog(QWidget):
         self._sync_component_form(self.dragging_component)
         self._update_preview()
         event.accept()
-        event.accept()
 
     def _preview_mouse_release(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
+            ended_action = False
+            if getattr(self, "draw_mode_enabled", False) and self._drawing_component is not None:
+                self._drawing_component = None
+                self._draw_start_pos = None
+                self._snap_guides = {}
+                self._persist(self._current_scope_standard_key(), self._current_scope_custom_id())
+                self._pending_checkpoint_key = None
+                ended_action = True
+
+                self._end_history_group()
+                event.accept()
+                return
             if self.dragging_component is not None:
                 self.dragging_component = None
                 self.drag_start_pos = None
+                self._snap_guides = {}
                 self._persist(self._current_scope_standard_key(), self._current_scope_custom_id())
+                self._pending_checkpoint_key = None
+                ended_action = True
                 event.accept()
             if self.rotating:
                 self.rotating = False
                 self.drag_start_pos = None
+                self._snap_guides = {}
                 self._persist(self._current_scope_standard_key(), self._current_scope_custom_id())
+                self._pending_checkpoint_key = None
+                ended_action = True
                 event.accept()
             if hasattr(self, 'resize_mode'):
                 self.resize_mode = None
                 self.drag_start_pos = None
+                self._snap_guides = {}
+                self._pending_checkpoint_key = None
+                ended_action = True
+
+            if ended_action:
+                self._end_history_group()
+
+            # End curve point editing
+            if self._curve_drag_handle is not None:
+                self._curve_drag_handle = None
+                self.drag_start_pos = None
+                self._persist(self._current_scope_standard_key(), self._current_scope_custom_id())
+                self._pending_checkpoint_key = None
+                self._end_history_group()
+                event.accept()
 
     def _on_add_custom_line(self) -> None:
+        self._checkpoint("add_custom_line")
         layer = self._create_default_layer()
         self.settings.line_layers.append(layer)
         self._build_custom_list(selected_id=layer["id"])
@@ -3019,6 +4606,7 @@ class LineBuilderDialog(QWidget):
         row = self.custom_list.currentRow()
         if layer is None or row < 0:
             return
+        self._checkpoint("duplicate_custom_line")
         clone = self._create_default_layer()
         clone.update(
             {
@@ -3041,6 +4629,7 @@ class LineBuilderDialog(QWidget):
         row = self.custom_list.currentRow()
         if row < 0 or row >= len(self.settings.line_layers):
             return
+        self._checkpoint("remove_custom_line")
         removed_id = self.custom_list.item(row).data(Qt.ItemDataRole.UserRole)
         self.settings.line_layers = [layer for layer in self.settings.line_layers if layer.get("id") != removed_id]
         self._build_custom_list()
@@ -3070,6 +4659,7 @@ class LineBuilderDialog(QWidget):
         }
 
     def _on_custom_rows_moved(self, *_) -> None:
+        self._checkpoint("reorder_custom_lines")
         self._sync_custom_order_from_view()
 
     def _sync_custom_order_from_view(self) -> None:
@@ -3090,6 +4680,7 @@ class LineBuilderDialog(QWidget):
         layer = self._current_custom_layer()
         if layer is None:
             return
+        self._checkpoint("layer:label")
         layer["label"] = text.strip() or "Custom Line"
         self._refresh_custom_item_text(layer["id"])
         self._persist(custom_id=layer["id"])
@@ -3098,6 +4689,7 @@ class LineBuilderDialog(QWidget):
         layer = self._current_custom_layer()
         if layer is None:
             return
+        self._checkpoint("layer:enabled")
         layer["enabled"] = enabled
         self._refresh_custom_item_text(layer["id"])
         self._persist(custom_id=layer["id"])
@@ -3106,13 +4698,23 @@ class LineBuilderDialog(QWidget):
         layer = self._current_custom_layer()
         if layer is None:
             return
+        self._checkpoint("layer:draggable")
         layer["draggable"] = enabled
+        # Apply to all objects so the toggle actually affects dragging behavior.
+        stack = self._current_component_stack()
+        if isinstance(stack, list):
+            for comp in stack:
+                if isinstance(comp, dict):
+                    comp["draggable"] = enabled
+        if self.selected_component is not None:
+            self._sync_component_form(self.selected_component)
         self._persist(custom_id=layer["id"])
 
     def _on_layer_angle_changed(self, value: float) -> None:
         layer = self._current_custom_layer()
         if layer is None:
             return
+        self._checkpoint("layer:angle")
         # Don't reset offset when changing angle - just update the angle
         layer["angle"] = value
         self._refresh_custom_item_text(layer["id"])
@@ -3122,6 +4724,7 @@ class LineBuilderDialog(QWidget):
         layer = self._current_custom_layer()
         if layer is None:
             return
+        self._checkpoint("layer:angle_offset")
         layer["angle_offset"] = value
         self._persist(custom_id=layer["id"])
 
@@ -3129,6 +4732,7 @@ class LineBuilderDialog(QWidget):
         layer = self._current_custom_layer()
         if layer is None:
             return
+        self._checkpoint("layer:gap")
         layer["gap"] = max(0.0, value)
         self._persist(custom_id=layer["id"])
 
@@ -3136,6 +4740,7 @@ class LineBuilderDialog(QWidget):
         layer = self._current_custom_layer()
         if layer is None:
             return
+        self._checkpoint("layer:length")
         layer["length"] = max(0.0, value)
         self._persist(custom_id=layer["id"])
 
@@ -3143,6 +4748,7 @@ class LineBuilderDialog(QWidget):
         layer = self._current_custom_layer()
         if layer is None:
             return
+        self._checkpoint("layer:thickness")
         layer["thickness"] = max(0.1, value)
         self._persist(custom_id=layer["id"])
 
@@ -3150,6 +4756,7 @@ class LineBuilderDialog(QWidget):
         layer = self._current_custom_layer()
         if layer is None:
             return
+        self._checkpoint("layer:tip")
         layer["tip_offset"] = value
         self._persist(custom_id=layer["id"])
 
@@ -3208,6 +4815,19 @@ class LineBuilderDialog(QWidget):
         size = self.preview_label.size()
         w = max(size.width(), 240)
         h = max(size.height(), 240)
+
+        self._preview_pixmap_size = (w, h)
+        label_w = max(1, size.width())
+        label_h = max(1, size.height())
+        scale = min(label_w / w, label_h / h)
+        scaled_w = w * scale
+        scaled_h = h * scale
+        offset_x = (label_w - scaled_w) / 2.0
+        offset_y = (label_h - scaled_h) / 2.0
+        self._preview_scale = scale
+        self._preview_offset = (offset_x, offset_y)
+
+        grid_size = self._effective_grid_size()
         
         pixmap = QPixmap(w, h)
         pixmap.fill(QColor(10, 10, 15, 220))
@@ -3225,21 +4845,21 @@ class LineBuilderDialog(QWidget):
             x = center_x
             while x < w:
                 painter.drawLine(x, 0, x, h)
-                x += self.grid_size
-            x = center_x - self.grid_size
+                x += grid_size
+            x = center_x - grid_size
             while x >= 0:
                 painter.drawLine(x, 0, x, h)
-                x -= self.grid_size
+                x -= grid_size
             
             # Horizontal lines
             y = center_y
             while y < h:
                 painter.drawLine(0, y, w, y)
-                y += self.grid_size
-            y = center_y - self.grid_size
+                y += grid_size
+            y = center_y - grid_size
             while y >= 0:
                 painter.drawLine(0, y, w, y)
-                y -= self.grid_size
+                y -= grid_size
             
             # Center crosshair
             painter.setPen(QPen(QColor(255, 255, 255, 120), 1, Qt.PenStyle.DashLine))
@@ -3259,6 +4879,17 @@ class LineBuilderDialog(QWidget):
         # Composite the crosshair onto the grid
         painter = QPainter(pixmap)
         painter.drawPixmap(0, 0, crosshair_pixmap)
+
+        # Draw snap guides on top (only during active drag).
+        if self.dragging_component is not None and isinstance(getattr(self, "_snap_guides", None), dict) and self._snap_guides:
+            pen = QPen(QColor(0, 188, 212, 200), 2, Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            gx = self._snap_guides.get("x")
+            gy = self._snap_guides.get("y")
+            if isinstance(gx, (int, float)):
+                painter.drawLine(int(gx), 0, int(gx), h)
+            if isinstance(gy, (int, float)):
+                painter.drawLine(0, int(gy), w, int(gy))
         
         # Draw selection handles if a component is selected
         if self.selected_component:
@@ -3271,70 +4902,347 @@ class LineBuilderDialog(QWidget):
             pixmap.scaled(size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         )
 
+    def _map_label_to_pixmap(self, pos: QPointF) -> QPointF:
+        scale = self._preview_scale if self._preview_scale else 1.0
+        offset_x, offset_y = self._preview_offset
+        return QPointF((pos.x() - offset_x) / scale, (pos.y() - offset_y) / scale)
+
+    def _effective_grid_size(self) -> int:
+        spin = getattr(self, "grid_size_spin", None)
+        if isinstance(spin, QSpinBox):
+            return int(spin.value())
+        return int(self.grid_size)
+
+    def _pixmap_to_line_coords(self, pos: QPointF) -> tuple[float, float]:
+        """Convert a pixmap-space point into (along, perp) for the current scope."""
+        import math
+
+        w, h = self._preview_pixmap_size if isinstance(getattr(self, "_preview_pixmap_size", None), tuple) else (240, 240)
+        center_x = int(w) // 2
+        center_y = int(h) // 2
+        x_rel = float(pos.x()) - float(center_x)
+        y_rel = float(pos.y()) - float(center_y)
+
+        base_angle, layer_angle_offset = self._current_line_angles()
+        angle_rad = math.radians(base_angle + layer_angle_offset)
+        cos_a = math.cos(angle_rad)
+        sin_a = math.sin(angle_rad)
+
+        along = x_rel * cos_a + y_rel * sin_a
+        perp = -x_rel * sin_a + y_rel * cos_a
+        return float(along), float(perp)
+
+    def _line_coords_to_pixmap(self, along: float, perp: float) -> QPointF:
+        """Convert (along, perp) in current scope into pixmap-space point."""
+        import math
+
+        w, h = self._preview_pixmap_size if isinstance(getattr(self, "_preview_pixmap_size", None), tuple) else (240, 240)
+        center_x = int(w) // 2
+        center_y = int(h) // 2
+
+        base_angle, layer_angle_offset = self._current_line_angles()
+        angle_rad = math.radians(base_angle + layer_angle_offset)
+        cos_a = math.cos(angle_rad)
+        sin_a = math.sin(angle_rad)
+
+        x_rel = float(along) * cos_a - float(perp) * sin_a
+        y_rel = float(along) * sin_a + float(perp) * cos_a
+        return QPointF(float(center_x) + x_rel, float(center_y) + y_rel)
+
+    def _curve_handle_points_pixmap(self, component: dict) -> dict[str, QPointF]:
+        """Return pixmap-space points for curve start/control/end."""
+        import math
+
+        anchor_along = float(component.get("offset", 0.0))
+        anchor_perp = float(component.get("perp_offset", 0.0))
+        rot = math.radians(float(component.get("angle_offset", 0.0)))
+        cos_r = math.cos(rot)
+        sin_r = math.sin(rot)
+
+        def to_line(dx: float, dy: float) -> tuple[float, float]:
+            xr = float(dx) * cos_r - float(dy) * sin_r
+            yr = float(dx) * sin_r + float(dy) * cos_r
+            return anchor_along + xr, anchor_perp + yr
+
+        s_along, s_perp = to_line(float(component.get("start_dx", -20.0)), float(component.get("start_dy", 0.0)))
+        c_along, c_perp = to_line(float(component.get("ctrl_dx", 0.0)), float(component.get("ctrl_dy", 0.0)))
+        e_along, e_perp = to_line(float(component.get("end_dx", 20.0)), float(component.get("end_dy", 0.0)))
+
+        return {
+            "start": self._line_coords_to_pixmap(s_along, s_perp),
+            "ctrl": self._line_coords_to_pixmap(c_along, c_perp),
+            "end": self._line_coords_to_pixmap(e_along, e_perp),
+        }
+
+    def _snap_pixmap_point(self, pos: QPointF) -> QPointF:
+        """Snap a pixmap-space point to the visible grid (screen space)."""
+        if not self.grid_snap_enabled:
+            return pos
+
+        grid_size = self._effective_grid_size()
+        if grid_size <= 1:
+            return pos
+
+        w, h = self._preview_pixmap_size if isinstance(getattr(self, "_preview_pixmap_size", None), tuple) else (240, 240)
+        center_x = float(int(w) // 2)
+        center_y = float(int(h) // 2)
+
+        x_rel = float(pos.x()) - center_x
+        y_rel = float(pos.y()) - center_y
+
+        snap_threshold_x = max(4.0, float(grid_size) / 6.0)
+        snap_threshold_y = max(4.0, float(grid_size) / 6.0)
+
+        nearest_x = round(x_rel / grid_size) * grid_size
+        if abs(x_rel - nearest_x) < snap_threshold_x:
+            x_rel = nearest_x
+
+        nearest_y = round(y_rel / grid_size) * grid_size
+        if abs(y_rel - nearest_y) < snap_threshold_y:
+            y_rel = nearest_y
+
+        return QPointF(center_x + x_rel, center_y + y_rel)
+
+    def _on_draw_mode_toggled(self, enabled: bool) -> None:
+        self.draw_mode_enabled = bool(enabled)
+        # Cancel any in-progress drag/rotate/resize when entering draw mode.
+        if self.draw_mode_enabled:
+            self.dragging_component = None
+            self.rotating = False
+            self.resize_mode = None
+
+    def _on_draw_type_changed(self, index: int) -> None:
+        if index == 0:
+            self.draw_mode_type = "segment"
+        elif index == 1:
+            self.draw_mode_type = "circle"
+        elif index == 2:
+            self.draw_mode_type = "square"
+        elif index == 3:
+            self.draw_mode_type = "triangle"
+        else:
+            self.draw_mode_type = "curve"
+
+    def _capture_history_state(self) -> dict:
+        return {
+            "line_components": deepcopy(self.settings.line_components) if isinstance(self.settings.line_components, dict) else {},
+            "line_layers": deepcopy(self.settings.line_layers) if isinstance(self.settings.line_layers, list) else [],
+            "active_scope_kind": self.active_scope_kind,
+            "active_scope_id": self.active_scope_id,
+            "standard_row": int(self.standard_list.currentRow()) if hasattr(self, "standard_list") else -1,
+            "custom_row": int(self.custom_list.currentRow()) if hasattr(self, "custom_list") else -1,
+            "component_row": int(self.components_list.currentRow()) if hasattr(self, "components_list") else -1,
+        }
+
+    def _restore_history_state(self, state: dict) -> None:
+        self._history_suspended = True
+        try:
+            self.settings.line_components = deepcopy(state.get("line_components", {}))
+            self.settings.line_layers = deepcopy(state.get("line_layers", []))
+
+            self._build_standard_list()
+            self._build_custom_list(selected_id=state.get("active_scope_id") if state.get("active_scope_kind") == "custom" else None)
+
+            kind = state.get("active_scope_kind")
+            if kind == "standard":
+                row = int(state.get("standard_row", 0))
+                self.standard_list.setCurrentRow(max(-1, row))
+            elif kind == "custom":
+                row = int(state.get("custom_row", -1))
+                self.custom_list.setCurrentRow(max(-1, row))
+            else:
+                self.standard_list.setCurrentRow(-1)
+                self.custom_list.setCurrentRow(-1)
+
+            self._refresh_component_list()
+            comp_row = int(state.get("component_row", -1))
+            if comp_row >= 0:
+                self.components_list.setCurrentRow(comp_row)
+
+            self._update_layer_metadata_view()
+            self._update_preview()
+        finally:
+            self._history_suspended = False
+
+        self.parent_dialog._persist_and_render()
+        self._update_history_buttons()
+
+    def _end_history_group(self) -> None:
+        self._history_group_key = None
+
+    def _checkpoint(self, key: str) -> None:
+        if self._history_suspended:
+            return
+
+        # Coalesce rapid edits of the same kind into one undo step.
+        if self._history_group_key != key:
+            self._history_group_key = key
+            self._undo_stack.append(self._capture_history_state())
+            self._redo_stack.clear()
+        self._history_group_timer.start(700)
+        self._update_history_buttons()
+
+    def _update_history_buttons(self) -> None:
+        if hasattr(self, "undo_btn"):
+            self.undo_btn.setEnabled(len(self._undo_stack) > 0)
+        if hasattr(self, "redo_btn"):
+            self.redo_btn.setEnabled(len(self._redo_stack) > 0)
+
+    def _undo(self) -> None:
+        if not self._undo_stack:
+            return
+        self._history_group_timer.stop()
+        self._history_group_key = None
+        current = self._capture_history_state()
+        state = self._undo_stack.pop()
+        self._redo_stack.append(current)
+        self._restore_history_state(state)
+
+    def _redo(self) -> None:
+        if not self._redo_stack:
+            return
+        self._history_group_timer.stop()
+        self._history_group_key = None
+        current = self._capture_history_state()
+        state = self._redo_stack.pop()
+        self._undo_stack.append(current)
+        self._restore_history_state(state)
+
     def _draw_selection_handles(self, painter, w: int, h: int) -> None:
         """Draw selection handles around the selected component"""
         import math
         
         # Get component position
-        layer = self._current_custom_layer()
-        if layer:
-            base_angle = layer.get("angle", 0.0)
-        else:
-            if self.active_scope_id in ["show_left", "show_right"]:
-                base_angle = 180 if self.active_scope_id == "show_left" else 0
-            elif self.active_scope_id in ["show_top", "show_bottom"]:
-                base_angle = 90 if self.active_scope_id == "show_top" else 270
-            else:
-                base_angle = 0
+        base_angle, layer_angle_offset = self._current_line_angles()
         
         offset = self.selected_component.get("offset", 0.0)
         perp_offset = self.selected_component.get("perp_offset", 0.0)
-        component_angle = self.selected_component.get("angle_offset", 0.0)
-        total_angle = base_angle + component_angle
+        component_angle = float(self.selected_component.get("angle_offset", 0.0))
+        line_angle = base_angle + layer_angle_offset
+        orient_angle = line_angle + component_angle
         
-        # Calculate component center position
+        # Calculate component center position (segment midpoint / circle center)
         center_x = w // 2
         center_y = h // 2
-        angle_rad = math.radians(total_angle)
-        
-        comp_x = center_x + offset * math.cos(angle_rad) - perp_offset * math.sin(angle_rad)
-        comp_y = center_y + offset * math.sin(angle_rad) + perp_offset * math.cos(angle_rad)
-        
-        # Get component size
+
+        line_rad = math.radians(line_angle)
         if self.selected_component.get("type") == "segment":
-            length = self.selected_component.get("length", 40.0)
-            thickness = self.selected_component.get("thickness", 4.0)
-            half_len = length / 2
-            half_thick = thickness / 2 + 15
-        else:  # circle
-            radius = self.selected_component.get("radius", 10.0)
-            half_len = radius + 15
-            half_thick = radius + 15
+            length = float(self.selected_component.get("length", 40.0))
+            anchor_offset = float(offset) + (length / 2.0)
+        else:
+            anchor_offset = float(offset)
+
+        comp_x = center_x + anchor_offset * math.cos(line_rad) - float(perp_offset) * math.sin(line_rad)
+        comp_y = center_y + anchor_offset * math.sin(line_rad) + float(perp_offset) * math.cos(line_rad)
+        
+        # Get component size for handle placement
+        ctype = self.selected_component.get("type")
+        if ctype == "segment":
+            length = float(self.selected_component.get("length", 40.0))
+            thickness = float(self.selected_component.get("thickness", 4.0))
+            half_len = length / 2.0
+            half_thick = thickness / 2.0 + 15.0
+        elif ctype == "square":
+            size = float(self.selected_component.get("size", 18.0))
+            half_len = (size / 2.0) + 15.0
+            half_thick = (size / 2.0) + 15.0
+        elif ctype == "curve":
+            # For freehand curves (points list), use bounds based on the points; for bezier curves, use handle points.
+            raw_pts = self.selected_component.get("points")
+            if isinstance(raw_pts, list) and len(raw_pts) >= 2:
+                offset = float(self.selected_component.get("offset", 0.0))
+                perp_offset = float(self.selected_component.get("perp_offset", 0.0))
+
+                min_x = float("inf")
+                max_x = float("-inf")
+                min_y = float("inf")
+                max_y = float("-inf")
+
+                for p in raw_pts:
+                    if not (isinstance(p, (list, tuple)) and len(p) == 2):
+                        continue
+                    if not (isinstance(p[0], (int, float)) and isinstance(p[1], (int, float))):
+                        continue
+                    pt = self._line_coords_to_pixmap(offset + float(p[0]), perp_offset + float(p[1]))
+                    min_x = min(min_x, float(pt.x()))
+                    max_x = max(max_x, float(pt.x()))
+                    min_y = min(min_y, float(pt.y()))
+                    max_y = max(max_y, float(pt.y()))
+
+                if min_x != float("inf"):
+                    comp_x = (min_x + max_x) / 2.0
+                    comp_y = (min_y + max_y) / 2.0
+                    half_len = ((max_x - min_x) / 2.0) + 15.0
+                    half_thick = ((max_y - min_y) / 2.0) + 15.0
+                else:
+                    half_len = 30.0
+                    half_thick = 30.0
+            else:
+                pts = self._curve_handle_points_pixmap(self.selected_component)
+                p0 = pts["start"]
+                p1 = pts["ctrl"]
+                p2 = pts["end"]
+
+                # Expand bounds by sampling the curve.
+                min_x = min(p0.x(), p1.x(), p2.x())
+                max_x = max(p0.x(), p1.x(), p2.x())
+                min_y = min(p0.y(), p1.y(), p2.y())
+                max_y = max(p0.y(), p1.y(), p2.y())
+                for i in range(1, 17):
+                    t = i / 16.0
+                    mt = 1.0 - t
+                    x = (mt * mt) * p0.x() + (2.0 * mt * t) * p1.x() + (t * t) * p2.x()
+                    y = (mt * mt) * p0.y() + (2.0 * mt * t) * p1.y() + (t * t) * p2.y()
+                    min_x = min(min_x, float(x))
+                    max_x = max(max_x, float(x))
+                    min_y = min(min_y, float(y))
+                    max_y = max(max_y, float(y))
+
+                comp_x = (min_x + max_x) / 2.0
+                comp_y = (min_y + max_y) / 2.0
+                half_len = ((max_x - min_x) / 2.0) + 15.0
+                half_thick = ((max_y - min_y) / 2.0) + 15.0
+        else:  # circle / triangle / legacy polygon
+            radius = float(self.selected_component.get("radius", 10.0))
+            half_len = radius + 15.0
+            half_thick = radius + 15.0
         
         # Store handle positions for hit testing
         self.selection_handles = []
         handle_size = 24
         button_size = 28
+
+        # Slight spacing to make controls look cleaner
+        pad = 10
         
-        # Calculate positions relative to component angle
-        cos_a = math.cos(angle_rad)
-        sin_a = math.sin(angle_rad)
+        # Calculate positions relative to component orientation
+        orient_rad = math.radians(orient_angle)
+        cos_a = math.cos(orient_rad)
+        sin_a = math.sin(orient_rad)
         
-        # Rotate handle for rotation
-        rotate_x = comp_x - half_thick * sin_a
-        rotate_y = comp_y + half_thick * cos_a
-        
-        # Delete handle (top-right corner)
-        delete_x = comp_x + half_len * cos_a - half_thick * sin_a
-        delete_y = comp_y + half_len * sin_a + half_thick * cos_a
-        
-        # Resize handle (right side for length)
-        resize_x = comp_x + (half_len + 20) * cos_a
-        resize_y = comp_y + (half_len + 20) * sin_a
-        
-        # Thickness handle (bottom)
-        thick_x = comp_x + (half_thick + 20) * sin_a
-        thick_y = comp_y - (half_thick + 20) * cos_a
+        # Unit vectors: along (cos_a, sin_a) and normal (-sin_a, cos_a)
+        u_x, u_y = cos_a, sin_a
+        n_x, n_y = -sin_a, cos_a
+
+        # Rotate handle (above)
+        rotate_x = comp_x + n_x * (half_thick + pad + button_size)
+        rotate_y = comp_y + n_y * (half_thick + pad + button_size)
+
+        # Delete handle (above-right)
+        delete_x = comp_x + u_x * (half_len + pad + button_size / 2) + n_x * (half_thick + pad + button_size / 2)
+        delete_y = comp_y + u_y * (half_len + pad + button_size / 2) + n_y * (half_thick + pad + button_size / 2)
+
+        # Duplicate handle (above-left)
+        duplicate_x = comp_x - u_x * (half_len + pad + button_size / 2) + n_x * (half_thick + pad + button_size / 2)
+        duplicate_y = comp_y - u_y * (half_len + pad + button_size / 2) + n_y * (half_thick + pad + button_size / 2)
+
+        # Resize handle (right, along axis)
+        resize_x = comp_x + u_x * (half_len + pad + button_size)
+        resize_y = comp_y + u_y * (half_len + pad + button_size)
+
+        # Thickness handle (below, along -normal)
+        thick_x = comp_x - n_x * (half_thick + pad + button_size)
+        thick_y = comp_y - n_y * (half_thick + pad + button_size)
         
         # Draw handles with icons
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -3351,6 +5259,20 @@ class LineBuilderDialog(QWidget):
         icon_radius = 6
         painter.drawArc(QRectF(rotate_x - icon_radius, rotate_y - icon_radius, icon_radius * 2, icon_radius * 2), 
                        45 * 16, 270 * 16)
+
+        # Duplicate handle
+        painter.setBrush(QColor(100, 255, 150))
+        painter.setPen(QPen(QColor(255, 255, 255), 2))
+        duplicate_rect = QRectF(duplicate_x - button_size/2, duplicate_y - button_size/2, button_size, button_size)
+        painter.drawEllipse(duplicate_rect)
+        self.selection_handles.append(("duplicate", duplicate_rect))
+
+        # Draw copy icon (two overlapping squares)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(255, 255, 255), 2))
+        s = 9
+        painter.drawRect(QRectF(duplicate_x - s + 3, duplicate_y - s + 3, s * 2, s * 2))
+        painter.drawRect(QRectF(duplicate_x - s, duplicate_y - s, s * 2, s * 2))
         
         # Delete handle
         painter.setBrush(QColor(255, 80, 80))
@@ -3362,6 +5284,31 @@ class LineBuilderDialog(QWidget):
         # Draw X icon
         painter.drawLine(QPointF(delete_x - 6, delete_y - 6), QPointF(delete_x + 6, delete_y + 6))
         painter.drawLine(QPointF(delete_x + 6, delete_y - 6), QPointF(delete_x - 6, delete_y + 6))
+
+        if self.selected_component.get("type") == "curve" and not (
+            isinstance(self.selected_component.get("points"), list) and len(self.selected_component.get("points")) >= 2
+        ):
+            pts = self._curve_handle_points_pixmap(self.selected_component)
+            start_pt = pts["start"]
+            ctrl_pt = pts["ctrl"]
+            end_pt = pts["end"]
+
+            # Start / end handles (green), control handle (orange)
+            painter.setPen(QPen(QColor(255, 255, 255), 2))
+
+            painter.setBrush(QColor(100, 255, 150))
+            start_rect = QRectF(start_pt.x() - handle_size / 2, start_pt.y() - handle_size / 2, handle_size, handle_size)
+            painter.drawRect(start_rect)
+            self.selection_handles.append(("curve_start", start_rect))
+
+            end_rect = QRectF(end_pt.x() - handle_size / 2, end_pt.y() - handle_size / 2, handle_size, handle_size)
+            painter.drawRect(end_rect)
+            self.selection_handles.append(("curve_end", end_rect))
+
+            painter.setBrush(QColor(255, 200, 100))
+            ctrl_rect = QRectF(ctrl_pt.x() - handle_size / 2, ctrl_pt.y() - handle_size / 2, handle_size, handle_size)
+            painter.drawEllipse(ctrl_rect)
+            self.selection_handles.append(("curve_ctrl", ctrl_rect))
         
         if self.selected_component.get("type") == "segment":
             # Resize length handle

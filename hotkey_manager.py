@@ -18,11 +18,15 @@ class HotkeyLineEdit(QLineEdit):
         self.setPlaceholderText("Click and press a key...")
         self.current_key = ""
         self.original_key = ""
+        self._captured_tokens: set[str] = set()
+        self._held_tokens: set[str] = set()
         
     def focusInEvent(self, event):
         """Store original key when focused."""
         super().focusInEvent(event)
         self.original_key = self.current_key
+        self._captured_tokens.clear()
+        self._held_tokens.clear()
         self.setText("Press a key or ESC to cancel...")
         self.setStyleSheet(self.styleSheet() + "color: rgba(200, 200, 220, 150);")
         
@@ -31,10 +35,16 @@ class HotkeyLineEdit(QLineEdit):
         super().focusOutEvent(event)
         if self.text() == "Press a key or ESC to cancel...":
             self.setText(self.current_key)
+        self._captured_tokens.clear()
+        self._held_tokens.clear()
         self.setStyleSheet(self.styleSheet().replace("color: rgba(200, 200, 220, 150);", "color: #E0E0E0;"))
         
     def keyPressEvent(self, event: QKeyEvent):
         """Capture key press and display it."""
+        if event.isAutoRepeat():
+            event.accept()
+            return
+
         key = event.key()
         
         # Handle Escape to cancel
@@ -43,31 +53,68 @@ class HotkeyLineEdit(QLineEdit):
             self.setText(self.current_key if self.current_key else "")
             self.clearFocus()
             return
-        
-        # Ignore modifier-only presses
-        if key in (Qt.Key.Key_Control, Qt.Key.Key_Shift, Qt.Key.Key_Alt, Qt.Key.Key_Meta):
+
+        token = self._event_to_token(event)
+        if not token or token == "unknown":
+            event.accept()
             return
-            
-        # Get key name
-        key_name = self._get_key_name(key)
-        
-        # Build modifier string
-        modifiers = []
+
+        self._held_tokens.add(token)
+        self._captured_tokens.add(token)
+
+        # Also include currently-held modifiers even if their keyPress event was missed.
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            modifiers.append("ctrl")
+            self._captured_tokens.add("ctrl")
         if event.modifiers() & Qt.KeyboardModifier.AltModifier:
-            modifiers.append("alt")
+            self._captured_tokens.add("alt")
         if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-            modifiers.append("shift")
-            
-        # Combine modifiers and key
-        if modifiers:
-            self.current_key = "+".join(modifiers) + "+" + key_name
-        else:
-            self.current_key = key_name
-            
-        self.setText(self.current_key)
-        self.clearFocus()
+            self._captured_tokens.add("shift")
+        if event.modifiers() & Qt.KeyboardModifier.MetaModifier:
+            self._captured_tokens.add("windows")
+
+        preview = self._format_tokens(self._captured_tokens)
+        if preview:
+            self.setText(preview)
+        event.accept()
+
+    def keyReleaseEvent(self, event: QKeyEvent):
+        if event.isAutoRepeat():
+            event.accept()
+            return
+
+        token = self._event_to_token(event)
+        if token:
+            self._held_tokens.discard(token)
+
+        # Finalize when all keys are released.
+        if not self._held_tokens and self._captured_tokens:
+            self.current_key = self._format_tokens(self._captured_tokens)
+            self.setText(self.current_key)
+            self._captured_tokens.clear()
+            self._held_tokens.clear()
+            self.clearFocus()
+            event.accept()
+            return
+
+        super().keyReleaseEvent(event)
+
+    def _event_to_token(self, event: QKeyEvent) -> str:
+        key = event.key()
+        if key == Qt.Key.Key_Control:
+            return "ctrl"
+        if key == Qt.Key.Key_Alt:
+            return "alt"
+        if key == Qt.Key.Key_Shift:
+            return "shift"
+        if key == Qt.Key.Key_Meta:
+            return "windows"
+        return self._get_key_name(key)
+
+    def _format_tokens(self, tokens: set[str]) -> str:
+        if not tokens:
+            return ""
+        order = {"ctrl": 0, "alt": 1, "shift": 2, "windows": 3}
+        return "+".join(sorted(tokens, key=lambda t: (order.get(t, 50), t)))
     
     def _get_key_name(self, key):
         """Convert Qt key code to keyboard library format."""

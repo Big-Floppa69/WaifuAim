@@ -70,6 +70,14 @@ pip install -r requirements.txt
 python main.py
 ```
 
+## Importing crosshair profiles (presets)
+
+- Create a file named `crosshair_profiles.json` next to `standard_crosshair.py`.
+- On app start (or whenever settings are loaded), presets from that file are merged into your saved preset list.
+- If a name already exists, it will be imported as `Name (2)`, `Name (3)`, etc.
+
+See `crosshair_profiles.example.json` for the file format.
+
 ## 🎉 That's it!
 
 You can also improve the program by adding additional features.
