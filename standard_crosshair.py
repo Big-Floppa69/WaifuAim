@@ -2346,6 +2346,10 @@ class StandardCrosshairDialog(QWidget):
         if self.line_builder_dialog is None:
             self.line_builder_dialog = LineBuilderDialog(self)
             self.line_builder_dialog.destroyed.connect(lambda: setattr(self, "line_builder_dialog", None))
+        try:
+            self.hide()
+        except Exception:
+            pass
         self.line_builder_dialog.show()
         self.line_builder_dialog.raise_()
         self.line_builder_dialog.activateWindow()
@@ -2605,7 +2609,7 @@ class LineBuilderDialog(QWidget):
 
         # Draw mode (click-drag to create objects)
         self.draw_mode_enabled: bool = False
-        self.draw_mode_type: str = "segment"  # segment/circle/square/triangle/curve
+        self.draw_mode_type: str = "curve"  # curve
         self._drawing_component: Optional[dict] = None
         self._draw_start_pos: Optional[QPointF] = None
         self._draw_start_along: float = 0.0
@@ -2636,6 +2640,19 @@ class LineBuilderDialog(QWidget):
         self._select_initial_scope()
         self._update_preview()
         self._update_history_buttons()
+
+    def _return_to_settings(self) -> None:
+        self.close()
+
+    def closeEvent(self, event):  # type: ignore[override]
+        try:
+            if getattr(self, "parent_dialog", None) is not None:
+                self.parent_dialog.show()
+                self.parent_dialog.raise_()
+                self.parent_dialog.activateWindow()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
     def _ensure_standard_base_objects(self) -> None:
         """Seed each standard line with a base segment object if empty."""
@@ -2681,6 +2698,20 @@ class LineBuilderDialog(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
+
+        top_row = QHBoxLayout()
+        top_row.setSpacing(6)
+        self.back_btn = QPushButton("← Back")
+        self.back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.back_btn.setToolTip("Return to Crosshair Settings")
+        self.back_btn.setStyleSheet(
+            "QPushButton { background-color: rgba(70, 70, 80, 180); color: #E0E0E0; border: 1px solid rgba(100, 100, 120, 120); border-radius: 10px; padding: 6px 10px; font-weight: bold; }"
+            "QPushButton:hover { background-color: rgba(90, 90, 110, 200); }"
+        )
+        self.back_btn.clicked.connect(self._return_to_settings)
+        top_row.addWidget(self.back_btn)
+        top_row.addStretch()
+        layout.addLayout(top_row)
 
         intro = QLabel("Shape stacked lines, drag their order, and preview the result instantly.")
         intro.setWordWrap(True)
@@ -3082,18 +3113,6 @@ class LineBuilderDialog(QWidget):
         self.quick_add_triangle_btn.clicked.connect(lambda: self._add_component("triangle", self._last_mouse_pos_pixmap))
         tools_row.addWidget(self.quick_add_triangle_btn)
 
-        self.selected_shape_combo = QComboBox()
-        self.selected_shape_combo.addItems(["Line", "Circle", "Square", "Triangle", "Curve"])
-        self.selected_shape_combo.setToolTip("Change selected object shape")
-        self.selected_shape_combo.setEnabled(False)
-        self.selected_shape_combo.setFixedHeight(22)
-        self.selected_shape_combo.setStyleSheet(
-            "QComboBox { background-color: rgba(40, 40, 50, 200); border: 1px solid rgba(100, 100, 120, 120); border-radius: 6px; padding: 2px 8px; color: #E0E0E0; }"
-            "QComboBox::drop-down { border: none; }"
-        )
-        self.selected_shape_combo.currentIndexChanged.connect(self._on_selected_shape_combo_changed)
-        tools_row.addWidget(self.selected_shape_combo)
-
         self.draw_toggle = QToolButton()
         self.draw_toggle.setText("✎ Draw")
         self.draw_toggle.setCheckable(True)
@@ -3104,17 +3123,6 @@ class LineBuilderDialog(QWidget):
         )
         self.draw_toggle.toggled.connect(self._on_draw_mode_toggled)
         tools_row.addWidget(self.draw_toggle)
-
-        self.draw_type_combo = QComboBox()
-        self.draw_type_combo.addItems(["Line", "Circle", "Square", "Triangle", "Curve"])
-        self.draw_type_combo.setToolTip("Shape to draw")
-        self.draw_type_combo.setFixedHeight(22)
-        self.draw_type_combo.setStyleSheet(
-            "QComboBox { background-color: rgba(40, 40, 50, 200); border: 1px solid rgba(100, 100, 120, 120); border-radius: 6px; padding: 2px 8px; color: #E0E0E0; }"
-            "QComboBox::drop-down { border: none; }"
-        )
-        self.draw_type_combo.currentIndexChanged.connect(self._on_draw_type_changed)
-        tools_row.addWidget(self.draw_type_combo)
 
         tools_row.addStretch()
 
@@ -4102,37 +4110,17 @@ class LineBuilderDialog(QWidget):
             self._draw_last_along = along
             self._draw_last_perp = perp
 
-            comp_type = self.draw_mode_type if self.draw_mode_type in ("segment", "circle", "square", "triangle", "curve") else "segment"
+            comp_type = "curve"
             component = {"type": comp_type, **self._default_component_values(comp_type)}
             component["draggable"] = _coerce_bool(component.get("draggable", True), default=True)
 
-            if comp_type == "segment":
-                component["offset"] = along
-                component["perp_offset"] = perp
-                component["length"] = 1.0
-                # start with current global thickness for convenience
-                component["thickness"] = float(max(1, getattr(self.settings, "thickness", 6)))
-                component["angle_offset"] = 0.0
-            elif comp_type == "circle":
-                component["offset"] = along
-                component["perp_offset"] = perp
-                component["radius"] = 1.0
-            elif comp_type == "square":
-                component["offset"] = along
-                component["perp_offset"] = perp
-                component["size"] = 1.0
-            elif comp_type == "triangle":
-                component["offset"] = along
-                component["perp_offset"] = perp
-                component["radius"] = 1.0
-            else:  # curve
-                component["offset"] = along
-                component["perp_offset"] = perp
-                component["thickness"] = float(max(1, getattr(self.settings, "thickness", 6)))
-                component["angle_offset"] = 0.0
-                # Freehand curve points relative to anchor (offset/perp_offset).
-                # Keep 2 points so a stroke appears immediately as you drag.
-                component["points"] = [[0.0, 0.0], [0.0, 0.0]]
+            component["offset"] = along
+            component["perp_offset"] = perp
+            component["thickness"] = float(max(1, getattr(self.settings, "thickness", 6)))
+            component["angle_offset"] = 0.0
+            # Freehand curve points relative to anchor (offset/perp_offset).
+            # Keep 2 points so a stroke appears immediately as you drag.
+            component["points"] = [[0.0, 0.0], [0.0, 0.0]]
 
             stack.append(component)
             item = QListWidgetItem(self._component_summary(component))
@@ -5012,16 +5000,7 @@ class LineBuilderDialog(QWidget):
             self.resize_mode = None
 
     def _on_draw_type_changed(self, index: int) -> None:
-        if index == 0:
-            self.draw_mode_type = "segment"
-        elif index == 1:
-            self.draw_mode_type = "circle"
-        elif index == 2:
-            self.draw_mode_type = "square"
-        elif index == 3:
-            self.draw_mode_type = "triangle"
-        else:
-            self.draw_mode_type = "curve"
+        self.draw_mode_type = "curve"
 
     def _capture_history_state(self) -> dict:
         return {
