@@ -2,7 +2,7 @@
 import json
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Callable
 from uuid import uuid4
 from copy import deepcopy
 from PyQt6.QtWidgets import (
@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QApplication,
     QScrollArea,
+    QDialog,
     QColorDialog,
     QLineEdit,
     QSpinBox,
@@ -31,9 +32,12 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QInputDialog,
     QSizePolicy,
+    QSizeGrip,
 )
-from PyQt6.QtGui import QColor, QPainter, QPixmap, QPainterPath, QPen, QKeySequence, QShortcut
+from PyQt6.QtGui import QColor, QPainter, QPixmap, QPainterPath, QPen, QKeySequence, QShortcut, QRegion
 from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal, QTimer
+
+from utils import UI_THEME
 
 CONFIG_PATH = Path(__file__).resolve().with_name("standard_crosshair_settings.json")
 PROFILES_IMPORT_PATH = Path(__file__).resolve().with_name("crosshair_profiles.json")
@@ -1147,15 +1151,106 @@ def generate_crosshair_pixmap(
     return pixmap
 
 
+class _CrosshairResizeOverlay(QWidget):
+    """Small, transparent overlay used to resize the standard crosshair via mouse drag.
+
+    It is intentionally not full-screen to avoid blocking input across the whole desktop.
+    """
+
+    def __init__(self, dialog: "StandardCrosshairDialog", target_label: QLabel):
+        super().__init__(None)
+        self._dialog = dialog
+        self._target_label = target_label
+
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowDoesNotAcceptFocus
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setMouseTracking(True)
+
+        self._dragging = False
+        self._start_pos = None
+        self._start_length = 0
+        self._start_gap = 0
+
+        size = 260
+        self.resize(size, size)
+        # Circular input region so clicks outside the circle pass through.
+        self.setMask(QRegion(0, 0, size, size, QRegion.RegionType.Ellipse))
+        self._reposition_to_center()
+
+    def _reposition_to_center(self) -> None:
+        try:
+            rect = self._target_label.geometry()
+            center = rect.center()
+            self.move(int(center.x() - self.width() / 2), int(center.y() - self.height() / 2))
+            self.raise_()
+        except Exception:
+            return
+
+    def mousePressEvent(self, event):  # type: ignore[override]
+        if event.button() != Qt.MouseButton.LeftButton:
+            event.ignore()
+            return
+
+        self._dragging = True
+        self._start_pos = event.globalPosition().toPoint()
+        self._start_length = int(getattr(self._dialog.settings, "length", 0) or 0)
+        self._start_gap = int(getattr(self._dialog.settings, "gap", 0) or 0)
+        event.accept()
+
+    def mouseMoveEvent(self, event):  # type: ignore[override]
+        if not self._dragging or self._start_pos is None:
+            event.ignore()
+            return
+
+        pos = event.globalPosition().toPoint()
+        dx = pos.x() - self._start_pos.x()
+        dy = pos.y() - self._start_pos.y()
+
+        # Drag mapping:
+        # - Horizontal: Length
+        # - Vertical: Gap ("wider" = larger gap)
+        length = self._start_length + int(dx / 6)
+        gap = self._start_gap + int(dy / 6)
+
+        length = max(5, min(80, length))
+        gap = max(0, min(40, gap))
+
+        self._dialog._apply_length_gap_from_drag(length, gap)
+        event.accept()
+
+    def mouseReleaseEvent(self, event):  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = False
+            self._start_pos = None
+            event.accept()
+            return
+        event.ignore()
+
+
 class StandardCrosshairDialog(QWidget):
     """Floating dialog that lets users tweak a basic crosshair."""
 
     visibility_changed = pyqtSignal(bool)
     presets_changed = pyqtSignal()
 
-    def __init__(self, label: QLabel, parent=None):
+    def __init__(
+        self,
+        label: QLabel,
+        parent=None,
+        *,
+        embedded: bool = False,
+        on_request_close: Optional[Callable[[], None]] = None,
+    ):
         super().__init__(parent)
         self.label = label
+        self._embedded = bool(embedded)
+        self._on_request_close = on_request_close
         self.settings = load_settings_from_disk()
         _bind_settings_to_label(self.label, self.settings)
         _sync_fan_timer_state(self.label, self.settings)
@@ -1171,31 +1266,96 @@ class StandardCrosshairDialog(QWidget):
         self._fan_timer.timeout.connect(self._on_fan_tick)
         self._fan_angle = 0.0
 
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # Mouse-driven resize overlay (centered, only active while this dialog is open)
+        self._resize_overlay = None
+        self._size_grip = None
+
+        if not self._embedded:
+            self.setWindowFlags(
+                Qt.WindowType.FramelessWindowHint
+                | Qt.WindowType.WindowStaysOnTopHint
+                | Qt.WindowType.Tool
+            )
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
         self._init_ui()
         self._sync_controls_from_settings()
 
+        try:
+            self._resize_overlay = _CrosshairResizeOverlay(self, self.label)
+            self._resize_overlay.show()
+        except Exception:
+            self._resize_overlay = None
+
+    def closeEvent(self, event):  # type: ignore[override]
+        try:
+            if self._resize_overlay is not None:
+                self._resize_overlay.close()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+    def showEvent(self, event):  # type: ignore[override]
+        super().showEvent(event)
+        try:
+            if self._resize_overlay is not None:
+                self._resize_overlay._reposition_to_center()
+                self._resize_overlay.show()
+        except Exception:
+            pass
+
+    def hideEvent(self, event):  # type: ignore[override]
+        try:
+            if self._resize_overlay is not None:
+                self._resize_overlay.hide()
+        except Exception:
+            pass
+        super().hideEvent(event)
+
+    def _apply_length_gap_from_drag(self, length: int, gap: int) -> None:
+        changed = False
+
+        if length != self.settings.length:
+            self.settings.length = length
+            if getattr(self, "length_slider", None) is not None:
+                self._set_slider_value(self.length_slider, length)
+            changed = True
+
+        if gap != self.settings.gap:
+            self.settings.gap = gap
+            if getattr(self, "gap_slider", None) is not None:
+                self._set_slider_value(self.gap_slider, gap)
+            changed = True
+
+        if changed:
+            self._persist_and_render()
+
     def _init_ui(self) -> None:
         main_frame = QFrame(self)
         main_frame.setObjectName("mainFrame")
-        main_frame.setStyleSheet(
+        if self._embedded:
+            # When embedded in the control panel, don't render an extra rounded
+            # container; the panel already provides the chrome.
+            main_frame.setStyleSheet(
+                "QFrame#mainFrame { background: transparent; border: none; border-radius: 0px; }"
+            )
+        else:
+            main_frame.setStyleSheet(
+                f"""
+                QFrame#mainFrame {{
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                        stop:0 {UI_THEME['bg']}, stop:1 {UI_THEME['bg2']});
+                    border-radius: 15px;
+                    border: 1px solid {UI_THEME['border']};
+                }}
             """
-            QFrame#mainFrame {
-                background-color: rgba(20, 20, 25, 240);
-                border-radius: 15px;
-                border: 1px solid rgba(100, 100, 120, 100);
-            }
-        """
-        )
+            )
 
         main_layout = QVBoxLayout(main_frame)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
-        main_layout.addWidget(self._create_title_bar())
+        if not self._embedded:
+            main_layout.addWidget(self._create_title_bar())
 
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
@@ -1207,23 +1367,48 @@ class StandardCrosshairDialog(QWidget):
         scroll_area.setWidget(scroll_content)
         main_layout.addWidget(scroll_area)
 
+        # Resize handle for the frameless window (standalone only).
+        if not self._embedded:
+            self._size_grip = QSizeGrip(main_frame)
+            self._size_grip.setFixedSize(16, 16)
+            self._size_grip.setStyleSheet("QSizeGrip { background: transparent; }")
+
         wrapper_layout = QVBoxLayout(self)
-        wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        # Embedded should feel like a full page.
+        if self._embedded:
+            wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        else:
+            wrapper_layout.setContentsMargins(0, 0, 0, 0)
         wrapper_layout.addWidget(main_frame)
 
-        # Wider by default so preset controls fit, but allow resizing.
-        self.setMinimumSize(440, 520)
-        self.resize(500, 520)
+        # Keep the dialog compact by default (still resizable) when standalone.
+        if not self._embedded:
+            self.setMinimumSize(410, 500)
+            self.resize(460, 500)
+
+    def resizeEvent(self, event):  # type: ignore[override]
+        super().resizeEvent(event)
+        try:
+            if not self._embedded and self._size_grip is not None:
+                margin = 8
+                self._size_grip.move(
+                    self.width() - self._size_grip.width() - margin,
+                    self.height() - self._size_grip.height() - margin,
+                )
+                self._size_grip.raise_()
+        except Exception:
+            pass
 
     def _create_title_bar(self) -> QFrame:
         title_bar = QFrame()
         title_bar.setStyleSheet(
-            """
-            QFrame {
-                background-color: rgba(30, 30, 35, 255);
+            f"""
+            QFrame {{
+                background-color: {UI_THEME['surface']};
                 border-top-left-radius: 15px;
                 border-top-right-radius: 15px;
-            }
+                border-bottom: 1px solid {UI_THEME['border']};
+            }}
         """
         )
         layout = QHBoxLayout(title_bar)
@@ -1231,19 +1416,19 @@ class StandardCrosshairDialog(QWidget):
 
         title_label = QLabel("🎯 Standard Crosshair")
         title_label.setStyleSheet(
-            """
-            QLabel {
-                color: #E0E0E0;
+            f"""
+            QLabel {{
+                color: {UI_THEME['text']};
                 font-size: 14px;
-                font-weight: bold;
+                font-weight: 700;
                 background: transparent;
-            }
+            }}
         """
         )
         layout.addWidget(title_label)
         layout.addStretch()
 
-        close_btn = self._create_button("×", "rgba(200, 50, 50, 200)", size=28)
+        close_btn = self._create_button("×", UI_THEME["danger"], size=28)
         close_btn.clicked.connect(self.close)
         layout.addWidget(close_btn)
         return title_bar
@@ -1252,81 +1437,91 @@ class StandardCrosshairDialog(QWidget):
         frame = QFrame()
         frame.setStyleSheet("QFrame { background: transparent; }")
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(16, 15, 16, 18)
-        layout.setSpacing(12)
+        # Add a little breathing room when embedded so content doesn't hug panel edges.
+        layout.setContentsMargins(14 if self._embedded else 12, 10 if self._embedded else 12, 14 if self._embedded else 12, 12 if self._embedded else 14)
+        layout.setSpacing(10)
 
         info = QLabel("Configure a simple crosshair without importing images.")
         info.setWordWrap(True)
-        info.setStyleSheet("color: rgba(200, 200, 200, 170);")
+        info.setStyleSheet(f"color: {UI_THEME['muted']};")
         layout.addWidget(info)
 
         # Presets
         presets_frame = QFrame()
-        presets_frame.setStyleSheet(
+        if self._embedded:
+            presets_frame.setStyleSheet("QFrame { background: transparent; border: none; }")
+        else:
+            presets_frame.setStyleSheet(
+                f"""
+                QFrame {{
+                    background-color: {UI_THEME['surface']};
+                    border-radius: 12px;
+                    padding: 8px;
+                    border: 1px solid {UI_THEME['border']};
+                }}
             """
-            QFrame {
-                background-color: rgba(30, 30, 35, 200);
-                border-radius: 12px;
-                padding: 10px;
-            }
-        """
-        )
+            )
         presets_outer = QVBoxLayout(presets_frame)
-        presets_outer.setContentsMargins(10, 6, 10, 6)
+        presets_outer.setContentsMargins(0 if self._embedded else 8, 0 if self._embedded else 6, 0 if self._embedded else 8, 0 if self._embedded else 6)
         presets_outer.setSpacing(6)
 
         top_row = QHBoxLayout()
         top_row.setSpacing(8)
         preset_label = QLabel("Preset")
-        preset_label.setStyleSheet("color: rgba(220, 220, 220, 210); font-weight: bold; font-size: 11px;")
+        preset_label.setStyleSheet(f"color: {UI_THEME['text']}; font-weight: 600; font-size: 11px;")
         top_row.addWidget(preset_label)
 
         self.preset_combo = QComboBox()
         self.preset_combo.setStyleSheet(
-            """
-            QComboBox {
-                background-color: rgba(40, 40, 50, 200);
-                border: 1px solid rgba(100, 100, 120, 120);
-                border-radius: 7px;
-                padding: 4px 8px;
-                color: #E0E0E0;
-            }
-            QComboBox::drop-down { border: none; width: 22px; }
-            QComboBox QAbstractItemView {
-                background-color: rgba(30, 30, 35, 240);
-                color: #E0E0E0;
-                selection-background-color: rgba(92, 107, 192, 180);
-            }
+            f"""
+            QComboBox {{
+                background-color: {UI_THEME['surface2']};
+                border: 1px solid {UI_THEME['border']};
+                border-radius: 10px;
+                padding: 4px 10px;
+                color: {UI_THEME['text']};
+            }}
+            QComboBox:hover {{ border: 1px solid {UI_THEME['border_strong']}; }}
+            QComboBox::drop-down {{ border: none; width: 22px; }}
+            QComboBox QAbstractItemView {{
+                background-color: {UI_THEME['surface']};
+                color: {UI_THEME['text']};
+                selection-background-color: {UI_THEME['accent']};
+                selection-color: white;
+                border: 1px solid {UI_THEME['border']};
+                outline: none;
+            }}
         """
         )
         self.preset_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.preset_combo.setFixedHeight(28)
+        self.preset_combo.setFixedHeight(26)
         top_row.addWidget(self.preset_combo, 1)
         presets_outer.addLayout(top_row)
 
-        def make_small_btn(text: str, bg: str) -> QPushButton:
+        def make_small_btn(text: str, bg: str, fg: str = "white") -> QPushButton:
             btn = QPushButton(text)
-            btn.setFixedHeight(28)
+            btn.setFixedHeight(26)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setStyleSheet(
                 f"""
                 QPushButton {{
                     background-color: {bg};
-                    color: white;
-                    border: none;
-                    border-radius: 8px;
-                    padding: 4px 10px;
-                    font-weight: bold;
+                    color: {fg};
+                    border: 1px solid {UI_THEME['border']};
+                    border-radius: 10px;
+                    padding: 3px 10px;
+                    font-weight: 600;
                 }}
-                QPushButton:hover {{ background-color: rgba(255, 255, 255, 40); }}
+                QPushButton:hover {{ background-color: {self._adjust_color(bg, 1.08)}; }}
+                QPushButton:pressed {{ background-color: {self._adjust_color(bg, 0.92)}; }}
                 """
             )
             return btn
 
-        self.preset_save_btn = make_small_btn("Save", "rgba(76, 175, 80, 180)")
-        self.preset_save_as_btn = make_small_btn("Save As", "rgba(96, 125, 139, 180)")
-        self.preset_delete_btn = make_small_btn("Delete", "rgba(200, 50, 50, 180)")
-        self.preset_reset_btn = make_small_btn("Reset", "rgba(255, 152, 0, 180)")
+        self.preset_save_btn = make_small_btn("Save", UI_THEME["accent"])
+        self.preset_save_as_btn = make_small_btn("Save As", UI_THEME["surface2"], fg=UI_THEME["text"])
+        self.preset_delete_btn = make_small_btn("Delete", UI_THEME["danger"])
+        self.preset_reset_btn = make_small_btn("Reset", UI_THEME["surface2"], fg=UI_THEME["text"])
 
         bottom_row = QHBoxLayout()
         bottom_row.setSpacing(8)
@@ -1338,7 +1533,7 @@ class StandardCrosshairDialog(QWidget):
         presets_outer.addLayout(bottom_row)
         layout.addWidget(presets_frame)
 
-        self.visibility_btn = self._create_primary_button("👁️ Hide Crosshair", "#607D8B")
+        self.visibility_btn = self._create_primary_button("👁️ Hide Crosshair", UI_THEME["surface2"])
         self.visibility_btn.setCheckable(True)
         self.visibility_btn.clicked.connect(self._toggle_visibility)
         layout.addWidget(self.visibility_btn)
@@ -1351,11 +1546,11 @@ class StandardCrosshairDialog(QWidget):
         layout.addWidget(self._create_projection_group())
 
         buttons_row = QHBoxLayout()
-        reset_btn = self._create_primary_button("↺ Reset", "#FF9800")
+        reset_btn = self._create_primary_button("↺ Reset", UI_THEME["surface2"])
         reset_btn.clicked.connect(self._reset_defaults)
         buttons_row.addWidget(reset_btn)
 
-        apply_btn = self._create_primary_button("Apply", "#4CAF50")
+        apply_btn = self._create_primary_button("Apply", UI_THEME["accent"])
         apply_btn.clicked.connect(self._persist_and_render)
         buttons_row.addWidget(apply_btn)
 
@@ -1454,40 +1649,38 @@ class StandardCrosshairDialog(QWidget):
     def _create_slider_group(self) -> QFrame:
         frame = QFrame()
         frame.setStyleSheet(
-            """
-            QFrame {
-                background-color: rgba(30, 30, 35, 200);
+            f"""
+            QFrame {{
+                background-color: {UI_THEME['surface']};
                 border-radius: 12px;
-                padding: 12px;
-            }
+                padding: 8px;
+                border: 1px solid {UI_THEME['border']};
+            }}
         """
         )
         layout = QVBoxLayout(frame)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
         self.length_slider = self._add_slider(layout, "Length", 5, 80, self.settings.length, self._on_length)
         self.thickness_slider = self._add_slider(layout, "Thickness", 1, 15, self.settings.thickness, self._on_thickness)
         self.gap_slider = self._add_slider(layout, "Gap", 0, 40, self.settings.gap, self._on_gap)
         self.outline_slider = self._add_slider(layout, "Outline", 0, 5, self.settings.outline, self._on_outline, suffix="px")
-        self.gap_slider = self._add_slider(layout, "Gap", 0, 40, self.settings.gap, self._on_gap)
-        self.outline_slider = self._add_slider(
-            layout, "Outline", 0, 5, self.settings.outline, self._on_outline, suffix="px"
-        )
         return frame
 
     def _create_shape_group(self) -> QFrame:
         frame = QFrame()
         frame.setStyleSheet(
-            """
-            QFrame {
-                background-color: rgba(30, 30, 35, 200);
+            f"""
+            QFrame {{
+                background-color: {UI_THEME['surface']};
                 border-radius: 12px;
-                padding: 12px;
-            }
+                padding: 8px;
+                border: 1px solid {UI_THEME['border']};
+            }}
         """
         )
         layout = QVBoxLayout(frame)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
         style_row = QHBoxLayout()
         style_row.addWidget(self._section_label("Crosshair Style"))
@@ -1513,42 +1706,24 @@ class StandardCrosshairDialog(QWidget):
         self.offset_x_slider = self._add_slider(layout, "Horizontal Offset", -800, 800, self.settings.offset_x, self._on_offset_x, suffix="px", step=1)
         self.offset_y_slider = self._add_slider(layout, "Vertical Offset", -800, 800, self.settings.offset_y, self._on_offset_y, suffix="px", step=1)
         self.line_rounding_slider = self._add_slider(layout, "Line Corner Radius", 0, 20, self.settings.line_rounding, self._on_line_rounding, suffix="px")
-        self.offset_y_slider = self._add_slider(
-            layout,
-            "Vertical Offset",
-            -800,
-            800,
-            self.settings.offset_y,
-            self._on_offset_y,
-            suffix="px",
-            step=1,
-        )
-        self.line_rounding_slider = self._add_slider(
-            layout,
-            "Line Corner Radius",
-            0,
-            20,
-            self.settings.line_rounding,
-            self._on_line_rounding,
-            suffix="px",
-        )
 
         fan_row = QHBoxLayout()
         self.fan_checkbox = QCheckBox("Enable Fan Animation")
         self.fan_checkbox.setChecked(self.settings.fan_enabled)
         self.fan_checkbox.setStyleSheet(
-            """
-            QCheckBox { color: #E0E0E0; font-weight: bold; }
-            QCheckBox::indicator { width: 18px; height: 18px; }
-            QCheckBox::indicator:unchecked {
-                border: 2px solid rgba(120, 120, 140, 200);
-                border-radius: 4px;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #4CAF50;
-                border: 2px solid #357a38;
-                border-radius: 4px;
-            }
+            f"""
+            QCheckBox {{ color: {UI_THEME['text']}; font-weight: 600; }}
+            QCheckBox::indicator {{ width: 18px; height: 18px; }}
+            QCheckBox::indicator:unchecked {{
+                border: 2px solid {UI_THEME['border_strong']};
+                border-radius: 5px;
+                background-color: transparent;
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {UI_THEME['accent']};
+                border: 2px solid {UI_THEME['accent']};
+                border-radius: 5px;
+            }}
         """
         )
         self.fan_checkbox.toggled.connect(self._on_fan_toggle)
@@ -1572,34 +1747,36 @@ class StandardCrosshairDialog(QWidget):
     def _create_dot_group(self) -> QFrame:
         frame = QFrame()
         frame.setStyleSheet(
-            """
-            QFrame {
-                background-color: rgba(30, 30, 35, 200);
+            f"""
+            QFrame {{
+                background-color: {UI_THEME['surface']};
                 border-radius: 12px;
-                padding: 12px;
-            }
+                padding: 8px;
+                border: 1px solid {UI_THEME['border']};
+            }}
         """
         )
         layout = QVBoxLayout(frame)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
         self.center_dot_check = QCheckBox("Add Center Dot")
         self.center_dot_check.setStyleSheet(
-            """
-            QCheckBox { color: #E0E0E0; font-weight: bold; }
-            QCheckBox::indicator {
+            f"""
+            QCheckBox {{ color: {UI_THEME['text']}; font-weight: 600; }}
+            QCheckBox::indicator {{
                 width: 18px;
                 height: 18px;
-            }
-            QCheckBox::indicator:unchecked {
-                border: 2px solid rgba(120, 120, 140, 200);
-                border-radius: 4px;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #4CAF50;
-                border: 2px solid #357a38;
-                border-radius: 4px;
-            }
+            }}
+            QCheckBox::indicator:unchecked {{
+                border: 2px solid {UI_THEME['border_strong']};
+                border-radius: 5px;
+                background-color: transparent;
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {UI_THEME['accent']};
+                border: 2px solid {UI_THEME['accent']};
+                border-radius: 5px;
+            }}
         """
         )
         self.center_dot_check.toggled.connect(self._on_center_dot_toggled)
@@ -1627,12 +1804,13 @@ class StandardCrosshairDialog(QWidget):
     def _create_projection_group(self) -> QFrame:
         frame = QFrame()
         frame.setStyleSheet(
-            """
-            QFrame {
-                background-color: rgba(30, 30, 35, 200);
+            f"""
+            QFrame {{
+                background-color: {UI_THEME['surface']};
                 border-radius: 12px;
                 padding: 12px;
-            }
+                border: 1px solid {UI_THEME['border']};
+            }}
         """
         )
         layout = QVBoxLayout(frame)
@@ -1641,13 +1819,13 @@ class StandardCrosshairDialog(QWidget):
 
         builder_card = QFrame()
         builder_card.setStyleSheet(
-            """
-            QFrame {
-                background-color: rgba(40, 40, 50, 120);
+            f"""
+            QFrame {{
+                background-color: {UI_THEME['surface2']};
                 border-radius: 12px;
-                border: 1px solid rgba(100, 100, 120, 100);
+                border: 1px solid {UI_THEME['border']};
                 padding: 10px;
-            }
+            }}
         """
         )
         builder_row = QHBoxLayout(builder_card)
@@ -1657,17 +1835,18 @@ class StandardCrosshairDialog(QWidget):
         builder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         builder_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         builder_btn.setStyleSheet(
-            """
-            QPushButton {
-                background-color: rgba(70, 70, 80, 180);
-                color: #E0E0E0;
-                border: 1px solid rgba(100, 100, 120, 120);
-                border-radius: 10px;
+            f"""
+            QPushButton {{
+                background-color: {UI_THEME['surface']};
+                color: {UI_THEME['text']};
+                border: 1px solid {UI_THEME['accent']};
+                border-radius: 12px;
                 padding: 12px 18px;
                 font-size: 13px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: rgba(90, 90, 110, 200); }
+                font-weight: 650;
+            }}
+            QPushButton:hover {{ background-color: {UI_THEME['surface2']}; }}
+            QPushButton:pressed {{ background-color: {UI_THEME['surface']}; }}
         """
         )
         builder_btn.clicked.connect(self._open_line_builder)
@@ -1678,19 +1857,20 @@ class StandardCrosshairDialog(QWidget):
     def _create_color_group(self) -> QFrame:
         frame = QFrame()
         frame.setStyleSheet(
-            """
-            QFrame {
-                background-color: rgba(30, 30, 35, 200);
+            f"""
+            QFrame {{
+                background-color: {UI_THEME['surface']};
                 border-radius: 12px;
-                padding: 12px;
-            }
+                padding: 8px;
+                border: 1px solid {UI_THEME['border']};
+            }}
         """
         )
         layout = QVBoxLayout(frame)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
         self.color_preview = QLabel()
-        self.color_preview.setFixedHeight(24)
+        self.color_preview.setFixedHeight(20)
         self.color_preview.setStyleSheet(self._color_preview_style())
         layout.addWidget(self.color_preview)
 
@@ -1706,18 +1886,18 @@ class StandardCrosshairDialog(QWidget):
         self.hex_input.setMaxLength(7)
         self.hex_input.setPlaceholderText("#00FF90")
         self.hex_input.setStyleSheet(
-            """
-            QLineEdit {
-                background-color: rgba(40, 40, 50, 200);
-                border: 1px solid rgba(100, 100, 120, 120);
-                border-radius: 6px;
-                padding: 6px 10px;
-                color: #E0E0E0;
-                font-weight: bold;
-            }
-            QLineEdit:focus {
-                border: 1px solid #00ACC1;
-            }
+            f"""
+            QLineEdit {{
+                background-color: {UI_THEME['surface2']};
+                border: 1px solid {UI_THEME['border']};
+                border-radius: 10px;
+                padding: 5px 10px;
+                color: {UI_THEME['text']};
+                font-weight: 600;
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {UI_THEME['accent']};
+            }}
         """
         )
         self.hex_input.editingFinished.connect(self._on_hex_input_finished)
@@ -1726,21 +1906,22 @@ class StandardCrosshairDialog(QWidget):
         palette_btn = QPushButton("🎨 Palette")
         palette_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         palette_btn.setStyleSheet(
-            """
-            QPushButton {
-                background-color: #009688;
-                color: white;
-                border: none;
-                border-radius: 8px;
-                padding: 8px 16px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #26A69A;
-            }
-            QPushButton:pressed {
-                background-color: #00796B;
-            }
+            f"""
+            QPushButton {{
+                background-color: {UI_THEME['surface2']};
+                color: {UI_THEME['text']};
+                border: 1px solid {UI_THEME['accent']};
+                border-radius: 12px;
+                padding: 7px 14px;
+                font-weight: 650;
+            }}
+            QPushButton:hover {{
+                background-color: {UI_THEME['surface']};
+                border: 1px solid {UI_THEME['border_strong']};
+            }}
+            QPushButton:pressed {{
+                background-color: {self._adjust_color(UI_THEME['surface2'], 0.92)};
+            }}
         """
         )
         palette_btn.clicked.connect(self._open_color_dialog)
@@ -1752,8 +1933,8 @@ class StandardCrosshairDialog(QWidget):
     def _color_preview_style(self) -> str:
         color = QColor(self.settings.red, self.settings.green, self.settings.blue, self.settings.alpha)
         return (
-            "background-color: rgba({r}, {g}, {b}, {a}); border-radius: 8px; border: 1px solid rgba(255,255,255,0.2);"
-        ).format(r=color.red(), g=color.green(), b=color.blue(), a=color.alpha())
+            "background-color: rgba({r}, {g}, {b}, {a}); border-radius: 10px; border: 1px solid {border};"
+        ).format(r=color.red(), g=color.green(), b=color.blue(), a=color.alpha(), border=UI_THEME["border"])
 
     def _add_slider(
         self,
@@ -1767,22 +1948,25 @@ class StandardCrosshairDialog(QWidget):
         step: int = 1,
     ) -> QSlider:
         row = QVBoxLayout()
+        row.setSpacing(2)
         text = QLabel(label_text)
-        text.setStyleSheet("color: #B0B0B0; font-size: 12px;")
+        text.setStyleSheet(f"color: {UI_THEME['muted']}; font-size: 11px; font-weight: 650;")
         row.addWidget(text)
 
         slider_frame = QFrame()
         slider_frame.setStyleSheet(
-            """
-            QFrame {
-                background-color: rgba(40, 40, 50, 150);
-                border-radius: 10px;
-                padding: 4px 8px;
-            }
+            f"""
+            QFrame {{
+                background-color: {UI_THEME['surface2']};
+                border: 1px solid {UI_THEME['border']};
+                border-radius: 12px;
+                padding: 4px 6px;
+            }}
         """
         )
         slider_layout = QHBoxLayout(slider_frame)
-        slider_layout.setContentsMargins(6, 3, 6, 3)
+        slider_layout.setContentsMargins(6, 4, 6, 4)
+        slider_layout.setSpacing(8)
 
         clamp_min = minimum
         clamp_max = maximum
@@ -1793,31 +1977,30 @@ class StandardCrosshairDialog(QWidget):
         slider.setValue(value)
         slider.setSingleStep(max(1, step))
         slider.setPageStep(max(5, step * 4))
+        slider.setFixedHeight(14)
+        slider.setMaximumWidth(170)
         slider.setStyleSheet(
-            """
-            QSlider::groove:horizontal {
+            f"""
+            QSlider::groove:horizontal {{
                 border: none;
-                height: 5px;
-                background: rgba(60, 60, 70, 200);
-                border-radius: 3px;
-            }
-            QSlider::handle:horizontal {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #667eea, stop:1 #764ba2);
-                border: none;
-                width: 14px;
+                height: 4px;
+                background: rgba(230, 225, 255, 35);
+                border-radius: 2px;
+            }}
+            QSlider::sub-page:horizontal {{
+                background: {UI_THEME['accent']};
+                border-radius: 2px;
+            }}
+            QSlider::handle:horizontal {{
+                background: {UI_THEME['accent']};
+                border: 1px solid {UI_THEME['border']};
+                width: 12px;
                 margin: -6px 0;
-                border-radius: 7px;
-            }
-            QSlider::handle:horizontal:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #764ba2, stop:1 #667eea);
-            }
-            QSlider::sub-page:horizontal {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #667eea, stop:1 #764ba2);
-                border-radius: 3px;
-            }
+                border-radius: 6px;
+            }}
+            QSlider::handle:horizontal:hover {{
+                border: 1px solid {UI_THEME['border_strong']};
+            }}
         """
         )
 
@@ -1829,27 +2012,58 @@ class StandardCrosshairDialog(QWidget):
         spin.setAccelerated(True)
         spin.setValue(value)
         spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        spin.setObjectName("SliderValueSpin")
         spin.setStyleSheet(
-            """
-            QSpinBox {
-                background-color: rgba(40, 40, 50, 200);
-                border: 1px solid rgba(100, 100, 120, 120);
-                border-radius: 6px;
-                padding: 3px 8px;
-                color: #E0E0E0;
-                min-width: 62px;
-            }
-            QSpinBox:disabled {
-                background-color: rgba(55, 55, 65, 150);
-                color: rgba(220, 220, 220, 90);
-            }
+            f"""
+            QAbstractSpinBox#SliderValueSpin {{
+                background-color: {UI_THEME['surface2']};
+                border: 1px solid {UI_THEME['border']};
+                border-radius: 10px;
+                padding: 0px 4px;
+                color: {UI_THEME['text']};
+                min-width: 32px;
+                max-width: 40px;
+                min-height: 20px;
+                max-height: 20px;
+                font-size: 11px;
+            }}
+            QAbstractSpinBox#SliderValueSpin QLineEdit {{
+                background: transparent;
+                border: none;
+                padding: 0px;
+                margin: 0px;
+                color: {UI_THEME['text']};
+                selection-background-color: {UI_THEME['accent']};
+                selection-color: white;
+                qproperty-alignment: AlignCenter;
+            }}
+            QAbstractSpinBox#SliderValueSpin:focus {{ border: 1px solid {UI_THEME['border_strong']}; }}
+            QAbstractSpinBox#SliderValueSpin:disabled {{
+                background-color: rgba(120, 120, 140, 60);
+                color: rgba(255, 255, 255, 120);
+            }}
         """
         )
 
         unit_label = None
         if suffix:
             unit_label = QLabel(suffix)
-            unit_label.setStyleSheet("color: #B0B0B0; font-size: 11px; padding-left: 4px;")
+            unit_label.setObjectName("SliderUnitBadge")
+            unit_label.setStyleSheet(
+                f"""
+                QLabel#SliderUnitBadge {{
+                    background-color: {UI_THEME['surface2']};
+                    color: {UI_THEME['muted']};
+                    border: 1px solid {UI_THEME['border']};
+                    border-radius: 10px;
+                    padding: 0px 4px;
+                    font-size: 10px;
+                }}
+                """
+            )
+            # Make px badge pill-rounded and compact.
+            unit_label.setFixedSize(24, 20)
+            unit_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         def on_value_change(val: int) -> None:
             if spin.value() != val:
@@ -1902,8 +2116,8 @@ class StandardCrosshairDialog(QWidget):
         btn.setStyleSheet(
             f"""
             QPushButton {{
-                background-color: rgba(70, 70, 80, 150);
-                color: #E0E0E0;
+                background-color: {UI_THEME['surface2']};
+                color: {UI_THEME['text']};
                 border: none;
                 border-radius: 6px;
                 font-size: 18px;
@@ -1913,7 +2127,7 @@ class StandardCrosshairDialog(QWidget):
                 background-color: {hover_color};
             }}
             QPushButton:pressed {{
-                background-color: rgba(60, 60, 70, 200);
+                background-color: {UI_THEME['surface']};
             }}
         """
         )
@@ -1926,15 +2140,16 @@ class StandardCrosshairDialog(QWidget):
             f"""
             QPushButton {{
                 background-color: {color};
-                color: white;
-                border: none;
-                border-radius: 8px;
+                color: {UI_THEME['text']};
+                border: 1px solid {UI_THEME['border']};
+                border-radius: 12px;
                 padding: 10px 18px;
                 font-size: 13px;
-                font-weight: bold;
+                font-weight: 650;
             }}
             QPushButton:hover {{
                 background-color: {self._adjust_color(color, 1.15)};
+                border: 1px solid {UI_THEME['border_strong']};
             }}
             QPushButton:pressed {{
                 background-color: {self._adjust_color(color, 0.85)};
@@ -2346,10 +2561,6 @@ class StandardCrosshairDialog(QWidget):
         if self.line_builder_dialog is None:
             self.line_builder_dialog = LineBuilderDialog(self)
             self.line_builder_dialog.destroyed.connect(lambda: setattr(self, "line_builder_dialog", None))
-        try:
-            self.hide()
-        except Exception:
-            pass
         self.line_builder_dialog.show()
         self.line_builder_dialog.raise_()
         self.line_builder_dialog.activateWindow()
@@ -2375,16 +2586,16 @@ class StandardCrosshairDialog(QWidget):
         return btn
 
     def _choice_button_style(self, active: bool) -> str:
-        base = "#5C6BC0" if active else "rgba(70,70,80,150)"
-        border = "#90CAF9" if active else "rgba(255,255,255,0.15)"
+        base = UI_THEME["accent"] if active else UI_THEME["surface2"]
+        border = UI_THEME["border_strong"] if active else UI_THEME["border"]
         return f"""
         QPushButton {{
             background-color: {base};
-            color: white;
+            color: {UI_THEME['text']};
             border: 1px solid {border};
-            border-radius: 8px;
+            border-radius: 12px;
             padding: 8px 12px;
-            font-weight: bold;
+            font-weight: 600;
         }}
         QPushButton:pressed {{
             background-color: {self._adjust_color(base, 0.9)};
@@ -2393,7 +2604,7 @@ class StandardCrosshairDialog(QWidget):
 
     def _section_label(self, text: str) -> QLabel:
         label = QLabel(text)
-        label.setStyleSheet("color: #B0B0B0; font-size: 12px; font-weight: bold;")
+        label.setStyleSheet(f"color: {UI_THEME['muted']}; font-size: 11px; font-weight: 800;")
         return label
 
     def _on_dot_size(self, value: int) -> None:
@@ -2457,6 +2668,87 @@ class StandardCrosshairDialog(QWidget):
         self.settings.custom_colors = collected
         save_settings_to_disk(self.settings)
 
+    def _color_dialog_stylesheet(self) -> str:
+        # QColorDialog has a fairly complex internal widget tree; keep styling broad.
+        return f"""
+        QColorDialog, QColorDialog QWidget {{
+            background-color: {UI_THEME['bg']};
+            color: {UI_THEME['text']};
+        }}
+        QColorDialog QLabel {{
+            color: {UI_THEME['text']};
+        }}
+        QColorDialog QGroupBox {{
+            border: 1px solid {UI_THEME['border']};
+            border-radius: 10px;
+            margin-top: 10px;
+            padding: 8px;
+        }}
+        QColorDialog QGroupBox::title {{
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 6px;
+            color: {UI_THEME['muted']};
+        }}
+        QColorDialog QPushButton {{
+            background-color: {UI_THEME['surface2']};
+            color: {UI_THEME['text']};
+            border: 1px solid {UI_THEME['border']};
+            border-radius: 10px;
+            padding: 7px 12px;
+            font-weight: 700;
+        }}
+        QColorDialog QPushButton:hover {{
+            border: 1px solid {UI_THEME['border_strong']};
+            background-color: {UI_THEME['surface']};
+        }}
+        QColorDialog QPushButton:pressed {{
+            background-color: {UI_THEME['surface2']};
+        }}
+        QColorDialog QLineEdit, QColorDialog QSpinBox, QColorDialog QDoubleSpinBox {{
+            background-color: {UI_THEME['surface2']};
+            color: {UI_THEME['text']};
+            border: 1px solid {UI_THEME['border']};
+            border-radius: 10px;
+            padding: 4px 8px;
+        }}
+        QColorDialog QLineEdit:focus, QColorDialog QSpinBox:focus, QColorDialog QDoubleSpinBox:focus {{
+            border: 1px solid {UI_THEME['accent']};
+        }}
+        QColorDialog QAbstractItemView {{
+            background-color: {UI_THEME['surface']};
+            color: {UI_THEME['text']};
+            selection-background-color: {UI_THEME['accent']};
+            selection-color: {UI_THEME['bg']};
+            border: 1px solid {UI_THEME['border']};
+            outline: none;
+        }}
+        QColorDialog QSlider::groove:horizontal {{
+            border: none;
+            height: 4px;
+            background: rgba(230, 225, 255, 35);
+            border-radius: 2px;
+        }}
+        QColorDialog QSlider::sub-page:horizontal {{
+            background: {UI_THEME['accent']};
+            border-radius: 2px;
+        }}
+        QColorDialog QSlider::handle:horizontal {{
+            background: {UI_THEME['accent']};
+            border: 1px solid {UI_THEME['border']};
+            width: 12px;
+            margin: -6px 0;
+            border-radius: 6px;
+        }}
+        QColorDialog QSlider::handle:horizontal:hover {{
+            border: 1px solid {UI_THEME['border_strong']};
+        }}
+        QColorPicker, QColorLuminancePicker {{
+            border: 1px solid {UI_THEME['border']};
+            border-radius: 10px;
+        }}
+        """
+
     def _on_hex_input_finished(self) -> None:
         if self._hex_syncing or not isinstance(self.hex_input, QLineEdit):
             return
@@ -2491,12 +2783,15 @@ class StandardCrosshairDialog(QWidget):
     def _open_color_dialog(self) -> None:
         initial = QColor(self.settings.red, self.settings.green, self.settings.blue, self.settings.alpha)
         self._apply_custom_palette_to_dialog()
-        color = QColorDialog.getColor(
-            initial,
-            self,
-            "Pick Crosshair Color",
-            QColorDialog.ColorDialogOption.ShowAlphaChannel,
-        )
+        dialog = QColorDialog(initial, self)
+        dialog.setWindowTitle("Pick Crosshair Color")
+        dialog.setOption(QColorDialog.ColorDialogOption.ShowAlphaChannel, True)
+        dialog.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog, True)
+        dialog.setStyleSheet(self._color_dialog_stylesheet())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            self._capture_custom_palette_from_dialog()
+            return
+        color = dialog.currentColor()
         self._capture_custom_palette_from_dialog()
         if not color.isValid():
             return
@@ -2646,7 +2941,10 @@ class LineBuilderDialog(QWidget):
 
     def closeEvent(self, event):  # type: ignore[override]
         try:
-            if getattr(self, "parent_dialog", None) is not None:
+            # Only restore/focus the parent if the settings dialog is a standalone window.
+            if getattr(self, "parent_dialog", None) is not None and not bool(
+                getattr(self.parent_dialog, "_embedded", False)
+            ):
                 self.parent_dialog.show()
                 self.parent_dialog.raise_()
                 self.parent_dialog.activateWindow()
@@ -2705,8 +3003,18 @@ class LineBuilderDialog(QWidget):
         self.back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.back_btn.setToolTip("Return to Crosshair Settings")
         self.back_btn.setStyleSheet(
-            "QPushButton { background-color: rgba(70, 70, 80, 180); color: #E0E0E0; border: 1px solid rgba(100, 100, 120, 120); border-radius: 10px; padding: 6px 10px; font-weight: bold; }"
-            "QPushButton:hover { background-color: rgba(90, 90, 110, 200); }"
+            "QPushButton { background-color: "
+            + UI_THEME["surface2"]
+            + "; color: "
+            + UI_THEME["text"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 10px; padding: 6px 10px; font-weight: 600; }"
+            "QPushButton:hover { background-color: "
+            + UI_THEME["surface"]
+            + "; border: 1px solid "
+            + UI_THEME["border_strong"]
+            + "; }"
         )
         self.back_btn.clicked.connect(self._return_to_settings)
         top_row.addWidget(self.back_btn)
@@ -2715,7 +3023,9 @@ class LineBuilderDialog(QWidget):
 
         intro = QLabel("Shape stacked lines, drag their order, and preview the result instantly.")
         intro.setWordWrap(True)
-        intro.setStyleSheet("color: #E0F7FA; font-weight: bold; font-size: 10px;")
+        intro.setStyleSheet(
+            "color: " + UI_THEME["muted"] + "; font-weight: 600; font-size: 10px;"
+        )
         intro.setVisible(False)
         layout.addWidget(intro)
 
@@ -2736,8 +3046,23 @@ class LineBuilderDialog(QWidget):
         self.left_panel_toggle.setToolTip("Show or hide the line lists")
         self.left_panel_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         self.left_panel_toggle.setStyleSheet(
-            "QToolButton { background-color: rgba(0, 188, 212, 120); color: white; border: none; border-radius: 6px; padding: 3px 6px; font-weight: bold; }"
-            "QToolButton:checked { background-color: rgba(0, 188, 212, 200); }"
+            "QToolButton { background-color: "
+            + UI_THEME["surface2"]
+            + "; color: "
+            + UI_THEME["text"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 8px; padding: 3px 6px; font-weight: 600; }"
+            "QToolButton:hover { border: 1px solid "
+            + UI_THEME["border_strong"]
+            + "; }"
+            "QToolButton:checked { background-color: "
+            + UI_THEME["accent"]
+            + "; color: "
+            + UI_THEME["bg"]
+            + "; border: 1px solid "
+            + UI_THEME["accent"]
+            + "; }"
         )
         self.left_panel_toggle.toggled.connect(self._toggle_left_panel)
         toggle_row.addWidget(self.left_panel_toggle)
@@ -2756,7 +3081,19 @@ class LineBuilderDialog(QWidget):
         self.standard_list = QListWidget()
         self.standard_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.standard_list.setStyleSheet(
-            "QListWidget { background-color: rgba(34,34,44,240); border-radius: 8px; border: 1px solid rgba(255,255,255,40); }"
+            "QListWidget { background-color: "
+            + UI_THEME["surface"]
+            + "; border-radius: 10px; border: 1px solid "
+            + UI_THEME["border"]
+            + "; }"
+            "QListWidget::item { padding: 6px 8px; color: "
+            + UI_THEME["text"]
+            + "; }"
+            "QListWidget::item:selected { background-color: "
+            + UI_THEME["accent"]
+            + "; color: "
+            + UI_THEME["bg"]
+            + "; border-radius: 8px; }"
         )
         self.standard_list.setMaximumHeight(120)
         self.standard_list.currentRowChanged.connect(self._on_standard_selection_changed)
@@ -2764,7 +3101,7 @@ class LineBuilderDialog(QWidget):
 
         std_hint = QLabel("Standard lines still respect the toggles above; builder layers optional geometry on top.")
         std_hint.setWordWrap(True)
-        std_hint.setStyleSheet("color: rgba(220, 220, 220, 140); font-size: 9px;")
+        std_hint.setStyleSheet("color: " + UI_THEME["muted"] + "; font-size: 9px;")
         std_hint.setVisible(False)
         left_panel.addWidget(std_hint)
 
@@ -2782,20 +3119,23 @@ class LineBuilderDialog(QWidget):
             btn.setFixedHeight(22)
             btn.setMinimumWidth(28)
             btn.setStyleSheet(
-                f"QPushButton {{ background-color: {bg}; color: white; border: none; border-radius: 6px; padding: 2px 8px; font-weight: bold; }}"
-                "QPushButton:disabled { background-color: rgba(90,90,110,120); color: rgba(255,255,255,120); }"
+                f"QPushButton {{ background-color: {bg}; color: {UI_THEME['text']}; border: 1px solid {UI_THEME['border']}; border-radius: 8px; padding: 2px 8px; font-weight: 700; }}"
+                f"QPushButton:hover {{ border: 1px solid {UI_THEME['border_strong']}; }}"
+                "QPushButton:disabled { background-color: rgba(120,120,140,60); color: rgba(255,255,255,120); border: 1px solid rgba(230,225,255,30); }"
             )
             return btn
 
-        self.add_line_btn = make_header_btn("＋", "rgba(0,188,212,180)", "Add a custom line")
+        self.add_line_btn = make_header_btn("＋", UI_THEME["accent"], "Add a custom line")
         self.add_line_btn.clicked.connect(self._on_add_custom_line)
         custom_header_layout.addWidget(self.add_line_btn)
 
-        self.duplicate_line_btn = make_header_btn("⧉", "rgba(92,107,192,180)", "Duplicate selected custom line")
+        self.duplicate_line_btn = make_header_btn(
+            "⧉", UI_THEME["surface2"], "Duplicate selected custom line"
+        )
         self.duplicate_line_btn.clicked.connect(self._on_duplicate_custom_line)
         custom_header_layout.addWidget(self.duplicate_line_btn)
 
-        self.remove_line_btn = make_header_btn("✖", "rgba(244,67,54,180)", "Remove selected custom line")
+        self.remove_line_btn = make_header_btn("✖", UI_THEME["danger"], "Remove selected custom line")
         self.remove_line_btn.clicked.connect(self._on_remove_custom_line)
         custom_header_layout.addWidget(self.remove_line_btn)
 
@@ -2804,7 +3144,19 @@ class LineBuilderDialog(QWidget):
         self.custom_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.custom_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.custom_list.setStyleSheet(
-            "QListWidget { background-color: rgba(34,34,44,240); border-radius: 8px; border: 1px solid rgba(0,188,212,80); }"
+            "QListWidget { background-color: "
+            + UI_THEME["surface"]
+            + "; border-radius: 10px; border: 1px solid "
+            + UI_THEME["border"]
+            + "; }"
+            "QListWidget::item { padding: 6px 8px; color: "
+            + UI_THEME["text"]
+            + "; }"
+            "QListWidget::item:selected { background-color: "
+            + UI_THEME["accent"]
+            + "; color: "
+            + UI_THEME["bg"]
+            + "; border-radius: 8px; }"
         )
         self.custom_list.model().rowsMoved.connect(self._on_custom_rows_moved)
         self.custom_list.currentRowChanged.connect(self._on_custom_selection_changed)
@@ -2812,7 +3164,7 @@ class LineBuilderDialog(QWidget):
 
         custom_hint = QLabel("Drag custom lines to reorder draw priority or stack multiple spokes at once.")
         custom_hint.setWordWrap(True)
-        custom_hint.setStyleSheet("color: rgba(220, 220, 220, 140); font-size: 9px;")
+        custom_hint.setStyleSheet("color: " + UI_THEME["muted"] + "; font-size: 9px;")
         custom_hint.setVisible(False)
         left_panel.addWidget(custom_hint)
 
@@ -2822,7 +3174,19 @@ class LineBuilderDialog(QWidget):
         self.components_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.components_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.components_list.setStyleSheet(
-            "QListWidget { background-color: rgba(34,34,44,240); border-radius: 8px; border: 1px solid rgba(255,255,255,40); }"
+            "QListWidget { background-color: "
+            + UI_THEME["surface"]
+            + "; border-radius: 10px; border: 1px solid "
+            + UI_THEME["border"]
+            + "; }"
+            "QListWidget::item { padding: 6px 8px; color: "
+            + UI_THEME["text"]
+            + "; }"
+            "QListWidget::item:selected { background-color: "
+            + UI_THEME["accent"]
+            + "; color: "
+            + UI_THEME["bg"]
+            + "; border-radius: 8px; }"
         )
         self.components_list.currentRowChanged.connect(self._on_component_selection_changed)
         self.components_list.model().rowsMoved.connect(self._on_component_rows_moved)
@@ -2843,7 +3207,9 @@ class LineBuilderDialog(QWidget):
 
     def _subheading(self, text: str) -> QLabel:
         label = QLabel(text)
-        label.setStyleSheet("color: #B0E1FF; font-weight: bold; font-size: 11px;")
+        label.setStyleSheet(
+            "color: " + UI_THEME["text"] + "; font-weight: 700; font-size: 11px;"
+        )
         return label
 
     def _toggle_left_panel(self, visible: bool) -> None:
@@ -2853,7 +3219,11 @@ class LineBuilderDialog(QWidget):
     def _create_preview_card(self) -> QFrame:
         frame = QFrame()
         frame.setStyleSheet(
-            "QFrame { background-color: rgba(25, 25, 35, 230); border-radius: 8px; border: 1px solid rgba(255,255,255,30); padding: 6px; }"
+            "QFrame { background-color: "
+            + UI_THEME["surface"]
+            + "; border-radius: 12px; border: 1px solid "
+            + UI_THEME["border"]
+            + "; padding: 6px; }"
         )
         layout = QVBoxLayout(frame)
         layout.setSpacing(3)
@@ -2863,13 +3233,37 @@ class LineBuilderDialog(QWidget):
         
         self.grid_toggle = QCheckBox()
         self.grid_toggle.setChecked(self.show_grid)
-        self.grid_toggle.setStyleSheet("QCheckBox { color: #E0E0E0; font-size: 10px; font-weight: bold; }")
+        self.grid_toggle.setStyleSheet(
+            "QCheckBox { color: " + UI_THEME["text"] + "; font-size: 10px; font-weight: 600; }"
+            "QCheckBox::indicator { width: 14px; height: 14px; border-radius: 4px; border: 1px solid "
+            + UI_THEME["border"]
+            + "; background: "
+            + UI_THEME["surface2"]
+            + "; }"
+            "QCheckBox::indicator:checked { background: "
+            + UI_THEME["accent"]
+            + "; border: 1px solid "
+            + UI_THEME["accent"]
+            + "; }"
+        )
         self.grid_toggle.toggled.connect(self._on_grid_toggle)
         header_row.addWidget(self.grid_toggle)
         
         self.snap_toggle = QCheckBox("⚲ Snap")
         self.snap_toggle.setChecked(self.grid_snap_enabled)
-        self.snap_toggle.setStyleSheet("QCheckBox { color: #E0E0E0; font-size: 11px; font-weight: bold; }")
+        self.snap_toggle.setStyleSheet(
+            "QCheckBox { color: " + UI_THEME["text"] + "; font-size: 11px; font-weight: 600; }"
+            "QCheckBox::indicator { width: 14px; height: 14px; border-radius: 4px; border: 1px solid "
+            + UI_THEME["border"]
+            + "; background: "
+            + UI_THEME["surface2"]
+            + "; }"
+            "QCheckBox::indicator:checked { background: "
+            + UI_THEME["accent"]
+            + "; border: 1px solid "
+            + UI_THEME["accent"]
+            + "; }"
+        )
         self.snap_toggle.toggled.connect(self._on_snap_toggle)
         header_row.addWidget(self.snap_toggle)
         
@@ -2879,7 +3273,7 @@ class LineBuilderDialog(QWidget):
         grid_size_layout.setSpacing(5)
         
         grid_size_label = QLabel("Grid Size")
-        grid_size_label.setStyleSheet("color: #B0B0B0; font-size: 12px;")
+        grid_size_label.setStyleSheet("color: " + UI_THEME["muted"] + "; font-size: 12px;")
         grid_size_layout.addWidget(grid_size_label)
         
         self.grid_size_spin = QSpinBox()
@@ -2888,13 +3282,22 @@ class LineBuilderDialog(QWidget):
         self.grid_size_spin.setFixedWidth(50)
         self.grid_size_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
         self.grid_size_spin.setStyleSheet(
-            "QSpinBox { background-color: rgba(40, 40, 50, 200); border: 1px solid rgba(100, 100, 120, 120); border-radius: 5px; padding: 2px 4px; color: #E0E0E0; }"
+            "QSpinBox { background-color: "
+            + UI_THEME["surface2"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 8px; padding: 2px 6px; color: "
+            + UI_THEME["text"]
+            + "; }"
+            "QSpinBox:focus { border: 1px solid "
+            + UI_THEME["border_strong"]
+            + "; }"
         )
         self.grid_size_spin.valueChanged.connect(self._on_grid_size_changed)
         grid_size_layout.addWidget(self.grid_size_spin)
         
         px_label = QLabel("px")
-        px_label.setStyleSheet("color: #B0B0B0; font-size: 10px;")
+        px_label.setStyleSheet("color: " + UI_THEME["muted"] + "; font-size: 10px;")
         grid_size_layout.addWidget(px_label)
     
         header_row.addWidget(grid_size_wrapper)
@@ -2906,7 +3309,11 @@ class LineBuilderDialog(QWidget):
         self.preview_label.setMinimumSize(200, 200)
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_label.setStyleSheet(
-            "QLabel { background-color: rgba(10, 10, 15, 220); border: 1px solid rgba(255, 255, 255, 40); border-radius: 10px; }"
+            "QLabel { background-color: "
+            + UI_THEME["bg"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 12px; }"
         )
         self.preview_label.mousePressEvent = self._preview_mouse_press
         self.preview_label.mouseMoveEvent = self._preview_mouse_move
@@ -2918,7 +3325,11 @@ class LineBuilderDialog(QWidget):
     def _create_metadata_panel(self) -> QFrame:
         frame = QFrame()
         frame.setStyleSheet(
-            "QFrame { background-color: rgba(25, 25, 35, 230); border-radius: 8px; border: 1px solid rgba(255,255,255,30); padding: 8px; }"
+            "QFrame { background-color: "
+            + UI_THEME["surface"]
+            + "; border-radius: 12px; border: 1px solid "
+            + UI_THEME["border"]
+            + "; padding: 8px; }"
         )
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
@@ -2978,7 +3389,7 @@ class LineBuilderDialog(QWidget):
         self.component_editor_stack = QStackedWidget()
         placeholder = QLabel("Select an object to edit it.")
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        placeholder.setStyleSheet("color: rgba(220, 220, 220, 150);")
+        placeholder.setStyleSheet("color: " + UI_THEME["muted"] + ";")
         self.component_editor_stack.addWidget(placeholder)
 
         segment_editor = QWidget()
@@ -2986,7 +3397,9 @@ class LineBuilderDialog(QWidget):
         segment_form.setSpacing(4)
 
         self.segment_draggable = QCheckBox("Draggable")
-        self.segment_draggable.setStyleSheet("QCheckBox { color: #E0E0E0; font-weight: bold; }")
+        self.segment_draggable.setStyleSheet(
+            "QCheckBox { color: " + UI_THEME["text"] + "; font-weight: 600; }"
+        )
         self.segment_draggable.toggled.connect(lambda v: self._on_component_draggable_changed("segment", v))
         segment_form.addRow("", self.segment_draggable)
 
@@ -3001,7 +3414,9 @@ class LineBuilderDialog(QWidget):
         circle_form.setSpacing(4)
 
         self.circle_draggable = QCheckBox("Draggable")
-        self.circle_draggable.setStyleSheet("QCheckBox { color: #E0E0E0; font-weight: bold; }")
+        self.circle_draggable.setStyleSheet(
+            "QCheckBox { color: " + UI_THEME["text"] + "; font-weight: 600; }"
+        )
         self.circle_draggable.toggled.connect(lambda v: self._on_component_draggable_changed("circle", v))
         circle_form.addRow("", self.circle_draggable)
 
@@ -3016,7 +3431,9 @@ class LineBuilderDialog(QWidget):
         square_form.setSpacing(4)
 
         self.square_draggable = QCheckBox("Draggable")
-        self.square_draggable.setStyleSheet("QCheckBox { color: #E0E0E0; font-weight: bold; }")
+        self.square_draggable.setStyleSheet(
+            "QCheckBox { color: " + UI_THEME["text"] + "; font-weight: 600; }"
+        )
         self.square_draggable.toggled.connect(lambda v: self._on_component_draggable_changed("square", v))
         square_form.addRow("", self.square_draggable)
 
@@ -3031,7 +3448,9 @@ class LineBuilderDialog(QWidget):
         triangle_form.setSpacing(4)
 
         self.triangle_draggable = QCheckBox("Draggable")
-        self.triangle_draggable.setStyleSheet("QCheckBox { color: #E0E0E0; font-weight: bold; }")
+        self.triangle_draggable.setStyleSheet(
+            "QCheckBox { color: " + UI_THEME["text"] + "; font-weight: 600; }"
+        )
         self.triangle_draggable.toggled.connect(lambda v: self._on_component_draggable_changed("triangle", v))
         triangle_form.addRow("", self.triangle_draggable)
 
@@ -3046,7 +3465,9 @@ class LineBuilderDialog(QWidget):
         curve_form.setSpacing(4)
 
         self.curve_draggable = QCheckBox("Draggable")
-        self.curve_draggable.setStyleSheet("QCheckBox { color: #E0E0E0; font-weight: bold; }")
+        self.curve_draggable.setStyleSheet(
+            "QCheckBox { color: " + UI_THEME["text"] + "; font-weight: 600; }"
+        )
         self.curve_draggable.toggled.connect(lambda v: self._on_component_draggable_changed("curve", v))
         curve_form.addRow("", self.curve_draggable)
 
@@ -3071,7 +3492,11 @@ class LineBuilderDialog(QWidget):
     def _create_component_panel(self) -> QFrame:
         frame = QFrame()
         frame.setStyleSheet(
-            "QFrame { background-color: rgba(25, 25, 35, 230); border-radius: 8px; border: 1px solid rgba(255,255,255,30); padding: 6px; }"
+            "QFrame { background-color: "
+            + UI_THEME["surface"]
+            + "; border-radius: 12px; border: 1px solid "
+            + UI_THEME["border"]
+            + "; padding: 6px; }"
         )
         layout = QVBoxLayout(frame)
         layout.setSpacing(6)
@@ -3084,7 +3509,16 @@ class LineBuilderDialog(QWidget):
         self.quick_add_segment_btn = QPushButton("＋ Line")
         self.quick_add_segment_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.quick_add_segment_btn.setStyleSheet(
-            "QPushButton { background-color: rgba(0,188,212,160); color: white; border: none; border-radius: 6px; padding: 3px 8px; font-weight: bold; }"
+            "QPushButton { background-color: "
+            + UI_THEME["surface2"]
+            + "; color: "
+            + UI_THEME["text"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 8px; padding: 3px 8px; font-weight: 600; }"
+            "QPushButton:hover { border: 1px solid "
+            + UI_THEME["border_strong"]
+            + "; }"
         )
         self.quick_add_segment_btn.clicked.connect(lambda: self._add_component("segment", self._last_mouse_pos_pixmap))
         tools_row.addWidget(self.quick_add_segment_btn)
@@ -3092,7 +3526,16 @@ class LineBuilderDialog(QWidget):
         self.quick_add_circle_btn = QPushButton("＋ Circle")
         self.quick_add_circle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.quick_add_circle_btn.setStyleSheet(
-            "QPushButton { background-color: rgba(92,107,192,160); color: white; border: none; border-radius: 6px; padding: 3px 8px; font-weight: bold; }"
+            "QPushButton { background-color: "
+            + UI_THEME["surface2"]
+            + "; color: "
+            + UI_THEME["text"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 8px; padding: 3px 8px; font-weight: 600; }"
+            "QPushButton:hover { border: 1px solid "
+            + UI_THEME["border_strong"]
+            + "; }"
         )
         self.quick_add_circle_btn.clicked.connect(lambda: self._add_component("circle", self._last_mouse_pos_pixmap))
         tools_row.addWidget(self.quick_add_circle_btn)
@@ -3100,7 +3543,16 @@ class LineBuilderDialog(QWidget):
         self.quick_add_square_btn = QPushButton("＋ Square")
         self.quick_add_square_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.quick_add_square_btn.setStyleSheet(
-            "QPushButton { background-color: rgba(120,144,156,160); color: white; border: none; border-radius: 6px; padding: 3px 8px; font-weight: bold; }"
+            "QPushButton { background-color: "
+            + UI_THEME["surface2"]
+            + "; color: "
+            + UI_THEME["text"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 8px; padding: 3px 8px; font-weight: 600; }"
+            "QPushButton:hover { border: 1px solid "
+            + UI_THEME["border_strong"]
+            + "; }"
         )
         self.quick_add_square_btn.clicked.connect(lambda: self._add_component("square", self._last_mouse_pos_pixmap))
         tools_row.addWidget(self.quick_add_square_btn)
@@ -3108,7 +3560,16 @@ class LineBuilderDialog(QWidget):
         self.quick_add_triangle_btn = QPushButton("＋ Triangle")
         self.quick_add_triangle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.quick_add_triangle_btn.setStyleSheet(
-            "QPushButton { background-color: rgba(120,144,156,160); color: white; border: none; border-radius: 6px; padding: 3px 8px; font-weight: bold; }"
+            "QPushButton { background-color: "
+            + UI_THEME["surface2"]
+            + "; color: "
+            + UI_THEME["text"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 8px; padding: 3px 8px; font-weight: 600; }"
+            "QPushButton:hover { border: 1px solid "
+            + UI_THEME["border_strong"]
+            + "; }"
         )
         self.quick_add_triangle_btn.clicked.connect(lambda: self._add_component("triangle", self._last_mouse_pos_pixmap))
         tools_row.addWidget(self.quick_add_triangle_btn)
@@ -3118,8 +3579,23 @@ class LineBuilderDialog(QWidget):
         self.draw_toggle.setCheckable(True)
         self.draw_toggle.setToolTip("Click-drag on the canvas to draw a new object")
         self.draw_toggle.setStyleSheet(
-            "QToolButton { background-color: rgba(0,188,212,120); color: white; border: none; border-radius: 6px; padding: 3px 8px; font-weight: bold; }"
-            "QToolButton:checked { background-color: rgba(0,188,212,200); }"
+            "QToolButton { background-color: "
+            + UI_THEME["surface2"]
+            + "; color: "
+            + UI_THEME["text"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 8px; padding: 3px 8px; font-weight: 700; }"
+            "QToolButton:hover { border: 1px solid "
+            + UI_THEME["border_strong"]
+            + "; }"
+            "QToolButton:checked { background-color: "
+            + UI_THEME["accent"]
+            + "; color: "
+            + UI_THEME["bg"]
+            + "; border: 1px solid "
+            + UI_THEME["accent"]
+            + "; }"
         )
         self.draw_toggle.toggled.connect(self._on_draw_mode_toggled)
         tools_row.addWidget(self.draw_toggle)
@@ -3132,8 +3608,17 @@ class LineBuilderDialog(QWidget):
         self.quick_duplicate_btn.setFixedWidth(34)
         self.quick_duplicate_btn.setEnabled(False)
         self.quick_duplicate_btn.setStyleSheet(
-            "QPushButton { background-color: rgba(120,144,156,160); color: white; border: none; border-radius: 6px; padding: 3px 6px; font-weight: bold; }"
-            "QPushButton:disabled { background-color: rgba(90,90,110,120); color: rgba(255,255,255,120); }"
+            "QPushButton { background-color: "
+            + UI_THEME["surface2"]
+            + "; color: "
+            + UI_THEME["text"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 8px; padding: 3px 6px; font-weight: 700; }"
+            "QPushButton:hover { border: 1px solid "
+            + UI_THEME["border_strong"]
+            + "; }"
+            "QPushButton:disabled { background-color: rgba(120,120,140,60); color: rgba(255,255,255,120); border: 1px solid rgba(230,225,255,30); }"
         )
         self.quick_duplicate_btn.clicked.connect(self._duplicate_component)
         tools_row.addWidget(self.quick_duplicate_btn)
@@ -3144,8 +3629,17 @@ class LineBuilderDialog(QWidget):
         self.quick_delete_btn.setFixedWidth(34)
         self.quick_delete_btn.setEnabled(False)
         self.quick_delete_btn.setStyleSheet(
-            "QPushButton { background-color: rgba(244,67,54,180); color: white; border: none; border-radius: 6px; padding: 3px 6px; font-weight: bold; }"
-            "QPushButton:disabled { background-color: rgba(90,90,110,120); color: rgba(255,255,255,120); }"
+            "QPushButton { background-color: "
+            + UI_THEME["danger"]
+            + "; color: "
+            + UI_THEME["text"]
+            + "; border: 1px solid "
+            + UI_THEME["danger"]
+            + "; border-radius: 8px; padding: 3px 6px; font-weight: 800; }"
+            "QPushButton:hover { border: 1px solid "
+            + UI_THEME["border_strong"]
+            + "; }"
+            "QPushButton:disabled { background-color: rgba(200,75,106,80); color: rgba(255,255,255,120); border: 1px solid rgba(200,75,106,80); }"
         )
         self.quick_delete_btn.clicked.connect(self._remove_component)
         tools_row.addWidget(self.quick_delete_btn)
@@ -3156,8 +3650,17 @@ class LineBuilderDialog(QWidget):
         self.undo_btn.setFixedWidth(34)
         self.undo_btn.setEnabled(False)
         self.undo_btn.setStyleSheet(
-            "QPushButton { background-color: rgba(92,107,192,180); color: white; border: none; border-radius: 6px; padding: 3px 6px; font-weight: bold; }"
-            "QPushButton:disabled { background-color: rgba(90,90,110,120); color: rgba(255,255,255,120); }"
+            "QPushButton { background-color: "
+            + UI_THEME["surface2"]
+            + "; color: "
+            + UI_THEME["text"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 8px; padding: 3px 6px; font-weight: 800; }"
+            "QPushButton:hover { border: 1px solid "
+            + UI_THEME["border_strong"]
+            + "; }"
+            "QPushButton:disabled { background-color: rgba(120,120,140,60); color: rgba(255,255,255,120); border: 1px solid rgba(230,225,255,30); }"
         )
         self.undo_btn.clicked.connect(self._undo)
         tools_row.addWidget(self.undo_btn)
@@ -3168,8 +3671,17 @@ class LineBuilderDialog(QWidget):
         self.redo_btn.setFixedWidth(34)
         self.redo_btn.setEnabled(False)
         self.redo_btn.setStyleSheet(
-            "QPushButton { background-color: rgba(92,107,192,180); color: white; border: none; border-radius: 6px; padding: 3px 6px; font-weight: bold; }"
-            "QPushButton:disabled { background-color: rgba(90,90,110,120); color: rgba(255,255,255,120); }"
+            "QPushButton { background-color: "
+            + UI_THEME["surface2"]
+            + "; color: "
+            + UI_THEME["text"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 8px; padding: 3px 6px; font-weight: 800; }"
+            "QPushButton:hover { border: 1px solid "
+            + UI_THEME["border_strong"]
+            + "; }"
+            "QPushButton:disabled { background-color: rgba(120,120,140,60); color: rgba(255,255,255,120); border: 1px solid rgba(230,225,255,30); }"
         )
         self.redo_btn.clicked.connect(self._redo)
         tools_row.addWidget(self.redo_btn)
@@ -3181,7 +3693,7 @@ class LineBuilderDialog(QWidget):
 
         hint = QLabel("Select an object on the canvas (or in the left list) to edit its properties in Metadata.")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: rgba(220, 220, 220, 120); font-size: 9px;")
+        hint.setStyleSheet("color: " + UI_THEME["muted"] + "; font-size: 9px;")
         layout.addWidget(hint)
 
         # No visible insert/modify buttons (use left list + tools row).
@@ -3197,7 +3709,16 @@ class LineBuilderDialog(QWidget):
         spin.setAccelerated(True)
         spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
         spin.setStyleSheet(
-            "QDoubleSpinBox { background-color: rgba(40, 40, 50, 200); border: 1px solid rgba(100, 100, 120, 120); border-radius: 5px; padding: 3px 6px; color: #E0E0E0; min-width: 70px; }"
+            "QDoubleSpinBox { background-color: "
+            + UI_THEME["surface2"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 8px; padding: 3px 8px; color: "
+            + UI_THEME["text"]
+            + "; min-width: 70px; }"
+            "QDoubleSpinBox:focus { border: 1px solid "
+            + UI_THEME["border_strong"]
+            + "; }"
         )
         return spin
 
@@ -3207,7 +3728,9 @@ class LineBuilderDialog(QWidget):
         }
         text = label_map.get(field, field.replace("_", " ").title())
         label = QLabel(text)
-        label.setStyleSheet("color: #B0B0B0; font-size: 11px; font-weight: bold;")
+        label.setStyleSheet(
+            "color: " + UI_THEME["muted"] + "; font-size: 11px; font-weight: 700;"
+        )
         return label
 
     def _wrap_with_unit(self, widget: QDoubleSpinBox, unit: str) -> QWidget:
@@ -3216,7 +3739,7 @@ class LineBuilderDialog(QWidget):
         inner.addWidget(widget)
         if unit:
             unit_label = QLabel(unit)
-            unit_label.setStyleSheet("color: #B0B0B0; padding-left: 4px;")
+            unit_label.setStyleSheet("color: " + UI_THEME["muted"] + "; padding-left: 4px;")
             inner.addWidget(unit_label)
         inner.addStretch()
         return wrapper

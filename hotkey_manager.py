@@ -165,11 +165,14 @@ class HotkeyManagerDialog(QWidget):
         self.config_file = "hotkey_config.json"
         # key_name -> list[HotkeyLineEdit] (multiple bindings per action)
         self.hotkey_inputs: dict[str, list[HotkeyLineEdit]] = {}
+        # key_name -> QVBoxLayout that holds the HotkeyLineEdit rows (plus an add-row widget at the end)
+        self._hotkey_inputs_layouts: dict[str, QVBoxLayout] = {}
+        self._hotkey_add_row_widgets: dict[str, QWidget] = {}
         self.default_hotkeys = {
-            "toggle_visibility": ["f1", ""],
-            "mirror_vertical": ["f3", ""],
-            "mirror_horizontal": ["f4", ""],
-            "switch_image": ["f2", ""],
+            "toggle_visibility": ["f1"],
+            "mirror_vertical": ["f3"],
+            "mirror_horizontal": ["f4"],
+            "switch_image": ["f2"],
         }
         self.current_hotkeys = self.load_hotkeys()
         self.init_ui()
@@ -179,6 +182,13 @@ class HotkeyManagerDialog(QWidget):
         try:
             from hotkeys import pause_hotkeys
             pause_hotkeys()
+        except Exception:
+            pass
+        # Ensure the tool window is interactive even when opened from tray/overlay contexts.
+        try:
+            self.raise_()
+            self.activateWindow()
+            self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
         except Exception:
             pass
 
@@ -219,8 +229,10 @@ class HotkeyManagerDialog(QWidget):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.addWidget(main_frame)
-        
-        self.setFixedSize(650, 550)
+
+        # Resizable window (frameless), but keep a sensible minimum.
+        self.setMinimumSize(560, 420)
+        self.resize(650, 550)
         self.center_on_screen()
     
     def _create_main_frame(self):
@@ -370,16 +382,16 @@ class HotkeyManagerDialog(QWidget):
         )
         label.setMinimumWidth(180)
         row_layout.addWidget(label)
-        
-        # Input fields (two bindings per action)
-        current_values = self.current_hotkeys.get(key_name, ["", ""])
+
+        # Input fields (unlimited bindings per action via '+')
+        current_values = self.current_hotkeys.get(key_name, [])
         if isinstance(current_values, str):
-            current_values = [current_values, ""]
+            current_values = [current_values]
         if not isinstance(current_values, list):
-            current_values = ["", ""]
-        current_values = [str(v or "").strip().lower() for v in current_values]
-        while len(current_values) < 2:
-            current_values.append("")
+            current_values = []
+        current_values = [str(v or "").strip().lower() for v in current_values if str(v or "").strip()]
+        if not current_values:
+            current_values = [""]
 
         inputs_container = QFrame()
         inputs_container.setStyleSheet("QFrame { background: transparent; }")
@@ -387,28 +399,44 @@ class HotkeyManagerDialog(QWidget):
         inputs_layout.setContentsMargins(0, 0, 0, 0)
         inputs_layout.setSpacing(8)
 
-        edits: list[HotkeyLineEdit] = []
-        for i in range(2):
-            input_field = HotkeyLineEdit()
-            input_field.setText(current_values[i])
-            input_field.current_key = current_values[i]
-            input_field.setStyleSheet(
-                "QLineEdit { background-color: "
-                + UI_THEME["surface2"]
-                + "; color: "
-                + UI_THEME["text"]
-                + "; border: 2px solid "
-                + UI_THEME["border"]
-                + "; border-radius: 10px; padding: 10px; font-size: 13px; min-height: 18px; }"
-                "QLineEdit:focus { border: 2px solid "
-                + UI_THEME["accent"]
-                + "; }"
-            )
-            input_field.setPlaceholderText(f"Hotkey {i + 1} (optional)" if i == 1 else "Hotkey 1")
-            edits.append(input_field)
-            inputs_layout.addWidget(input_field)
+        self.hotkey_inputs[key_name] = []
+        self._hotkey_inputs_layouts[key_name] = inputs_layout
 
-        self.hotkey_inputs[key_name] = edits
+        # Add-row widget (always last) so we can insert new edits above it.
+        add_row = QFrame()
+        add_row.setStyleSheet("QFrame { background: transparent; }")
+        add_row_layout = QHBoxLayout(add_row)
+        add_row_layout.setContentsMargins(0, 0, 0, 0)
+        add_row_layout.setSpacing(8)
+        add_row_layout.addStretch(1)
+
+        add_btn = QPushButton("+")
+        add_btn.setFixedSize(28, 28)
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_btn.setStyleSheet(
+            "QPushButton { background-color: "
+            + UI_THEME["surface2"]
+            + "; color: "
+            + UI_THEME["text"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 10px; font-size: 18px; font-weight: 900; }"
+            "QPushButton:hover { border: 1px solid "
+            + UI_THEME["border_strong"]
+            + "; }"
+            "QPushButton:pressed { background-color: "
+            + UI_THEME["surface"]
+            + "; }"
+        )
+        add_btn.clicked.connect(lambda: self._add_binding_row(key_name))
+        add_row_layout.addWidget(add_btn)
+
+        self._hotkey_add_row_widgets[key_name] = add_row
+        inputs_layout.addWidget(add_row)
+
+        for v in current_values:
+            self._add_binding_row(key_name, initial_value=v)
+
         row_layout.addWidget(inputs_container)
         
         layout.addWidget(row)
@@ -459,16 +487,70 @@ class HotkeyManagerDialog(QWidget):
     
     def reset_to_defaults(self):
         """Reset all hotkeys to defaults."""
-        for key_name, edits in self.hotkey_inputs.items():
-            defaults = self.default_hotkeys.get(key_name, ["", ""])
+        for key_name in list(self.hotkey_inputs.keys()):
+            defaults = self.default_hotkeys.get(key_name, [])
             if isinstance(defaults, str):
-                defaults = [defaults, ""]
-            while len(defaults) < 2:
-                defaults.append("")
-            for i, edit in enumerate(edits):
-                value = str(defaults[i] or "").strip().lower()
-                edit.setText(value)
-                edit.current_key = value
+                defaults = [defaults]
+            if not isinstance(defaults, list):
+                defaults = []
+            defaults = [str(v or "").strip().lower() for v in defaults if str(v or "").strip()]
+            if not defaults:
+                defaults = [""]
+            self._set_action_bindings(key_name, defaults)
+
+    def _make_hotkey_input(self, placeholder: str, initial_value: str) -> HotkeyLineEdit:
+        input_field = HotkeyLineEdit()
+        input_field.setText(str(initial_value or "").strip().lower())
+        input_field.current_key = str(initial_value or "").strip().lower()
+        input_field.setPlaceholderText(placeholder)
+        input_field.setStyleSheet(
+            "QLineEdit { background-color: "
+            + UI_THEME["surface2"]
+            + "; color: "
+            + UI_THEME["text"]
+            + "; border: 2px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 10px; padding: 10px; font-size: 13px; min-height: 18px; }"
+            "QLineEdit:focus { border: 2px solid "
+            + UI_THEME["accent"]
+            + "; }"
+        )
+        return input_field
+
+    def _add_binding_row(self, key_name: str, *, initial_value: str = "") -> None:
+        inputs_layout = self._hotkey_inputs_layouts.get(key_name)
+        if inputs_layout is None:
+            return
+        edits = self.hotkey_inputs.setdefault(key_name, [])
+        add_row_widget = self._hotkey_add_row_widgets.get(key_name)
+        insert_index = max(0, inputs_layout.count() - (1 if add_row_widget is not None else 0))
+
+        placeholder = f"Hotkey {len(edits) + 1}" if len(edits) > 0 else "Hotkey 1"
+        input_field = self._make_hotkey_input(placeholder, initial_value)
+        edits.append(input_field)
+        inputs_layout.insertWidget(insert_index, input_field)
+
+    def _set_action_bindings(self, key_name: str, values: list[str]) -> None:
+        inputs_layout = self._hotkey_inputs_layouts.get(key_name)
+        if inputs_layout is None:
+            return
+
+        # Remove existing edit widgets.
+        for edit in self.hotkey_inputs.get(key_name, []) or []:
+            try:
+                edit.setParent(None)
+                edit.deleteLater()
+            except Exception:
+                pass
+        self.hotkey_inputs[key_name] = []
+
+        # Ensure at least one row.
+        cleaned = [str(v or "").strip().lower() for v in (values or []) if str(v or "").strip()]
+        if not cleaned:
+            cleaned = [""]
+
+        for v in cleaned:
+            self._add_binding_row(key_name, initial_value=v)
     
     def save_hotkeys(self):
         """Save the current hotkey configuration."""
@@ -480,10 +562,8 @@ class HotkeyManagerDialog(QWidget):
                 hk = str(edit.current_key or "").strip().lower()
                 if hk:
                     values.append(hk)
-            # Keep file format stable (always a list), pad to 2 for UI.
-            while len(values) < 2:
-                values.append("")
-            new_hotkeys[key_name] = values[:2]
+            # Keep file format stable (always a list). Empty list disables the action hotkey.
+            new_hotkeys[key_name] = values
         
         # Check for duplicates across all non-empty bindings
         hotkey_values = []
@@ -540,13 +620,11 @@ class HotkeyManagerDialog(QWidget):
                     for key, defaults in self.default_hotkeys.items():
                         v = raw.get(key, defaults)
                         if isinstance(v, str):
-                            v = [v, ""]
+                            v = [v]
                         if not isinstance(v, list):
                             v = list(defaults)
-                        v = [str(x or "").strip().lower() for x in v]
-                        while len(v) < 2:
-                            v.append("")
-                        normalized[key] = v[:2]
+                        v = [str(x or "").strip().lower() for x in v if str(x or "").strip()]
+                        normalized[key] = v
                     return normalized
             except:
                 pass

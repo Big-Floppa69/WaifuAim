@@ -6,6 +6,22 @@ from PyQt6.QtWidgets import QLabel
 from PyQt6.QtGui import QPixmap
 
 
+# Shared UI theme colors (dark purple system)
+UI_THEME = {
+    "bg": "#0F0B1E",
+    "bg2": "#130F2A",
+    "surface": "#1A1636",
+    "surface2": "#221D45",
+    "text": "#E6E1FF",
+    "muted": "#BDB6E6",
+    "accent": "#7C5CFF",
+    "accent2": "#4FD1C5",
+    "danger": "#C84B6A",
+    "border": "rgba(230, 225, 255, 40)",
+    "border_strong": "rgba(230, 225, 255, 70)",
+}
+
+
 def make_key_handler(func, hotkey):
     """Create a keyboard event handler for a specific hotkey."""
     def handler(event):

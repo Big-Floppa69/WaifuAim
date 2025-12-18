@@ -1,11 +1,23 @@
 """
 Control panel widget for managing crosshair settings.
 """
-from PyQt6.QtWidgets import (QApplication, QLabel, QWidget, QVBoxLayout, 
-                             QHBoxLayout, QPushButton, QSlider, QFrame, 
-                             QGraphicsDropShadowEffect, QComboBox, QStackedWidget)
+from PyQt6.QtWidgets import (
+    QApplication,
+    QLabel,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+    QSlider,
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QComboBox,
+    QStackedWidget,
+    QSizeGrip,
+    QSizePolicy,
+)
 from PyQt6.QtGui import QPixmap, QColor
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve
 from utils import mirror_vertical, mirror_horizontal, get_art_list, transparent, UI_THEME
 from image_manager import ImageManagerDialog
 from hotkey_manager import HotkeyManagerDialog
@@ -42,6 +54,9 @@ class DarkControlPanel(QWidget):
         self._collapsed = False
         self._expanded_width = 320
         self._collapsed_width = 76
+        self._crosshair_width = 560
+        self._main_size = QSize(320, 660)
+        self._crosshair_size = QSize(560, 760)
         self._collapse_btn = None
         self._back_btn = None
         self._title_label = None
@@ -56,6 +71,17 @@ class DarkControlPanel(QWidget):
         self._stack = None
         self._page_main = None
         self._page_crosshair = None
+
+        # Track programmatic resizing so we can persist user-resized sizes per page.
+        self._programmatic_resize = False
+
+        # Resizing (frameless)
+        self._resize_margin = 7
+        self._resizing = False
+        self._resize_edges: set[str] = set()
+        self._resize_start_pos = None
+        self._resize_start_geom = None
+        self._size_grip = None
         self.init_ui()
         
     def init_ui(self):
@@ -66,6 +92,9 @@ class DarkControlPanel(QWidget):
             Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        # Allow manual resizing.
+        self.setMinimumSize(280, 520)
         
         # Main container with dark background and rounded edges
         main_frame = self._create_main_frame()
@@ -82,17 +111,61 @@ class DarkControlPanel(QWidget):
         # Content container (stacked pages)
         self._stack = self._create_content_stack()
         layout.addWidget(self._stack)
+
+        # Resize handle for the frameless panel.
+        self._size_grip = QSizeGrip(main_frame)
+        self._size_grip.setFixedSize(16, 16)
+        self._size_grip.setStyleSheet("QSizeGrip { background: transparent; }")
         
         # Set main layout
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.addWidget(main_frame)
-        
-        self.setFixedWidth(self._expanded_width)
-        self.adjustSize()
+
+        self.resize(self._main_size)
 
         # Start on main menu title mode.
         self._set_title_mode("main")
+
+    def resizeEvent(self, event):  # type: ignore[override]
+        super().resizeEvent(event)
+        try:
+            if self._size_grip is not None:
+                margin = 8
+                self._size_grip.move(
+                    self.width() - self._size_grip.width() - margin,
+                    self.height() - self._size_grip.height() - margin,
+                )
+                self._size_grip.raise_()
+        except Exception:
+            pass
+
+    def _hit_test_edges(self, pos) -> set[str]:
+        """Return a set of edges (left/right/top/bottom) if pos is near them."""
+        m = int(self._resize_margin)
+        edges: set[str] = set()
+        x = int(pos.x())
+        y = int(pos.y())
+        if x <= m:
+            edges.add("left")
+        if x >= self.width() - m:
+            edges.add("right")
+        if y <= m:
+            edges.add("top")
+        if y >= self.height() - m:
+            edges.add("bottom")
+        return edges
+
+    def _cursor_for_edges(self, edges: set[str]):
+        if not edges:
+            return Qt.CursorShape.ArrowCursor
+        if edges == {"left"} or edges == {"right"}:
+            return Qt.CursorShape.SizeHorCursor
+        if edges == {"top"} or edges == {"bottom"}:
+            return Qt.CursorShape.SizeVerCursor
+        if ("left" in edges and "top" in edges) or ("right" in edges and "bottom" in edges):
+            return Qt.CursorShape.SizeFDiagCursor
+        return Qt.CursorShape.SizeBDiagCursor
     
     def _create_main_frame(self):
         """Create the main frame with styling and shadow effect."""
@@ -138,20 +211,21 @@ class DarkControlPanel(QWidget):
         
         # Title
         self._title_label = QLabel("Crosshair Control")
-        self._title_label.setStyleSheet("""
+        self._title_label.setStyleSheet(
+            """
             QLabel {
                 color: #E6E1FF;
                 font-size: 14px;
                 font-weight: bold;
                 background: transparent;
             }
-        """)
+            """
+        )
         title_bar_layout.addWidget(self._title_label)
         title_bar_layout.addStretch()
 
-        # Collapse/expand button
-        self._collapse_btn = self._create_window_button("❮", self.toggle_collapsed)
-        title_bar_layout.addWidget(self._collapse_btn)
+        # (Removed) Collapse/expand button
+        self._collapse_btn = None
         
         # Minimize button
         minimize_btn = self._create_window_button("−", self.hide)
@@ -170,8 +244,6 @@ class DarkControlPanel(QWidget):
         try:
             if self._back_btn is not None:
                 self._back_btn.setVisible(not is_main)
-            if self._collapse_btn is not None:
-                self._collapse_btn.setVisible(is_main)
             if self._title_label is not None:
                 self._title_label.setText("Crosshair Control" if is_main else "Standard Crosshair")
                 self._title_label.setVisible(True)
@@ -183,7 +255,6 @@ class DarkControlPanel(QWidget):
         if btn is None:
             return
         icon = str(full_text).strip().split(" ", 1)[0] if str(full_text).strip() else ""
-        btn.setProperty("fullText", full_text)
         btn.setProperty("iconText", icon)
         btn.setToolTip(full_text)
         self._collapsible_buttons.append(btn)
@@ -194,6 +265,20 @@ class DarkControlPanel(QWidget):
             return
         self._collapsed = collapsed
 
+        # Collapsing only applies to the main menu page.
+        if self._stack is not None and self._page_crosshair is not None and self._stack.currentWidget() == self._page_crosshair:
+            return
+
+        # Persist user-resized size per page.
+        try:
+            if not getattr(self, "_programmatic_resize", False) and self._stack is not None:
+                cur = self._stack.currentWidget()
+                if cur is not None and cur == self._page_main:
+                    self._main_size = self.size()
+                elif cur is not None and cur == self._page_crosshair:
+                    self._crosshair_size = self.size()
+        except Exception:
+            pass
         self.setFixedWidth(self._collapsed_width if collapsed else self._expanded_width)
         if self._collapse_btn is not None:
             self._collapse_btn.setText("❯" if collapsed else "❮")
@@ -205,7 +290,12 @@ class DarkControlPanel(QWidget):
                     w.setVisible(not collapsed)
             except Exception:
                 pass
-
+        # Keep legacy behavior but avoid locking width permanently.
+        target_w = self._collapsed_width if collapsed else self._expanded_width
+        try:
+            self.resize(QSize(target_w, self.height()))
+        except Exception:
+            pass
         # Update button labels.
         for btn in self._collapsible_buttons:
             try:
@@ -236,7 +326,8 @@ class DarkControlPanel(QWidget):
         hover_color = UI_THEME["danger"] if is_close else UI_THEME["surface2"]
         font_size = "20px" if is_close else "18px"
         
-        btn.setStyleSheet(f"""
+        btn.setStyleSheet(
+            f"""
             QPushButton {{
                 background-color: {UI_THEME['surface2']};
                 color: {UI_THEME['text']};
@@ -251,15 +342,14 @@ class DarkControlPanel(QWidget):
             QPushButton:pressed {{
                 background-color: {UI_THEME['surface']};
             }}
-        """)
+            """
+        )
         btn.clicked.connect(callback)
         return btn
     
     def _create_content_stack(self) -> QStackedWidget:
         """Create stacked pages so navigation happens in one window."""
         stack = QStackedWidget()
-        stack.setStyleSheet("QStackedWidget { background: transparent; border: none; }")
-
         self._page_main = self._create_main_menu_page()
         stack.addWidget(self._page_main)
 
@@ -275,7 +365,8 @@ class DarkControlPanel(QWidget):
         content_frame.setStyleSheet("QFrame { background: transparent; }")
         content_layout = QVBoxLayout(content_frame)
         content_layout.setContentsMargins(20, 15, 20, 20)
-        content_layout.setSpacing(15)
+        # A bit more breathing room between controls.
+        content_layout.setSpacing(18)
         
         # Visibility toggle buttons
         self.image_toggle_btn = self.create_button("🖼️ Hide Image", role="neutral")
@@ -297,13 +388,12 @@ class DarkControlPanel(QWidget):
             QFrame {
                 background-color: #1A1636;
                 border-radius: 10px;
-                padding: 10px;
                 border: 1px solid rgba(230, 225, 255, 40);
             }
             """
         )
         preset_layout = QHBoxLayout(self._preset_container)
-        preset_layout.setContentsMargins(10, 10, 10, 10)
+        preset_layout.setContentsMargins(12, 10, 12, 10)
         preset_layout.setSpacing(10)
 
         preset_label = QLabel("Preset")
@@ -320,6 +410,7 @@ class DarkControlPanel(QWidget):
 
         self.crosshair_preset_combo = QComboBox()
         self.crosshair_preset_combo.setFixedHeight(30)
+        self.crosshair_preset_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.crosshair_preset_combo.setCursor(Qt.CursorShape.PointingHandCursor)
         self.crosshair_preset_combo.setStyleSheet(
             """
@@ -376,8 +467,10 @@ class DarkControlPanel(QWidget):
             lambda: mirror_horizontal(self.image_label, self.image_label.pixmap())
         )
 
-        mirror_layout.addWidget(mirror_v_btn)
-        mirror_layout.addWidget(mirror_h_btn)
+        mirror_v_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        mirror_h_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        mirror_layout.addWidget(mirror_v_btn, 1)
+        mirror_layout.addWidget(mirror_h_btn, 1)
         self._register_collapsible_button(mirror_v_btn, "🔄 Vertical")
         self._register_collapsible_button(mirror_h_btn, "↔️ Horizontal")
         content_layout.addWidget(self._mirror_container)
@@ -433,9 +526,141 @@ class DarkControlPanel(QWidget):
         """Create the embedded Standard Crosshair settings page."""
         page = QWidget()
         page.setStyleSheet("QWidget { background: transparent; }")
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        layout = QHBoxLayout(page)
+        # Give the settings page some air from the panel borders.
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+
+        # Collapsible sidebar (hamburger + icon-only buttons when collapsed)
+        self._sidebar = QFrame()
+        self._sidebar.setObjectName("CrosshairSidebar")
+        self._sidebar.setStyleSheet(
+            f"""
+            QFrame#CrosshairSidebar {{
+                background-color: {UI_THEME['surface']};
+                border: 1px solid {UI_THEME['border']};
+                border-radius: 14px;
+            }}
+            """
+        )
+
+        self._sidebar_collapsed_width = 56
+        self._sidebar_expanded_width = 280
+        self._sidebar_open = False
+        self._sidebar.setMaximumWidth(self._sidebar_collapsed_width)
+        self._sidebar.setMinimumWidth(self._sidebar_collapsed_width)
+
+        self._sidebar_anim = QPropertyAnimation(self._sidebar, b"maximumWidth")
+        self._sidebar_anim.setDuration(170)
+        self._sidebar_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        sidebar_layout = QVBoxLayout(self._sidebar)
+        sidebar_layout.setContentsMargins(10, 10, 10, 10)
+        sidebar_layout.setSpacing(10)
+
+        self._sidebar_menu_btn = QPushButton("≡")
+        self._sidebar_menu_btn.setFixedSize(34, 34)
+        self._sidebar_menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sidebar_menu_btn.setToolTip("Menu")
+        self._sidebar_menu_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {UI_THEME['surface2']};
+                color: {UI_THEME['text']};
+                border: 1px solid {UI_THEME['border']};
+                border-radius: 12px;
+                font-size: 18px;
+                font-weight: 800;
+            }}
+            QPushButton:hover {{ border: 1px solid {UI_THEME['border_strong']}; }}
+            QPushButton:pressed {{ background-color: {UI_THEME['surface']}; }}
+            """
+        )
+        self._sidebar_menu_btn.clicked.connect(self._toggle_drawer)
+        sidebar_layout.addWidget(self._sidebar_menu_btn, 0, Qt.AlignmentFlag.AlignTop)
+
+        self._sidebar_buttons: list[QPushButton] = []
+
+        def _mk_sidebar_btn(text: str, callback) -> QPushButton:
+            btn = self.create_button(text, role="neutral")
+            btn.clicked.connect(callback)
+            # reuse same icon-text behavior as main menu collapse
+            self._register_collapsible_button(btn, text)
+            self._sidebar_buttons.append(btn)
+            return btn
+
+        self._drawer_image_toggle_btn = _mk_sidebar_btn("🖼️ Hide Image", self.toggle_image_visibility)
+        self._drawer_crosshair_toggle_btn = _mk_sidebar_btn("🎯 Show Crosshair", self.toggle_crosshair_visibility)
+
+        self._sidebar_preset_frame = QFrame()
+        self._sidebar_preset_frame.setStyleSheet(
+            f"""
+            QFrame {{
+                background-color: {UI_THEME['surface2']};
+                border-radius: 12px;
+                border: 1px solid {UI_THEME['border']};
+            }}
+            """
+        )
+        preset_layout = QHBoxLayout(self._sidebar_preset_frame)
+        preset_layout.setContentsMargins(10, 8, 10, 8)
+        preset_layout.setSpacing(8)
+
+        preset_label = QLabel("Preset")
+        preset_label.setStyleSheet(f"color: {UI_THEME['muted']}; font-size: 12px; background: transparent; min-width: 46px;")
+        self._drawer_preset_combo = QComboBox()
+        self._drawer_preset_combo.setFixedHeight(28)
+        self._drawer_preset_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._drawer_preset_combo.setStyleSheet(
+            f"""
+            QComboBox {{
+                background-color: {UI_THEME['surface']};
+                color: {UI_THEME['text']};
+                border: 1px solid {UI_THEME['border']};
+                border-radius: 10px;
+                padding: 3px 8px;
+                font-size: 12px;
+            }}
+            QComboBox:hover {{ border: 1px solid {UI_THEME['border_strong']}; }}
+            QComboBox::drop-down {{ border: none; width: 18px; }}
+            QComboBox QAbstractItemView {{
+                background-color: {UI_THEME['surface']};
+                color: {UI_THEME['text']};
+                selection-background-color: {UI_THEME['accent']};
+                selection-color: white;
+                border: 1px solid {UI_THEME['border']};
+                outline: none;
+            }}
+            """
+        )
+        self._drawer_preset_combo.currentTextChanged.connect(self._on_crosshair_preset_selected)
+        preset_layout.addWidget(preset_label)
+        preset_layout.addWidget(self._drawer_preset_combo, 1)
+        sidebar_layout.addWidget(self._sidebar_preset_frame)
+
+        # Mirror controls (available from the sidebar; opacity is intentionally omitted here).
+        mirror_frame = QFrame()
+        mirror_frame.setStyleSheet("QFrame { background: transparent; }")
+        mirror_layout = QHBoxLayout(mirror_frame)
+        mirror_layout.setContentsMargins(0, 0, 0, 0)
+        mirror_layout.setSpacing(0)
+
+        drawer_mirror_v = self._create_segment_button("🔄 Vertical", position="left", role="neutral")
+        drawer_mirror_h = self._create_segment_button("↔️ Horizontal", position="right", role="neutral")
+        drawer_mirror_v.clicked.connect(lambda: mirror_vertical(self.image_label, self.image_label.pixmap()))
+        drawer_mirror_h.clicked.connect(lambda: mirror_horizontal(self.image_label, self.image_label.pixmap()))
+        drawer_mirror_v.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        drawer_mirror_h.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        mirror_layout.addWidget(drawer_mirror_v, 1)
+        mirror_layout.addWidget(drawer_mirror_h, 1)
+        self._register_collapsible_button(drawer_mirror_v, "🔄 Vertical")
+        self._register_collapsible_button(drawer_mirror_h, "↔️ Horizontal")
+        sidebar_layout.addWidget(mirror_frame)
+
+        sidebar_layout.addWidget(_mk_sidebar_btn("🖼️ Next Image", self.switch_image))
+        sidebar_layout.addWidget(_mk_sidebar_btn("📁 Manage Images", self.open_image_manager))
+        sidebar_layout.addWidget(_mk_sidebar_btn("⌨️ Customize Hotkeys", self.open_hotkey_manager))
+        sidebar_layout.addStretch(1)
 
         self.crosshair_dialog = StandardCrosshairDialog(
             self.crosshair_label,
@@ -447,8 +672,57 @@ class DarkControlPanel(QWidget):
         if hasattr(self.crosshair_dialog, "presets_changed"):
             self.crosshair_dialog.presets_changed.connect(self._refresh_crosshair_presets_ui)
 
-        layout.addWidget(self.crosshair_dialog)
+        # Start sidebar collapsed (icons only).
+        try:
+            self._sidebar_open = False
+            self._sidebar_preset_frame.setVisible(False)
+            for btn in self._sidebar_buttons:
+                full_text = btn.property("fullText") or btn.text()
+                icon_text = btn.property("iconText") or ""
+                btn.setText(str(icon_text) if icon_text else str(full_text))
+        except Exception:
+            pass
+
+        layout.addWidget(self._sidebar)
+        layout.addWidget(self.crosshair_dialog, 1)
         return page
+
+    def _toggle_drawer(self) -> None:
+        if getattr(self, "_sidebar", None) is None:
+            return
+
+        # Sync sidebar controls with current state.
+        self._update_image_toggle_text()
+        self._update_crosshair_toggle_text()
+        try:
+            self._refresh_crosshair_presets_ui()
+        except Exception:
+            pass
+
+        self._sidebar_open = not bool(getattr(self, "_sidebar_open", False))
+        target = int(self._sidebar_expanded_width if self._sidebar_open else self._sidebar_collapsed_width)
+        try:
+            if getattr(self, "_sidebar_preset_frame", None) is not None:
+                self._sidebar_preset_frame.setVisible(bool(self._sidebar_open))
+        except Exception:
+            pass
+
+        # Update button text (icons only when collapsed).
+        try:
+            for btn in getattr(self, "_sidebar_buttons", []) or []:
+                full_text = btn.property("fullText") or btn.text()
+                icon_text = btn.property("iconText") or ""
+                btn.setText(str(full_text) if self._sidebar_open else (str(icon_text) if icon_text else str(full_text)))
+        except Exception:
+            pass
+
+        try:
+            self._sidebar_anim.stop()
+            self._sidebar_anim.setStartValue(self._sidebar.maximumWidth())
+            self._sidebar_anim.setEndValue(target)
+            self._sidebar_anim.start()
+        except Exception:
+            self._sidebar.setMaximumWidth(target)
 
     def _show_main_menu(self) -> None:
         if self._stack is not None and self._page_main is not None:
@@ -456,19 +730,45 @@ class DarkControlPanel(QWidget):
         # If we came from another page, keep behavior consistent.
         self.set_collapsed(False)
         self._set_title_mode("main")
+        try:
+            self._programmatic_resize = True
+            self.resize(self._main_size)
+        except Exception:
+            pass
+        finally:
+            self._programmatic_resize = False
 
     def _show_crosshair_settings(self) -> None:
-        self.set_collapsed(False)
+        # Ensure crosshair page uses the larger window size.
+        self._collapsed = False
         if self.crosshair_dialog is not None:
             self.crosshair_dialog.sync_with_label()
         if self._stack is not None and self._page_crosshair is not None:
             self._stack.setCurrentWidget(self._page_crosshair)
         self._set_title_mode("crosshair")
+        try:
+            self._programmatic_resize = True
+            self.resize(self._crosshair_size)
+        except Exception:
+            pass
+        finally:
+            self._programmatic_resize = False
+
+        try:
+            if getattr(self, "_sidebar", None) is not None:
+                self._sidebar_open = False
+                self._sidebar.setMaximumWidth(getattr(self, "_sidebar_collapsed_width", 56))
+            if getattr(self, "_sidebar_preset_frame", None) is not None:
+                self._sidebar_preset_frame.setVisible(False)
+            for btn in getattr(self, "_sidebar_buttons", []) or []:
+                full_text = btn.property("fullText") or btn.text()
+                icon_text = btn.property("iconText") or ""
+                btn.setText(str(icon_text) if icon_text else str(full_text))
+        except Exception:
+            pass
 
     def _refresh_crosshair_presets_ui(self):
         """Refresh the preset/profile dropdown from persisted settings."""
-        if self.crosshair_preset_combo is None:
-            return
         try:
             settings = load_settings_from_disk()
             presets = getattr(settings, "presets", {})
@@ -480,15 +780,28 @@ class DarkControlPanel(QWidget):
             if active not in names:
                 active = names[0]
 
-            self.crosshair_preset_combo.blockSignals(True)
-            self.crosshair_preset_combo.clear()
-            self.crosshair_preset_combo.addItems(names)
-            idx = self.crosshair_preset_combo.findText(active)
-            if idx >= 0:
-                self.crosshair_preset_combo.setCurrentIndex(idx)
-            self.crosshair_preset_combo.blockSignals(False)
+            combos = []
+            if self.crosshair_preset_combo is not None:
+                combos.append(self.crosshair_preset_combo)
+            if hasattr(self, "_drawer_preset_combo") and self._drawer_preset_combo is not None:
+                combos.append(self._drawer_preset_combo)
+
+            for combo in combos:
+                combo.blockSignals(True)
+                combo.clear()
+                combo.addItems(names)
+                idx = combo.findText(active)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+                combo.blockSignals(False)
         except Exception:
-            self.crosshair_preset_combo.blockSignals(False)
+            try:
+                if self.crosshair_preset_combo is not None:
+                    self.crosshair_preset_combo.blockSignals(False)
+                if hasattr(self, "_drawer_preset_combo") and self._drawer_preset_combo is not None:
+                    self._drawer_preset_combo.blockSignals(False)
+            except Exception:
+                pass
 
     def _on_crosshair_preset_selected(self, preset_name: str):
         """Apply the selected preset immediately."""
@@ -541,18 +854,20 @@ class DarkControlPanel(QWidget):
             QFrame {
                 background-color: #1A1636;
                 border-radius: 10px;
-                padding: 10px;
                 border: 1px solid rgba(230, 225, 255, 40);
             }
         """)
         opacity_layout = QHBoxLayout(opacity_container)
-        opacity_layout.setContentsMargins(10, 10, 10, 10)
+        opacity_layout.setContentsMargins(12, 10, 12, 10)
+        opacity_layout.setSpacing(10)
         
         # Slider
         self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
         self.opacity_slider.setMinimum(25)
         self.opacity_slider.setMaximum(100)
         self.opacity_slider.setValue(100)
+        self.opacity_slider.setFixedHeight(18)
+        self.opacity_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.opacity_slider.setStyleSheet("""
             QSlider::groove:horizontal {
                 border: none;
@@ -672,6 +987,7 @@ class DarkControlPanel(QWidget):
                 font-size: 13px;
                 font-weight: 650;
                 min-height: 36px;
+                min-width: 0px;
             }}
             QPushButton:hover {{
                 background-color: {self.adjust_color_brightness(bg, 1.08)};
@@ -691,8 +1007,8 @@ class DarkControlPanel(QWidget):
         return color.name()
     
     def _update_image_toggle_text(self):
+        text = "🖼️ Hide Image" if self.image_label.isVisible() else "🖼️ Show Image"
         if hasattr(self, "image_toggle_btn"):
-            text = "🖼️ Hide Image" if self.image_label.isVisible() else "🖼️ Show Image"
             try:
                 self.image_toggle_btn.setProperty("fullText", text)
                 icon = str(text).strip().split(" ", 1)[0] if str(text).strip() else ""
@@ -700,10 +1016,22 @@ class DarkControlPanel(QWidget):
                 self.image_toggle_btn.setText(icon if self._collapsed else text)
             except Exception:
                 self.image_toggle_btn.setText(text)
+        if hasattr(self, "_drawer_image_toggle_btn") and self._drawer_image_toggle_btn is not None:
+            try:
+                self._drawer_image_toggle_btn.setProperty("fullText", text)
+                icon = str(text).strip().split(" ", 1)[0] if str(text).strip() else ""
+                self._drawer_image_toggle_btn.setProperty("iconText", icon)
+                # Respect sidebar open/collapsed state.
+                if bool(getattr(self, "_sidebar_open", False)):
+                    self._drawer_image_toggle_btn.setText(text)
+                else:
+                    self._drawer_image_toggle_btn.setText(icon if icon else text)
+            except Exception:
+                pass
 
     def _update_crosshair_toggle_text(self):
+        text = "🎯 Hide Crosshair" if self.crosshair_label.isVisible() else "🎯 Show Crosshair"
         if hasattr(self, "crosshair_toggle_btn"):
-            text = "🎯 Hide Crosshair" if self.crosshair_label.isVisible() else "🎯 Show Crosshair"
             try:
                 self.crosshair_toggle_btn.setProperty("fullText", text)
                 icon = str(text).strip().split(" ", 1)[0] if str(text).strip() else ""
@@ -711,6 +1039,17 @@ class DarkControlPanel(QWidget):
                 self.crosshair_toggle_btn.setText(icon if self._collapsed else text)
             except Exception:
                 self.crosshair_toggle_btn.setText(text)
+        if hasattr(self, "_drawer_crosshair_toggle_btn") and self._drawer_crosshair_toggle_btn is not None:
+            try:
+                self._drawer_crosshair_toggle_btn.setProperty("fullText", text)
+                icon = str(text).strip().split(" ", 1)[0] if str(text).strip() else ""
+                self._drawer_crosshair_toggle_btn.setProperty("iconText", icon)
+                if bool(getattr(self, "_sidebar_open", False)):
+                    self._drawer_crosshair_toggle_btn.setText(text)
+                else:
+                    self._drawer_crosshair_toggle_btn.setText(icon if icon else text)
+            except Exception:
+                pass
 
     def toggle_image_visibility(self):
         """Toggle imported image visibility."""
@@ -761,7 +1100,6 @@ class DarkControlPanel(QWidget):
     
     def open_image_manager(self):
         """Open the image manager dialog."""
-        self.set_collapsed(True)
         if self.image_manager is None:
             self.image_manager = ImageManagerDialog(self)
         self.image_manager.show()
@@ -770,7 +1108,6 @@ class DarkControlPanel(QWidget):
     
     def open_hotkey_manager(self):
         """Open the hotkey manager dialog."""
-        self.set_collapsed(True)
         if self.hotkey_manager is None:
             self.hotkey_manager = HotkeyManagerDialog(self)
             # Connect signal to refresh control panel when hotkeys are updated
@@ -820,11 +1157,58 @@ class DarkControlPanel(QWidget):
     def mousePressEvent(self, event):
         """Handle mouse press events for dragging."""
         if event.button() == Qt.MouseButton.LeftButton:
+            edges = self._hit_test_edges(event.position())
+            if edges:
+                self._resizing = True
+                self._resize_edges = edges
+                self._resize_start_pos = event.globalPosition().toPoint()
+                self._resize_start_geom = self.geometry()
+                event.accept()
+                return
+
             self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
     
     def mouseMoveEvent(self, event):
         """Handle mouse move events for dragging."""
+        if self._resizing and self._resize_start_pos is not None and self._resize_start_geom is not None:
+            delta = event.globalPosition().toPoint() - self._resize_start_pos
+            geom = self._resize_start_geom
+            x = geom.x()
+            y = geom.y()
+            w = geom.width()
+            h = geom.height()
+
+            if "left" in self._resize_edges:
+                x = geom.x() + delta.x()
+                w = geom.width() - delta.x()
+            if "right" in self._resize_edges:
+                w = geom.width() + delta.x()
+            if "top" in self._resize_edges:
+                y = geom.y() + delta.y()
+                h = geom.height() - delta.y()
+            if "bottom" in self._resize_edges:
+                h = geom.height() + delta.y()
+
+            w = max(self.minimumWidth(), w)
+            h = max(self.minimumHeight(), h)
+            self.setGeometry(x, y, w, h)
+            event.accept()
+            return
+
+        # Update cursor when hovering near edges.
+        if event.buttons() == Qt.MouseButton.NoButton:
+            edges = self._hit_test_edges(event.position())
+            self.setCursor(self._cursor_for_edges(edges))
+
         if event.buttons() == Qt.MouseButton.LeftButton and self.drag_position is not None:
             self.move(event.globalPosition().toPoint() - self.drag_position)
             event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._resizing = False
+            self._resize_edges = set()
+            self._resize_start_pos = None
+            self._resize_start_geom = None
+        super().mouseReleaseEvent(event)
