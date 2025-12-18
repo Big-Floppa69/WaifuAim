@@ -55,7 +55,8 @@ class DarkControlPanel(QWidget):
         self._expanded_width = 320
         self._collapsed_width = 76
         self._crosshair_width = 560
-        self._main_size = QSize(320, 660)
+        # Account for the internal title bar so the main menu doesn't get vertically cramped.
+        self._main_size = QSize(320, 820)
         self._crosshair_size = QSize(560, 760)
         self._collapse_btn = None
         self._back_btn = None
@@ -66,6 +67,9 @@ class DarkControlPanel(QWidget):
         self._opacity_container = None
         self._separator = None
         self._hotkey_info_label = None
+
+        # Sidebar preset icon (collapsed mode)
+        self._drawer_preset_icon_btn = None
 
         # In-panel navigation
         self._stack = None
@@ -192,33 +196,35 @@ class DarkControlPanel(QWidget):
     def _create_title_bar(self):
         """Create the title bar with minimize and close buttons."""
         title_bar = QFrame()
-        title_bar.setStyleSheet("""
-            QFrame {
-                background-color: #1A1636;
+        title_bar.setStyleSheet(
+            f"""
+            QFrame {{
+                background-color: {UI_THEME['surface']};
                 border-top-left-radius: 15px;
                 border-top-right-radius: 15px;
-                border-bottom: 1px solid rgba(230, 225, 255, 40);
-            }
-        """)
+                border-bottom: 1px solid {UI_THEME['border']};
+            }}
+            """
+        )
+
         title_bar_layout = QHBoxLayout(title_bar)
         title_bar_layout.setContentsMargins(15, 8, 8, 8)
-        title_bar_layout.setSpacing(5)
+        title_bar_layout.setSpacing(6)
 
         # Back button (only visible on sub-pages)
         self._back_btn = self._create_window_button("←", self._show_main_menu)
         self._back_btn.setVisible(False)
         title_bar_layout.addWidget(self._back_btn)
-        
-        # Title
+
         self._title_label = QLabel("Crosshair Control")
         self._title_label.setStyleSheet(
-            """
-            QLabel {
-                color: #E6E1FF;
+            f"""
+            QLabel {{
+                color: {UI_THEME['text']};
                 font-size: 14px;
-                font-weight: bold;
+                font-weight: 800;
                 background: transparent;
-            }
+            }}
             """
         )
         title_bar_layout.addWidget(self._title_label)
@@ -226,15 +232,13 @@ class DarkControlPanel(QWidget):
 
         # (Removed) Collapse/expand button
         self._collapse_btn = None
-        
-        # Minimize button
+
         minimize_btn = self._create_window_button("−", self.hide)
         title_bar_layout.addWidget(minimize_btn)
-        
-        # Close button
+
         close_btn = self._create_window_button("×", QApplication.quit, is_close=True)
         title_bar_layout.addWidget(close_btn)
-        
+
         return title_bar
 
     def _set_title_mode(self, mode: str) -> None:
@@ -254,10 +258,21 @@ class DarkControlPanel(QWidget):
         """Track a button so it can collapse to an icon-only variant."""
         if btn is None:
             return
+        full_text = str(full_text or btn.text())
+        btn.setProperty("fullText", full_text)
         icon = str(full_text).strip().split(" ", 1)[0] if str(full_text).strip() else ""
         btn.setProperty("iconText", icon)
         btn.setToolTip(full_text)
         self._collapsible_buttons.append(btn)
+
+        # If currently collapsed, immediately apply icon-only label.
+        try:
+            if getattr(self, "_collapsed", False):
+                btn.setText(icon if icon else full_text)
+            else:
+                btn.setText(full_text)
+        except Exception:
+            pass
 
     def set_collapsed(self, collapsed: bool) -> None:
         collapsed = bool(collapsed)
@@ -365,8 +380,8 @@ class DarkControlPanel(QWidget):
         content_frame.setStyleSheet("QFrame { background: transparent; }")
         content_layout = QVBoxLayout(content_frame)
         content_layout.setContentsMargins(20, 15, 20, 20)
-        # A bit more breathing room between controls.
-        content_layout.setSpacing(18)
+        # Match the original compact spacing.
+        content_layout.setSpacing(22)
         
         # Visibility toggle buttons
         self.image_toggle_btn = self.create_button("🖼️ Hide Image", role="neutral")
@@ -384,62 +399,65 @@ class DarkControlPanel(QWidget):
         # Standard crosshair preset/profile picker
         self._preset_container = QFrame()
         self._preset_container.setStyleSheet(
-            """
-            QFrame {
-                background-color: #1A1636;
-                border-radius: 10px;
-                border: 1px solid rgba(230, 225, 255, 40);
-            }
+            f"""
+            QFrame {{
+                background-color: {UI_THEME['surface']};
+                border-radius: 14px;
+                border: 1px solid {UI_THEME['border']};
+            }}
             """
         )
         preset_layout = QHBoxLayout(self._preset_container)
-        preset_layout.setContentsMargins(12, 10, 12, 10)
-        preset_layout.setSpacing(10)
+        preset_layout.setContentsMargins(12, 12, 12, 12)
+        preset_layout.setSpacing(12)
 
         preset_label = QLabel("Preset")
+        preset_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        preset_label.setFixedHeight(34)
         preset_label.setStyleSheet(
-            """
-            QLabel {
-                color: #BDB6E6;
-                font-size: 13px;
-                background: transparent;
-                min-width: 52px;
-            }
+            f"""
+            QLabel {{
+                color: {UI_THEME['muted']};
+                font-size: 12px;
+                background-color: {UI_THEME['surface2']};
+                border: 1px solid {UI_THEME['border']};
+                border-radius: 12px;
+                padding: 6px 10px;
+                min-width: 66px;
+            }}
             """
         )
 
         self.crosshair_preset_combo = QComboBox()
-        self.crosshair_preset_combo.setFixedHeight(30)
+        self.crosshair_preset_combo.setFixedHeight(34)
         self.crosshair_preset_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.crosshair_preset_combo.setCursor(Qt.CursorShape.PointingHandCursor)
         self.crosshair_preset_combo.setStyleSheet(
-            """
-            QComboBox {
-                background-color: #221D45;
-                color: #E6E1FF;
-                border: 1px solid rgba(230, 225, 255, 40);
-                border-radius: 10px;
-                padding: 4px 8px;
+            f"""
+            QComboBox {{
+                background-color: {UI_THEME['surface2']};
+                color: {UI_THEME['text']};
+                border: 1px solid {UI_THEME['border']};
+                border-radius: 12px;
+                padding: 4px 10px;
                 font-size: 12px;
-            }
-            QComboBox:hover {
-                border: 1px solid rgba(230, 225, 255, 70);
-            }
-            QComboBox::drop-down {
-                border: none;
-                width: 18px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #1A1636;
-                color: #E6E1FF;
-                selection-background-color: #7C5CFF;
+            }}
+            QComboBox:hover {{ border: 1px solid {UI_THEME['border_strong']}; }}
+            QComboBox::drop-down {{ border: none; width: 18px; }}
+            QComboBox QAbstractItemView {{
+                background-color: {UI_THEME['surface']};
+                color: {UI_THEME['text']};
+                selection-background-color: {UI_THEME['accent']};
                 selection-color: white;
-                border: 1px solid rgba(230, 225, 255, 40);
+                border: 1px solid {UI_THEME['border']};
                 outline: none;
-            }
+            }}
             """
         )
         self.crosshair_preset_combo.currentTextChanged.connect(self._on_crosshair_preset_selected)
+
+        preset_layout.setAlignment(preset_label, Qt.AlignmentFlag.AlignVCenter)
+        preset_layout.setAlignment(self.crosshair_preset_combo, Qt.AlignmentFlag.AlignVCenter)
 
         preset_layout.addWidget(preset_label)
         preset_layout.addWidget(self.crosshair_preset_combo, 1)
@@ -499,7 +517,7 @@ class DarkControlPanel(QWidget):
         # Separator
         self._separator = QFrame()
         self._separator.setFrameShape(QFrame.Shape.HLine)
-        self._separator.setStyleSheet("background-color: rgba(230, 225, 255, 40);")
+        self._separator.setStyleSheet(f"background-color: {UI_THEME['border']};")
         self._separator.setMaximumHeight(1)
         content_layout.addWidget(self._separator)
         
@@ -581,6 +599,32 @@ class DarkControlPanel(QWidget):
 
         self._sidebar_buttons: list[QPushButton] = []
 
+        def _apply_sidebar_button_style(btn: QPushButton, icon_only: bool) -> None:
+            if btn is None:
+                return
+            if icon_only:
+                btn.setStyleSheet(
+                    f"""
+                    QPushButton {{
+                        background-color: {UI_THEME['surface2']};
+                        color: {UI_THEME['text']};
+                        border: 1px solid {UI_THEME['border']};
+                        border-radius: 14px;
+                        padding: 0px;
+                        min-height: 44px;
+                        font-size: 18px;
+                        font-weight: 800;
+                        text-align: center;
+                    }}
+                    QPushButton:hover {{ border: 1px solid {UI_THEME['border_strong']}; }}
+                    QPushButton:pressed {{ background-color: {UI_THEME['surface']}; }}
+                    """
+                )
+            else:
+                # Fall back to standard button styling.
+                btn.setStyleSheet(self.create_button("tmp").styleSheet())
+                btn.setText(btn.property("fullText") or btn.text())
+
         def _mk_sidebar_btn(text: str, callback) -> QPushButton:
             btn = self.create_button(text, role="neutral")
             btn.clicked.connect(callback)
@@ -588,6 +632,14 @@ class DarkControlPanel(QWidget):
             self._register_collapsible_button(btn, text)
             self._sidebar_buttons.append(btn)
             return btn
+
+        # Preset/profile icon button shown only when collapsed.
+        self._drawer_preset_icon_btn = QPushButton("👤")
+        self._drawer_preset_icon_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._drawer_preset_icon_btn.setToolTip("Preset")
+        self._drawer_preset_icon_btn.clicked.connect(self._toggle_drawer)
+        _apply_sidebar_button_style(self._drawer_preset_icon_btn, True)
+        sidebar_layout.addWidget(self._drawer_preset_icon_btn)
 
         self._drawer_image_toggle_btn = _mk_sidebar_btn("🖼️ Hide Image", self.toggle_image_visibility)
         self._drawer_crosshair_toggle_btn = _mk_sidebar_btn("🎯 Show Crosshair", self.toggle_crosshair_visibility)
@@ -676,10 +728,13 @@ class DarkControlPanel(QWidget):
         try:
             self._sidebar_open = False
             self._sidebar_preset_frame.setVisible(False)
+            if self._drawer_preset_icon_btn is not None:
+                self._drawer_preset_icon_btn.setVisible(True)
             for btn in self._sidebar_buttons:
                 full_text = btn.property("fullText") or btn.text()
                 icon_text = btn.property("iconText") or ""
                 btn.setText(str(icon_text) if icon_text else str(full_text))
+                _apply_sidebar_button_style(btn, True)
         except Exception:
             pass
 
@@ -704,6 +759,8 @@ class DarkControlPanel(QWidget):
         try:
             if getattr(self, "_sidebar_preset_frame", None) is not None:
                 self._sidebar_preset_frame.setVisible(bool(self._sidebar_open))
+            if getattr(self, "_drawer_preset_icon_btn", None) is not None:
+                self._drawer_preset_icon_btn.setVisible(not bool(self._sidebar_open))
         except Exception:
             pass
 
@@ -713,6 +770,27 @@ class DarkControlPanel(QWidget):
                 full_text = btn.property("fullText") or btn.text()
                 icon_text = btn.property("iconText") or ""
                 btn.setText(str(full_text) if self._sidebar_open else (str(icon_text) if icon_text else str(full_text)))
+                if self._sidebar_open:
+                    # Restore normal styling
+                    btn.setStyleSheet(self.create_button("tmp").styleSheet())
+                else:
+                    btn.setStyleSheet(
+                        f"""
+                        QPushButton {{
+                            background-color: {UI_THEME['surface2']};
+                            color: {UI_THEME['text']};
+                            border: 1px solid {UI_THEME['border']};
+                            border-radius: 14px;
+                            padding: 0px;
+                            min-height: 44px;
+                            font-size: 18px;
+                            font-weight: 800;
+                            text-align: center;
+                        }}
+                        QPushButton:hover {{ border: 1px solid {UI_THEME['border_strong']}; }}
+                        QPushButton:pressed {{ background-color: {UI_THEME['surface']}; }}
+                        """
+                    )
         except Exception:
             pass
 
@@ -760,10 +838,29 @@ class DarkControlPanel(QWidget):
                 self._sidebar.setMaximumWidth(getattr(self, "_sidebar_collapsed_width", 56))
             if getattr(self, "_sidebar_preset_frame", None) is not None:
                 self._sidebar_preset_frame.setVisible(False)
+            if getattr(self, "_drawer_preset_icon_btn", None) is not None:
+                self._drawer_preset_icon_btn.setVisible(True)
             for btn in getattr(self, "_sidebar_buttons", []) or []:
                 full_text = btn.property("fullText") or btn.text()
                 icon_text = btn.property("iconText") or ""
                 btn.setText(str(icon_text) if icon_text else str(full_text))
+                btn.setStyleSheet(
+                    f"""
+                    QPushButton {{
+                        background-color: {UI_THEME['surface2']};
+                        color: {UI_THEME['text']};
+                        border: 1px solid {UI_THEME['border']};
+                        border-radius: 14px;
+                        padding: 0px;
+                        min-height: 44px;
+                        font-size: 18px;
+                        font-weight: 800;
+                        text-align: center;
+                    }}
+                    QPushButton:hover {{ border: 1px solid {UI_THEME['border_strong']}; }}
+                    QPushButton:pressed {{ background-color: {UI_THEME['surface']}; }}
+                    """
+                )
         except Exception:
             pass
 
@@ -836,30 +933,41 @@ class DarkControlPanel(QWidget):
     
     def _add_opacity_controls(self, layout):
         """Add opacity slider and label to the layout."""
+        wrapper = QFrame()
+        wrapper.setStyleSheet("QFrame { background: transparent; }")
+        wrapper_layout = QVBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        # Keep the label close to the card (global layout spacing is larger).
+        wrapper_layout.setSpacing(8)
+
         # Opacity label
         opacity_label = QLabel("Opacity")
-        opacity_label.setStyleSheet("""
-            QLabel {
-                color: #BDB6E6;
-                font-size: 13px;
-                padding: 5px 0;
+        opacity_label.setStyleSheet(
+            f"""
+            QLabel {{
+                color: {UI_THEME['muted']};
+                font-size: 12px;
+                padding: 0px 0;
                 background: transparent;
-            }
-        """)
-        layout.addWidget(opacity_label)
+            }}
+            """
+        )
+        wrapper_layout.addWidget(opacity_label)
         
         # Opacity slider container
         opacity_container = QFrame()
-        opacity_container.setStyleSheet("""
-            QFrame {
-                background-color: #1A1636;
-                border-radius: 10px;
-                border: 1px solid rgba(230, 225, 255, 40);
-            }
-        """)
+        opacity_container.setStyleSheet(
+            f"""
+            QFrame {{
+                background-color: {UI_THEME['surface']};
+                border-radius: 14px;
+                border: 1px solid {UI_THEME['border']};
+            }}
+            """
+        )
         opacity_layout = QHBoxLayout(opacity_container)
-        opacity_layout.setContentsMargins(12, 10, 12, 10)
-        opacity_layout.setSpacing(10)
+        opacity_layout.setContentsMargins(14, 14, 14, 14)
+        opacity_layout.setSpacing(12)
         
         # Slider
         self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
@@ -868,46 +976,59 @@ class DarkControlPanel(QWidget):
         self.opacity_slider.setValue(100)
         self.opacity_slider.setFixedHeight(18)
         self.opacity_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.opacity_slider.setStyleSheet("""
-            QSlider::groove:horizontal {
+        self.opacity_slider.setStyleSheet(
+            f"""
+            QSlider::groove:horizontal {{
                 border: none;
-                height: 8px;
+                height: 6px;
                 background: rgba(230, 225, 255, 35);
-                border-radius: 4px;
-            }
-            QSlider::handle:horizontal {
-                background: #7C5CFF;
+                border-radius: 3px;
+            }}
+            QSlider::sub-page:horizontal {{
+                background: {UI_THEME['accent']};
+                border-radius: 3px;
+            }}
+            QSlider::handle:horizontal {{
+                background: {UI_THEME['accent']};
                 border: none;
-                width: 18px;
+                width: 16px;
                 margin: -5px 0;
-                border-radius: 9px;
-            }
-            QSlider::handle:horizontal:hover {
-                background: #4FD1C5;
-            }
-            QSlider::sub-page:horizontal {
-                background: #7C5CFF;
-                border-radius: 4px;
-            }
-        """)
+                border-radius: 8px;
+            }}
+            QSlider::handle:horizontal:hover {{
+                background: {UI_THEME.get('accent2', UI_THEME['accent'])};
+            }}
+            """
+        )
         self.opacity_slider.valueChanged.connect(self.change_opacity)
         
         # Value label
         self.opacity_value = QLabel("100%")
-        self.opacity_value.setStyleSheet("""
-            QLabel {
-                color: #E6E1FF;
-                font-size: 14px;
-                font-weight: bold;
-                min-width: 45px;
-                background: transparent;
-            }
-        """)
+        self.opacity_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.opacity_value.setFixedHeight(44)
+        self.opacity_value.setMinimumWidth(82)
+        self.opacity_value.setStyleSheet(
+            f"""
+            QLabel {{
+                color: {UI_THEME['text']};
+                font-size: 13px;
+                font-weight: 800;
+                background-color: {UI_THEME['surface2']};
+                border: 1px solid {UI_THEME['border']};
+                border-radius: 16px;
+                padding: 0px 14px;
+            }}
+            """
+        )
         
         opacity_layout.addWidget(self.opacity_slider)
         opacity_layout.addWidget(self.opacity_value)
-        layout.addWidget(opacity_container)
-        return opacity_container
+        opacity_layout.setAlignment(self.opacity_slider, Qt.AlignmentFlag.AlignVCenter)
+        opacity_layout.setAlignment(self.opacity_value, Qt.AlignmentFlag.AlignVCenter)
+
+        wrapper_layout.addWidget(opacity_container)
+        layout.addWidget(wrapper)
+        return wrapper
     
     def create_button(self, text, role="neutral"):
         """Create a styled button with consistent dark-purple theme."""
@@ -933,11 +1054,11 @@ class DarkControlPanel(QWidget):
                 background-color: {bg};
                 color: {fg};
                 border: {border};
-                border-radius: 10px;
-                padding: 9px 14px;
+                border-radius: 16px;
+                padding: 10px 14px;
                 font-size: 13px;
-                font-weight: 650;
-                min-height: 36px;
+                font-weight: 700;
+                min-height: 44px;
             }}
             QPushButton:hover {{
                 background-color: {self.adjust_color_brightness(bg, 1.08)};
@@ -967,11 +1088,11 @@ class DarkControlPanel(QWidget):
             fg = UI_THEME["text"]
             border = f"1px solid {UI_THEME['border']}"
 
-        left_radius = "10px" if position == "left" else "0px"
-        right_radius = "10px" if position == "right" else "0px"
+        left_radius = "16px" if position == "left" else "0px"
+        right_radius = "16px" if position == "right" else "0px"
 
-        # Remove the inner border so it looks like a single control.
-        extra_border = "border-right: none;" if position == "left" and border != "none" else ""
+        # Keep a single 1px divider in the middle.
+        extra_border = "border-left: none;" if position == "right" and border != "none" else ""
 
         btn.setStyleSheet(f"""
             QPushButton {{
@@ -983,10 +1104,13 @@ class DarkControlPanel(QWidget):
                 border-bottom-left-radius: {left_radius};
                 border-top-right-radius: {right_radius};
                 border-bottom-right-radius: {right_radius};
-                padding: 9px 10px;
+                padding-left: 10px;
+                padding-right: 10px;
+                padding-top: 10px;
+                padding-bottom: 14px;
                 font-size: 13px;
-                font-weight: 650;
-                min-height: 36px;
+                font-weight: 700;
+                min-height: 46px;
                 min-width: 0px;
             }}
             QPushButton:hover {{
