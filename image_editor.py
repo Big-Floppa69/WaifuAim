@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QGraphicsView, QGraphicsScene, QGraphicsPixmapItem)
 from PyQt6.QtGui import QPixmap, QColor, QPainter, QPen
 from PyQt6.QtCore import Qt, QRectF, pyqtSignal
+from utils import UI_THEME
 
 
 class ImageCanvas(QGraphicsView):
@@ -19,13 +20,13 @@ class ImageCanvas(QGraphicsView):
         self.setScene(self.scene)
         
         # Canvas settings
-        self.setStyleSheet("""
-            QGraphicsView {
-                background-color: rgba(40, 40, 50, 255);
-                border: 1px solid rgba(100, 100, 120, 100);
-                border-radius: 8px;
-            }
-        """)
+        self.setStyleSheet(
+            "QGraphicsView { background-color: "
+            + UI_THEME["bg2"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 12px; }"
+        )
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
@@ -48,7 +49,7 @@ class ImageCanvas(QGraphicsView):
         super().drawBackground(painter, rect)
         
         # Draw center lines
-        painter.setPen(QPen(QColor(150, 150, 160, 150), 2, Qt.PenStyle.DashLine))
+        painter.setPen(QPen(QColor(UI_THEME["muted"]), 2, Qt.PenStyle.DashLine))
         
         # Vertical center line
         center_x = self.canvas_width / 2
@@ -59,7 +60,7 @@ class ImageCanvas(QGraphicsView):
         painter.drawLine(0, int(center_y), self.canvas_width, int(center_y))
         
         # Draw center crosshair
-        painter.setPen(QPen(QColor(103, 126, 234, 200), 1))
+        painter.setPen(QPen(QColor(UI_THEME["accent"]), 1))
         crosshair_size = 20
         painter.drawLine(int(center_x - crosshair_size), int(center_y), 
                         int(center_x + crosshair_size), int(center_y))
@@ -193,13 +194,13 @@ class ImageEditorDialog(QWidget):
         """Create the main frame with styling and shadow effect."""
         main_frame = QFrame(self)
         main_frame.setObjectName("mainFrame")
-        main_frame.setStyleSheet("""
-            QFrame#mainFrame {
-                background-color: rgba(20, 20, 25, 240);
-                border-radius: 15px;
-                border: 1px solid rgba(100, 100, 120, 100);
-            }
-        """)
+        main_frame.setStyleSheet(
+            "QFrame#mainFrame { background-color: "
+            + UI_THEME["bg"]
+            + "; border-radius: 15px; border: 1px solid "
+            + UI_THEME["border"]
+            + "; }"
+        )
         
         # Add shadow effect
         # shadow = QGraphicsDropShadowEffect(self)
@@ -213,27 +214,25 @@ class ImageEditorDialog(QWidget):
     def _create_title_bar(self):
         """Create the title bar with close button."""
         title_bar = QFrame()
-        title_bar.setStyleSheet("""
-            QFrame {
-                background-color: rgba(30, 30, 35, 255);
-                border-top-left-radius: 15px;
-                border-top-right-radius: 15px;
-            }
-        """)
+        title_bar.setStyleSheet(
+            "QFrame { background-color: "
+            + UI_THEME["surface"]
+            + "; border-top-left-radius: 15px; border-top-right-radius: 15px;"
+            + " border-bottom: 1px solid "
+            + UI_THEME["border"]
+            + "; }"
+        )
         title_bar_layout = QHBoxLayout(title_bar)
         title_bar_layout.setContentsMargins(15, 8, 8, 8)
         title_bar_layout.setSpacing(5)
         
         # Title
         title = QLabel("✂️ Image Editor")
-        title.setStyleSheet("""
-            QLabel {
-                color: #E0E0E0;
-                font-size: 14px;
-                font-weight: bold;
-                background: transparent;
-            }
-        """)
+        title.setStyleSheet(
+            "QLabel { color: "
+            + UI_THEME["text"]
+            + "; font-size: 14px; font-weight: 800; background: transparent; }"
+        )
         title_bar_layout.addWidget(title)
         title_bar_layout.addStretch()
         
@@ -248,22 +247,23 @@ class ImageEditorDialog(QWidget):
         btn = QPushButton(text)
         btn.setFixedSize(28, 28)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setStyleSheet("""
-            QPushButton {
-                background-color: rgba(70, 70, 80, 150);
-                color: #E0E0E0;
-                border: none;
-                border-radius: 4px;
-                font-size: 20px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: rgba(200, 50, 50, 200);
-            }
-            QPushButton:pressed {
-                background-color: rgba(60, 60, 70, 200);
-            }
-        """)
+        btn.setStyleSheet(
+            "QPushButton { background-color: "
+            + UI_THEME["surface2"]
+            + "; color: "
+            + UI_THEME["text"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 6px; font-size: 20px; font-weight: 900; }"
+            "QPushButton:hover { background-color: "
+            + UI_THEME["danger"]
+            + "; border: 1px solid "
+            + UI_THEME["danger"]
+            + "; }"
+            "QPushButton:pressed { background-color: "
+            + UI_THEME["surface"]
+            + "; }"
+        )
         btn.clicked.connect(callback)
         return btn
     
@@ -292,20 +292,20 @@ class ImageEditorDialog(QWidget):
     def _create_controls_section(self):
         """Create the controls section with sliders."""
         controls_frame = QFrame()
-        controls_frame.setStyleSheet("""
-            QFrame {
-                background-color: rgba(30, 30, 35, 200);
-                border-radius: 10px;
-                padding: 15px;
-            }
-        """)
+        controls_frame.setStyleSheet(
+            "QFrame { background-color: "
+            + UI_THEME["surface"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 12px; padding: 15px; }"
+        )
         controls_layout = QVBoxLayout(controls_frame)
         controls_layout.setSpacing(12)
         
         # Zoom control
         zoom_layout = QHBoxLayout()
         zoom_label = QLabel("Zoom:")
-        zoom_label.setStyleSheet("color: #B0B0B0; font-size: 12px;")
+        zoom_label.setStyleSheet("color: " + UI_THEME["muted"] + "; font-size: 12px;")
         zoom_layout.addWidget(zoom_label)
         
         self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
@@ -317,7 +317,9 @@ class ImageEditorDialog(QWidget):
         zoom_layout.addWidget(self.zoom_slider)
         
         self.zoom_value_label = QLabel("100%")
-        self.zoom_value_label.setStyleSheet("color: #E0E0E0; font-size: 12px; min-width: 45px;")
+        self.zoom_value_label.setStyleSheet(
+            "color: " + UI_THEME["text"] + "; font-size: 12px; min-width: 45px;"
+        )
         zoom_layout.addWidget(self.zoom_value_label)
         
         controls_layout.addLayout(zoom_layout)
@@ -325,7 +327,7 @@ class ImageEditorDialog(QWidget):
         # Rotation control
         rotation_layout = QHBoxLayout()
         rotation_label = QLabel("Rotation:")
-        rotation_label.setStyleSheet("color: #B0B0B0; font-size: 12px;")
+        rotation_label.setStyleSheet("color: " + UI_THEME["muted"] + "; font-size: 12px;")
         rotation_layout.addWidget(rotation_label)
         
         self.rotation_slider = QSlider(Qt.Orientation.Horizontal)
@@ -337,7 +339,9 @@ class ImageEditorDialog(QWidget):
         rotation_layout.addWidget(self.rotation_slider)
         
         self.rotation_value_label = QLabel("0°")
-        self.rotation_value_label.setStyleSheet("color: #E0E0E0; font-size: 12px; min-width: 45px;")
+        self.rotation_value_label.setStyleSheet(
+            "color: " + UI_THEME["text"] + "; font-size: 12px; min-width: 45px;"
+        )
         rotation_layout.addWidget(self.rotation_value_label)
         
         controls_layout.addLayout(rotation_layout)
@@ -346,31 +350,22 @@ class ImageEditorDialog(QWidget):
     
     def _get_slider_style(self):
         """Get slider stylesheet."""
-        return """
-            QSlider::groove:horizontal {
-                border: none;
-                height: 6px;
-                background: rgba(60, 60, 70, 200);
-                border-radius: 3px;
-            }
-            QSlider::handle:horizontal {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #667eea, stop:1 #764ba2);
-                border: none;
-                width: 16px;
-                margin: -5px 0;
-                border-radius: 8px;
-            }
-            QSlider::handle:horizontal:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #764ba2, stop:1 #667eea);
-            }
-            QSlider::sub-page:horizontal {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #667eea, stop:1 #764ba2);
-                border-radius: 3px;
-            }
-        """
+        return (
+            "QSlider::groove:horizontal { border: none; height: 6px; background: "
+            + UI_THEME["surface2"]
+            + "; border-radius: 3px; }"
+            "QSlider::sub-page:horizontal { background: "
+            + UI_THEME["accent"]
+            + "; border-radius: 3px; }"
+            "QSlider::handle:horizontal { background: "
+            + UI_THEME["accent"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; width: 16px; margin: -5px 0; border-radius: 8px; }"
+            "QSlider::handle:horizontal:hover { border: 1px solid "
+            + UI_THEME["border_strong"]
+            + "; }"
+        )
     
     def _create_action_buttons(self):
         """Create action buttons layout."""
@@ -378,47 +373,56 @@ class ImageEditorDialog(QWidget):
         buttons_layout.setSpacing(10)
         
         # Load image button
-        load_btn = self._create_button("📁 Load Image", "#2196F3")
+        load_btn = self._create_button("📁 Load Image", role="neutral")
         load_btn.clicked.connect(self.load_image_dialog)
         buttons_layout.addWidget(load_btn)
         
         # Reset button
-        reset_btn = self._create_button("🔄 Reset", "#FF9800")
+        reset_btn = self._create_button("🔄 Reset", role="neutral")
         reset_btn.clicked.connect(self.reset_image)
         buttons_layout.addWidget(reset_btn)
         
         # Save button
-        save_btn = self._create_button("💾 Save", "#4CAF50")
+        save_btn = self._create_button("💾 Save", role="primary")
         save_btn.clicked.connect(self.save_image)
         buttons_layout.addWidget(save_btn)
         
         return buttons_layout
     
-    def _create_button(self, text, color):
-        """Create a styled button."""
+    def _create_button(self, text: str, role: str = "neutral"):
+        """Create a themed button."""
         btn = QPushButton(text)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {color};
-                color: white;
-                border: none;
-                border-radius: 8px;
-                padding: 10px 16px;
-                font-size: 12px;
-                font-weight: bold;
-            }}
-            QPushButton:hover {{
-                background-color: {self._adjust_color_brightness(color, 1.2)};
-            }}
-            QPushButton:pressed {{
-                background-color: {self._adjust_color_brightness(color, 0.8)};
-            }}
-            QPushButton:disabled {{
-                background-color: rgba(100, 100, 110, 100);
-                color: rgba(200, 200, 200, 100);
-            }}
-        """)
+
+        if role == "primary":
+            bg = UI_THEME["accent"]
+            fg = UI_THEME["bg"]
+            border = UI_THEME["accent"]
+        elif role == "danger":
+            bg = UI_THEME["danger"]
+            fg = UI_THEME["text"]
+            border = UI_THEME["danger"]
+        else:
+            bg = UI_THEME["surface2"]
+            fg = UI_THEME["text"]
+            border = UI_THEME["border"]
+
+        btn.setStyleSheet(
+            "QPushButton { background-color: "
+            + bg
+            + "; color: "
+            + fg
+            + "; border: 1px solid "
+            + border
+            + "; border-radius: 10px; padding: 10px 16px; font-size: 12px; font-weight: 700; }"
+            "QPushButton:hover { border: 1px solid "
+            + UI_THEME["border_strong"]
+            + "; }"
+            "QPushButton:pressed { background-color: "
+            + UI_THEME["surface"]
+            + "; }"
+            "QPushButton:disabled { background-color: rgba(120,120,140,60); color: rgba(255,255,255,120); border: 1px solid rgba(230,225,255,30); }"
+        )
         return btn
     
     def _adjust_color_brightness(self, hex_color, factor):

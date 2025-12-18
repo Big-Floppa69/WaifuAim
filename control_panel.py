@@ -3,10 +3,10 @@ Control panel widget for managing crosshair settings.
 """
 from PyQt6.QtWidgets import (QApplication, QLabel, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QSlider, QFrame, 
-                             QGraphicsDropShadowEffect, QComboBox)
+                             QGraphicsDropShadowEffect, QComboBox, QStackedWidget)
 from PyQt6.QtGui import QPixmap, QColor
 from PyQt6.QtCore import Qt
-from utils import mirror_vertical, mirror_horizontal, get_art_list, transparent
+from utils import mirror_vertical, mirror_horizontal, get_art_list, transparent, UI_THEME
 from image_manager import ImageManagerDialog
 from hotkey_manager import HotkeyManagerDialog
 from standard_crosshair import (
@@ -37,6 +37,25 @@ class DarkControlPanel(QWidget):
         self.hotkey_manager = None
         self.crosshair_dialog = None
         self.crosshair_preset_combo = None
+
+        # Side panel behavior
+        self._collapsed = False
+        self._expanded_width = 320
+        self._collapsed_width = 76
+        self._collapse_btn = None
+        self._back_btn = None
+        self._title_label = None
+        self._collapsible_buttons: list[QPushButton] = []
+        self._preset_container = None
+        self._mirror_container = None
+        self._opacity_container = None
+        self._separator = None
+        self._hotkey_info_label = None
+
+        # In-panel navigation
+        self._stack = None
+        self._page_main = None
+        self._page_crosshair = None
         self.init_ui()
         
     def init_ui(self):
@@ -60,17 +79,20 @@ class DarkControlPanel(QWidget):
         title_bar = self._create_title_bar()
         layout.addWidget(title_bar)
         
-        # Content container
-        content_frame = self._create_content_frame()
-        layout.addWidget(content_frame)
+        # Content container (stacked pages)
+        self._stack = self._create_content_stack()
+        layout.addWidget(self._stack)
         
         # Set main layout
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.addWidget(main_frame)
         
-        self.setFixedWidth(320)
+        self.setFixedWidth(self._expanded_width)
         self.adjustSize()
+
+        # Start on main menu title mode.
+        self._set_title_mode("main")
     
     def _create_main_frame(self):
         """Create the main frame with styling and shadow effect."""
@@ -78,9 +100,10 @@ class DarkControlPanel(QWidget):
         main_frame.setObjectName("mainFrame")
         main_frame.setStyleSheet("""
             QFrame#mainFrame {
-                background-color: rgba(20, 20, 25, 240);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #0F0B1E, stop:1 #130F2A);
                 border-radius: 15px;
-                border: 1px solid rgba(100, 100, 120, 100);
+                border: 1px solid rgba(230, 225, 255, 40);
             }
         """)
         
@@ -98,27 +121,37 @@ class DarkControlPanel(QWidget):
         title_bar = QFrame()
         title_bar.setStyleSheet("""
             QFrame {
-                background-color: rgba(30, 30, 35, 255);
+                background-color: #1A1636;
                 border-top-left-radius: 15px;
                 border-top-right-radius: 15px;
+                border-bottom: 1px solid rgba(230, 225, 255, 40);
             }
         """)
         title_bar_layout = QHBoxLayout(title_bar)
         title_bar_layout.setContentsMargins(15, 8, 8, 8)
         title_bar_layout.setSpacing(5)
+
+        # Back button (only visible on sub-pages)
+        self._back_btn = self._create_window_button("←", self._show_main_menu)
+        self._back_btn.setVisible(False)
+        title_bar_layout.addWidget(self._back_btn)
         
         # Title
-        title = QLabel("Crosshair Control")
-        title.setStyleSheet("""
+        self._title_label = QLabel("Crosshair Control")
+        self._title_label.setStyleSheet("""
             QLabel {
-                color: #E0E0E0;
+                color: #E6E1FF;
                 font-size: 14px;
                 font-weight: bold;
                 background: transparent;
             }
         """)
-        title_bar_layout.addWidget(title)
+        title_bar_layout.addWidget(self._title_label)
         title_bar_layout.addStretch()
+
+        # Collapse/expand button
+        self._collapse_btn = self._create_window_button("❮", self.toggle_collapsed)
+        title_bar_layout.addWidget(self._collapse_btn)
         
         # Minimize button
         minimize_btn = self._create_window_button("−", self.hide)
@@ -129,6 +162,70 @@ class DarkControlPanel(QWidget):
         title_bar_layout.addWidget(close_btn)
         
         return title_bar
+
+    def _set_title_mode(self, mode: str) -> None:
+        """Update title bar widgets depending on current page."""
+        mode = (mode or "main").lower()
+        is_main = mode == "main"
+        try:
+            if self._back_btn is not None:
+                self._back_btn.setVisible(not is_main)
+            if self._collapse_btn is not None:
+                self._collapse_btn.setVisible(is_main)
+            if self._title_label is not None:
+                self._title_label.setText("Crosshair Control" if is_main else "Standard Crosshair")
+                self._title_label.setVisible(True)
+        except Exception:
+            pass
+
+    def _register_collapsible_button(self, btn: QPushButton, full_text: str) -> None:
+        """Track a button so it can collapse to an icon-only variant."""
+        if btn is None:
+            return
+        icon = str(full_text).strip().split(" ", 1)[0] if str(full_text).strip() else ""
+        btn.setProperty("fullText", full_text)
+        btn.setProperty("iconText", icon)
+        btn.setToolTip(full_text)
+        self._collapsible_buttons.append(btn)
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        collapsed = bool(collapsed)
+        if collapsed == self._collapsed:
+            return
+        self._collapsed = collapsed
+
+        self.setFixedWidth(self._collapsed_width if collapsed else self._expanded_width)
+        if self._collapse_btn is not None:
+            self._collapse_btn.setText("❯" if collapsed else "❮")
+
+        # Hide text-heavy widgets in collapsed mode.
+        for w in (self._preset_container, self._opacity_container, self._separator, self._hotkey_info_label):
+            try:
+                if w is not None:
+                    w.setVisible(not collapsed)
+            except Exception:
+                pass
+
+        # Update button labels.
+        for btn in self._collapsible_buttons:
+            try:
+                full_text = btn.property("fullText") or btn.text()
+                icon_text = btn.property("iconText") or ""
+                if collapsed:
+                    btn.setText(str(icon_text))
+                else:
+                    btn.setText(str(full_text))
+            except Exception:
+                pass
+
+        # Hide title when collapsed (keep window controls).
+        if self._title_label is not None:
+            self._title_label.setVisible(not collapsed)
+
+        self.adjustSize()
+
+    def toggle_collapsed(self) -> None:
+        self.set_collapsed(not self._collapsed)
     
     def _create_window_button(self, text, callback, is_close=False):
         """Create a minimize or close button for the title bar."""
@@ -136,15 +233,15 @@ class DarkControlPanel(QWidget):
         btn.setFixedSize(28, 28)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         
-        hover_color = "rgba(200, 50, 50, 200)" if is_close else "rgba(90, 90, 100, 200)"
+        hover_color = UI_THEME["danger"] if is_close else UI_THEME["surface2"]
         font_size = "20px" if is_close else "18px"
         
         btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: rgba(70, 70, 80, 150);
-                color: #E0E0E0;
+                background-color: {UI_THEME['surface2']};
+                color: {UI_THEME['text']};
                 border: none;
-                border-radius: 4px;
+                border-radius: 8px;
                 font-size: {font_size};
                 font-weight: bold;
             }}
@@ -152,14 +249,28 @@ class DarkControlPanel(QWidget):
                 background-color: {hover_color};
             }}
             QPushButton:pressed {{
-                background-color: rgba(60, 60, 70, 200);
+                background-color: {UI_THEME['surface']};
             }}
         """)
         btn.clicked.connect(callback)
         return btn
     
-    def _create_content_frame(self):
-        """Create the content frame with all controls."""
+    def _create_content_stack(self) -> QStackedWidget:
+        """Create stacked pages so navigation happens in one window."""
+        stack = QStackedWidget()
+        stack.setStyleSheet("QStackedWidget { background: transparent; border: none; }")
+
+        self._page_main = self._create_main_menu_page()
+        stack.addWidget(self._page_main)
+
+        self._page_crosshair = self._create_crosshair_page()
+        stack.addWidget(self._page_crosshair)
+
+        stack.setCurrentWidget(self._page_main)
+        return stack
+
+    def _create_main_menu_page(self) -> QFrame:
+        """Create the main menu page."""
         content_frame = QFrame()
         content_frame.setStyleSheet("QFrame { background: transparent; }")
         content_layout = QVBoxLayout(content_frame)
@@ -167,28 +278,31 @@ class DarkControlPanel(QWidget):
         content_layout.setSpacing(15)
         
         # Visibility toggle buttons
-        self.image_toggle_btn = self.create_button("🖼️ Hide Image", "#4CAF50")
+        self.image_toggle_btn = self.create_button("🖼️ Hide Image", role="neutral")
         self.image_toggle_btn.clicked.connect(self.toggle_image_visibility)
+        self._register_collapsible_button(self.image_toggle_btn, "🖼️ Hide Image")
         content_layout.addWidget(self.image_toggle_btn)
 
-        self.crosshair_toggle_btn = self.create_button("🎯 Show Crosshair", "#607D8B")
+        self.crosshair_toggle_btn = self.create_button("🎯 Show Crosshair", role="neutral")
         self.crosshair_toggle_btn.clicked.connect(self.toggle_crosshair_visibility)
+        self._register_collapsible_button(self.crosshair_toggle_btn, "🎯 Show Crosshair")
         content_layout.addWidget(self.crosshair_toggle_btn)
         self._update_image_toggle_text()
         self._update_crosshair_toggle_text()
 
         # Standard crosshair preset/profile picker
-        preset_container = QFrame()
-        preset_container.setStyleSheet(
+        self._preset_container = QFrame()
+        self._preset_container.setStyleSheet(
             """
             QFrame {
-                background-color: rgba(40, 40, 50, 150);
+                background-color: #1A1636;
                 border-radius: 10px;
                 padding: 10px;
+                border: 1px solid rgba(230, 225, 255, 40);
             }
             """
         )
-        preset_layout = QHBoxLayout(preset_container)
+        preset_layout = QHBoxLayout(self._preset_container)
         preset_layout.setContentsMargins(10, 10, 10, 10)
         preset_layout.setSpacing(10)
 
@@ -196,7 +310,7 @@ class DarkControlPanel(QWidget):
         preset_label.setStyleSheet(
             """
             QLabel {
-                color: #B0B0B0;
+                color: #BDB6E6;
                 font-size: 13px;
                 background: transparent;
                 min-width: 52px;
@@ -210,26 +324,26 @@ class DarkControlPanel(QWidget):
         self.crosshair_preset_combo.setStyleSheet(
             """
             QComboBox {
-                background-color: rgba(30, 30, 35, 230);
-                color: #E0E0E0;
-                border: 1px solid rgba(100, 100, 120, 120);
-                border-radius: 6px;
+                background-color: #221D45;
+                color: #E6E1FF;
+                border: 1px solid rgba(230, 225, 255, 40);
+                border-radius: 10px;
                 padding: 4px 8px;
                 font-size: 12px;
             }
             QComboBox:hover {
-                border: 1px solid rgba(160, 160, 180, 160);
+                border: 1px solid rgba(230, 225, 255, 70);
             }
             QComboBox::drop-down {
                 border: none;
                 width: 18px;
             }
             QComboBox QAbstractItemView {
-                background-color: rgba(30, 30, 35, 245);
-                color: #E0E0E0;
-                selection-background-color: rgba(0, 188, 212, 160);
+                background-color: #1A1636;
+                color: #E6E1FF;
+                selection-background-color: #7C5CFF;
                 selection-color: white;
-                border: 1px solid rgba(100, 100, 120, 120);
+                border: 1px solid rgba(230, 225, 255, 40);
                 outline: none;
             }
             """
@@ -238,66 +352,118 @@ class DarkControlPanel(QWidget):
 
         preset_layout.addWidget(preset_label)
         preset_layout.addWidget(self.crosshair_preset_combo, 1)
-        content_layout.addWidget(preset_container)
+        content_layout.addWidget(self._preset_container)
 
         # Standard crosshair button
-        standard_btn = self.create_button("🎯 Standard Crosshair", "#00BCD4")
+        standard_btn = self.create_button("🎯 Standard Crosshair", role="primary")
         standard_btn.clicked.connect(self.open_standard_crosshair_dialog)
+        self._register_collapsible_button(standard_btn, "🎯 Standard Crosshair")
         content_layout.addWidget(standard_btn)
-        
-        # Mirror Vertical button
-        mirror_v_btn = self.create_button("🔄 Mirror Vertical", "#2196F3")
-        mirror_v_btn.clicked.connect(lambda: mirror_vertical(self.image_label, self.image_label.pixmap()))
-        content_layout.addWidget(mirror_v_btn)
-        
-        # Mirror Horizontal button
-        mirror_h_btn = self.create_button("↔️ Mirror Horizontal", "#03A9F4")
-        mirror_h_btn.clicked.connect(lambda: mirror_horizontal(self.image_label, self.image_label.pixmap()))
-        content_layout.addWidget(mirror_h_btn)
+
+        # Mirror segmented control (two-half button)
+        self._mirror_container = QFrame()
+        self._mirror_container.setStyleSheet("QFrame { background: transparent; }")
+        mirror_layout = QHBoxLayout(self._mirror_container)
+        mirror_layout.setContentsMargins(0, 0, 0, 0)
+        mirror_layout.setSpacing(0)
+
+        mirror_v_btn = self._create_segment_button("🔄 Vertical", position="left", role="neutral")
+        mirror_v_btn.clicked.connect(
+            lambda: mirror_vertical(self.image_label, self.image_label.pixmap())
+        )
+        mirror_h_btn = self._create_segment_button("↔️ Horizontal", position="right", role="neutral")
+        mirror_h_btn.clicked.connect(
+            lambda: mirror_horizontal(self.image_label, self.image_label.pixmap())
+        )
+
+        mirror_layout.addWidget(mirror_v_btn)
+        mirror_layout.addWidget(mirror_h_btn)
+        self._register_collapsible_button(mirror_v_btn, "🔄 Vertical")
+        self._register_collapsible_button(mirror_h_btn, "↔️ Horizontal")
+        content_layout.addWidget(self._mirror_container)
         
         # Switch image button
-        switch_btn = self.create_button("🖼️ Next Image", "#9C27B0")
+        switch_btn = self.create_button("🖼️ Next Image", role="neutral")
         switch_btn.clicked.connect(self.switch_image)
+        self._register_collapsible_button(switch_btn, "🖼️ Next Image")
         content_layout.addWidget(switch_btn)
         
         # Manage images button
-        manage_btn = self.create_button("📁 Manage Images", "#FF9800")
+        manage_btn = self.create_button("📁 Manage Images", role="neutral")
         manage_btn.clicked.connect(self.open_image_manager)
+        self._register_collapsible_button(manage_btn, "📁 Manage Images")
         content_layout.addWidget(manage_btn)
         
         # Hotkey manager button
-        hotkey_btn = self.create_button("⌨️ Customize Hotkeys", "#673AB7")
+        hotkey_btn = self.create_button("⌨️ Customize Hotkeys", role="neutral")
         hotkey_btn.clicked.connect(self.open_hotkey_manager)
+        self._register_collapsible_button(hotkey_btn, "⌨️ Customize Hotkeys")
         content_layout.addWidget(hotkey_btn)
         
         # Opacity section
-        self._add_opacity_controls(content_layout)
+        self._opacity_container = self._add_opacity_controls(content_layout)
         
         # Separator
-        separator = QFrame()
-        separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setStyleSheet("background-color: rgba(100, 100, 120, 80);")
-        separator.setMaximumHeight(1)
-        content_layout.addWidget(separator)
+        self._separator = QFrame()
+        self._separator.setFrameShape(QFrame.Shape.HLine)
+        self._separator.setStyleSheet("background-color: rgba(230, 225, 255, 40);")
+        self._separator.setMaximumHeight(1)
+        content_layout.addWidget(self._separator)
         
         # Hotkey info
         from hotkeys import get_current_hotkeys
         hotkey_text = get_current_hotkeys()
-        info_label = QLabel(f"{hotkey_text}")
-        info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        info_label.setStyleSheet("""
+        self._hotkey_info_label = QLabel(f"{hotkey_text}")
+        self._hotkey_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._hotkey_info_label.setStyleSheet("""
             QLabel {
-                color: rgba(200, 200, 200, 150);
+                color: #BDB6E6;
                 font-size: 10px;
                 padding: 5px;
                 background: transparent;
             }
         """)
-        content_layout.addWidget(info_label)
+        content_layout.addWidget(self._hotkey_info_label)
 
         self._refresh_crosshair_presets_ui()
         
         return content_frame
+
+    def _create_crosshair_page(self) -> QWidget:
+        """Create the embedded Standard Crosshair settings page."""
+        page = QWidget()
+        page.setStyleSheet("QWidget { background: transparent; }")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.crosshair_dialog = StandardCrosshairDialog(
+            self.crosshair_label,
+            self,
+            embedded=True,
+            on_request_close=self._show_main_menu,
+        )
+        self.crosshair_dialog.visibility_changed.connect(self._on_crosshair_dialog_visibility)
+        if hasattr(self.crosshair_dialog, "presets_changed"):
+            self.crosshair_dialog.presets_changed.connect(self._refresh_crosshair_presets_ui)
+
+        layout.addWidget(self.crosshair_dialog)
+        return page
+
+    def _show_main_menu(self) -> None:
+        if self._stack is not None and self._page_main is not None:
+            self._stack.setCurrentWidget(self._page_main)
+        # If we came from another page, keep behavior consistent.
+        self.set_collapsed(False)
+        self._set_title_mode("main")
+
+    def _show_crosshair_settings(self) -> None:
+        self.set_collapsed(False)
+        if self.crosshair_dialog is not None:
+            self.crosshair_dialog.sync_with_label()
+        if self._stack is not None and self._page_crosshair is not None:
+            self._stack.setCurrentWidget(self._page_crosshair)
+        self._set_title_mode("crosshair")
 
     def _refresh_crosshair_presets_ui(self):
         """Refresh the preset/profile dropdown from persisted settings."""
@@ -361,7 +527,7 @@ class DarkControlPanel(QWidget):
         opacity_label = QLabel("Opacity")
         opacity_label.setStyleSheet("""
             QLabel {
-                color: #B0B0B0;
+                color: #BDB6E6;
                 font-size: 13px;
                 padding: 5px 0;
                 background: transparent;
@@ -373,9 +539,10 @@ class DarkControlPanel(QWidget):
         opacity_container = QFrame()
         opacity_container.setStyleSheet("""
             QFrame {
-                background-color: rgba(40, 40, 50, 150);
+                background-color: #1A1636;
                 border-radius: 10px;
                 padding: 10px;
+                border: 1px solid rgba(230, 225, 255, 40);
             }
         """)
         opacity_layout = QHBoxLayout(opacity_container)
@@ -390,24 +557,21 @@ class DarkControlPanel(QWidget):
             QSlider::groove:horizontal {
                 border: none;
                 height: 8px;
-                background: rgba(60, 60, 70, 200);
+                background: rgba(230, 225, 255, 35);
                 border-radius: 4px;
             }
             QSlider::handle:horizontal {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #667eea, stop:1 #764ba2);
+                background: #7C5CFF;
                 border: none;
                 width: 18px;
                 margin: -5px 0;
                 border-radius: 9px;
             }
             QSlider::handle:horizontal:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #764ba2, stop:1 #667eea);
+                background: #4FD1C5;
             }
             QSlider::sub-page:horizontal {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #667eea, stop:1 #764ba2);
+                background: #7C5CFF;
                 border-radius: 4px;
             }
         """)
@@ -417,7 +581,7 @@ class DarkControlPanel(QWidget):
         self.opacity_value = QLabel("100%")
         self.opacity_value.setStyleSheet("""
             QLabel {
-                color: #E0E0E0;
+                color: #E6E1FF;
                 font-size: 14px;
                 font-weight: bold;
                 min-width: 45px;
@@ -428,26 +592,92 @@ class DarkControlPanel(QWidget):
         opacity_layout.addWidget(self.opacity_slider)
         opacity_layout.addWidget(self.opacity_value)
         layout.addWidget(opacity_container)
+        return opacity_container
     
-    def create_button(self, text, color):
-        """Create a styled button with hover effects."""
+    def create_button(self, text, role="neutral"):
+        """Create a styled button with consistent dark-purple theme."""
         btn = QPushButton(text)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        role = (role or "neutral").lower()
+        if role == "primary":
+            bg = UI_THEME["accent"]
+            fg = "white"
+            border = "none"
+        elif role == "danger":
+            bg = UI_THEME["danger"]
+            fg = "white"
+            border = "none"
+        else:
+            bg = UI_THEME["surface2"]
+            fg = UI_THEME["text"]
+            border = f"1px solid {UI_THEME['border']}"
+
         btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {color};
-                color: white;
-                border: none;
-                border-radius: 8px;
-                padding: 12px 20px;
-                font-size: 14px;
-                font-weight: bold;
+                background-color: {bg};
+                color: {fg};
+                border: {border};
+                border-radius: 10px;
+                padding: 9px 14px;
+                font-size: 13px;
+                font-weight: 650;
+                min-height: 36px;
             }}
             QPushButton:hover {{
-                background-color: {self.adjust_color_brightness(color, 1.2)};
+                background-color: {self.adjust_color_brightness(bg, 1.08)};
             }}
             QPushButton:pressed {{
-                background-color: {self.adjust_color_brightness(color, 0.8)};
+                background-color: {self.adjust_color_brightness(bg, 0.92)};
+            }}
+        """)
+        return btn
+
+    def _create_segment_button(self, text: str, position: str, role: str = "neutral") -> QPushButton:
+        """Create one segment of a two-part (left/right) control."""
+        btn = QPushButton(text)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        role = (role or "neutral").lower()
+        if role == "primary":
+            bg = UI_THEME["accent"]
+            fg = "white"
+            border = "none"
+        elif role == "danger":
+            bg = UI_THEME["danger"]
+            fg = "white"
+            border = "none"
+        else:
+            bg = UI_THEME["surface2"]
+            fg = UI_THEME["text"]
+            border = f"1px solid {UI_THEME['border']}"
+
+        left_radius = "10px" if position == "left" else "0px"
+        right_radius = "10px" if position == "right" else "0px"
+
+        # Remove the inner border so it looks like a single control.
+        extra_border = "border-right: none;" if position == "left" and border != "none" else ""
+
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {bg};
+                color: {fg};
+                border: {border};
+                {extra_border}
+                border-top-left-radius: {left_radius};
+                border-bottom-left-radius: {left_radius};
+                border-top-right-radius: {right_radius};
+                border-bottom-right-radius: {right_radius};
+                padding: 9px 10px;
+                font-size: 13px;
+                font-weight: 650;
+                min-height: 36px;
+            }}
+            QPushButton:hover {{
+                background-color: {self.adjust_color_brightness(bg, 1.08)};
+            }}
+            QPushButton:pressed {{
+                background-color: {self.adjust_color_brightness(bg, 0.92)};
             }}
         """)
         return btn
@@ -463,12 +693,24 @@ class DarkControlPanel(QWidget):
     def _update_image_toggle_text(self):
         if hasattr(self, "image_toggle_btn"):
             text = "🖼️ Hide Image" if self.image_label.isVisible() else "🖼️ Show Image"
-            self.image_toggle_btn.setText(text)
+            try:
+                self.image_toggle_btn.setProperty("fullText", text)
+                icon = str(text).strip().split(" ", 1)[0] if str(text).strip() else ""
+                self.image_toggle_btn.setProperty("iconText", icon)
+                self.image_toggle_btn.setText(icon if self._collapsed else text)
+            except Exception:
+                self.image_toggle_btn.setText(text)
 
     def _update_crosshair_toggle_text(self):
         if hasattr(self, "crosshair_toggle_btn"):
             text = "🎯 Hide Crosshair" if self.crosshair_label.isVisible() else "🎯 Show Crosshair"
-            self.crosshair_toggle_btn.setText(text)
+            try:
+                self.crosshair_toggle_btn.setProperty("fullText", text)
+                icon = str(text).strip().split(" ", 1)[0] if str(text).strip() else ""
+                self.crosshair_toggle_btn.setProperty("iconText", icon)
+                self.crosshair_toggle_btn.setText(icon if self._collapsed else text)
+            except Exception:
+                self.crosshair_toggle_btn.setText(text)
 
     def toggle_image_visibility(self):
         """Toggle imported image visibility."""
@@ -519,6 +761,7 @@ class DarkControlPanel(QWidget):
     
     def open_image_manager(self):
         """Open the image manager dialog."""
+        self.set_collapsed(True)
         if self.image_manager is None:
             self.image_manager = ImageManagerDialog(self)
         self.image_manager.show()
@@ -527,6 +770,7 @@ class DarkControlPanel(QWidget):
     
     def open_hotkey_manager(self):
         """Open the hotkey manager dialog."""
+        self.set_collapsed(True)
         if self.hotkey_manager is None:
             self.hotkey_manager = HotkeyManagerDialog(self)
             # Connect signal to refresh control panel when hotkeys are updated
@@ -537,16 +781,8 @@ class DarkControlPanel(QWidget):
 
     def open_standard_crosshair_dialog(self):
         """Open the standard crosshair configuration dialog."""
-        if self.crosshair_dialog is None:
-            self.crosshair_dialog = StandardCrosshairDialog(self.crosshair_label, self)
-            self.crosshair_dialog.visibility_changed.connect(self._on_crosshair_dialog_visibility)
-            if hasattr(self.crosshair_dialog, "presets_changed"):
-                self.crosshair_dialog.presets_changed.connect(self._refresh_crosshair_presets_ui)
-            self.crosshair_dialog.destroyed.connect(self._on_crosshair_dialog_destroyed)
-        self.crosshair_dialog.sync_with_label()
-        self.crosshair_dialog.show()
-        self.crosshair_dialog.raise_()
-        self.crosshair_dialog.activateWindow()
+        # In-panel navigation: switch to embedded settings page.
+        self._show_crosshair_settings()
 
     def _on_crosshair_dialog_destroyed(self, *args):
         self.crosshair_dialog = None
@@ -562,9 +798,12 @@ class DarkControlPanel(QWidget):
     
     def _refresh_hotkey_display(self, hotkeys):
         """Refresh the hotkey info display after changes."""
-        # This would require rebuilding the UI or updating the label
-        # For now, we can just close and reopen the panel
-        pass
+        try:
+            from hotkeys import get_current_hotkeys
+            if self._hotkey_info_label is not None:
+                self._hotkey_info_label.setText(get_current_hotkeys())
+        except Exception:
+            return
     
     def toggle_panel(self):
         """Toggle the control panel visibility."""

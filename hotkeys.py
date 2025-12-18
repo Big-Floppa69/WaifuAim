@@ -11,22 +11,39 @@ from utils import mirror_vertical, mirror_horizontal, get_art_list
 
 # Global reference to the label
 _label_ref = None
+_hotkeys_paused = False
 
 
 def load_hotkey_config():
     """Load hotkey configuration from file."""
     config_file = "hotkey_config.json"
     default_config = {
-        "toggle_visibility": "f1",
-        "mirror_vertical": "f3",
-        "mirror_horizontal": "f4",
-        "switch_image": "f2"
+        # Each action can have multiple bindings.
+        "toggle_visibility": ["f1"],
+        "mirror_vertical": ["f3"],
+        "mirror_horizontal": ["f4"],
+        "switch_image": ["f2"],
     }
+
+    def _normalize(value):
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(v).strip().lower() for v in value if str(v).strip()]
+        s = str(value).strip().lower()
+        return [s] if s else []
     
     if os.path.exists(config_file):
         try:
             with open(config_file, 'r') as f:
-                return json.load(f)
+                raw = json.load(f)
+                if not isinstance(raw, dict):
+                    return default_config
+                merged = default_config.copy()
+                for k in default_config.keys():
+                    if k in raw:
+                        merged[k] = _normalize(raw.get(k))
+                return merged
         except:
             pass
     
@@ -36,6 +53,9 @@ def load_hotkey_config():
 def reload_hotkeys():
     """Reload all hotkeys with new configuration."""
     if _label_ref is None:
+        return
+
+    if _hotkeys_paused:
         return
     
     # Unhook all existing hotkeys
@@ -89,6 +109,16 @@ def reload_hotkeys():
             _register_chord(parts)
         except Exception:
             pass
+
+    def _register_many(hotkeys, callback):
+        if hotkeys is None:
+            return
+        if isinstance(hotkeys, str):
+            _register(hotkeys, callback)
+            return
+        if isinstance(hotkeys, list):
+            for hk in hotkeys:
+                _register(hk, callback)
     
     # Setup toggle visibility
     def toggle_visibility():
@@ -97,13 +127,19 @@ def reload_hotkeys():
         else:
             _label_ref.show()
     
-    _register(config.get('toggle_visibility', 'f1'), toggle_visibility)
+    _register_many(config.get('toggle_visibility', ['f1']), toggle_visibility)
     
     # Setup mirror vertical
-    _register(config.get('mirror_vertical', 'f3'), lambda: mirror_vertical(_label_ref, _label_ref.pixmap()))
+    _register_many(
+        config.get('mirror_vertical', ['f3']),
+        lambda: mirror_vertical(_label_ref, _label_ref.pixmap()),
+    )
     
     # Setup mirror horizontal
-    _register(config.get('mirror_horizontal', 'f4'), lambda: mirror_horizontal(_label_ref, _label_ref.pixmap()))
+    _register_many(
+        config.get('mirror_horizontal', ['f4']),
+        lambda: mirror_horizontal(_label_ref, _label_ref.pixmap()),
+    )
     
     # Setup switch image
     index = [0]  # Use list to make it mutable in closure
@@ -116,7 +152,7 @@ def reload_hotkeys():
         pix = QPixmap(arts[index[0]])
         _label_ref.setPixmap(pix)
     
-    _register(config.get('switch_image', 'f2'), switch)
+    _register_many(config.get('switch_image', ['f2']), switch)
 
 
 def setup_hotkeys(label):
@@ -126,12 +162,38 @@ def setup_hotkeys(label):
     reload_hotkeys()
 
 
+def pause_hotkeys() -> None:
+    """Temporarily disable global hotkeys (useful while editing bindings)."""
+    global _hotkeys_paused
+    _hotkeys_paused = True
+    try:
+        kb.unhook_all()
+    except Exception:
+        pass
+
+
+def resume_hotkeys() -> None:
+    """Re-enable global hotkeys after a pause."""
+    global _hotkeys_paused
+    _hotkeys_paused = False
+    reload_hotkeys()
+
+
 def get_current_hotkeys():
     """Get current hotkey configuration as a readable string."""
     config = load_hotkey_config()
+
+    def _first(action: str, default: str) -> str:
+        v = config.get(action)
+        if isinstance(v, list) and v:
+            return str(v[0]).upper()
+        if isinstance(v, str) and v.strip():
+            return v.strip().upper()
+        return default.upper()
+
     return (
-        f"Toggle = {config.get('toggle_visibility', 'f1').upper()} | "
-        f"MirrorV = {config.get('mirror_vertical', 'f3').upper()} | "
-        f"MirrorH = {config.get('mirror_horizontal', 'f4').upper()} | "
-        f"Switch = {config.get('switch_image', 'f2').upper()}"
+        f"Toggle = {_first('toggle_visibility', 'f1')} | "
+        f"MirrorV = {_first('mirror_vertical', 'f3')} | "
+        f"MirrorH = {_first('mirror_horizontal', 'f4')} | "
+        f"Switch = {_first('switch_image', 'f2')}"
     )

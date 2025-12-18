@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QMessageBox)
 from PyQt6.QtGui import QColor, QKeyEvent
 from PyQt6.QtCore import Qt, pyqtSignal
+from utils import UI_THEME
 
 
 class HotkeyLineEdit(QLineEdit):
@@ -162,15 +163,32 @@ class HotkeyManagerDialog(QWidget):
         super().__init__(parent)
         self.drag_position = None
         self.config_file = "hotkey_config.json"
-        self.hotkey_inputs = {}
+        # key_name -> list[HotkeyLineEdit] (multiple bindings per action)
+        self.hotkey_inputs: dict[str, list[HotkeyLineEdit]] = {}
         self.default_hotkeys = {
-            "toggle_visibility": "f1",
-            "mirror_vertical": "f3",
-            "mirror_horizontal": "f4",
-            "switch_image": "f2"
+            "toggle_visibility": ["f1", ""],
+            "mirror_vertical": ["f3", ""],
+            "mirror_horizontal": ["f4", ""],
+            "switch_image": ["f2", ""],
         }
         self.current_hotkeys = self.load_hotkeys()
         self.init_ui()
+
+    def showEvent(self, event):  # type: ignore[override]
+        super().showEvent(event)
+        try:
+            from hotkeys import pause_hotkeys
+            pause_hotkeys()
+        except Exception:
+            pass
+
+    def closeEvent(self, event):  # type: ignore[override]
+        try:
+            from hotkeys import resume_hotkeys
+            resume_hotkeys()
+        except Exception:
+            pass
+        super().closeEvent(event)
         
     def init_ui(self):
         """Initialize the user interface."""
@@ -209,13 +227,13 @@ class HotkeyManagerDialog(QWidget):
         """Create the main frame with styling."""
         main_frame = QFrame(self)
         main_frame.setObjectName("mainFrame")
-        main_frame.setStyleSheet("""
-            QFrame#mainFrame {
-                background-color: rgba(20, 20, 25, 240);
-                border-radius: 15px;
-                border: 1px solid rgba(100, 100, 120, 100);
-            }
-        """)
+        main_frame.setStyleSheet(
+            "QFrame#mainFrame { background-color: "
+            + UI_THEME["bg"]
+            + "; border-radius: 15px; border: 1px solid "
+            + UI_THEME["border"]
+            + "; }"
+        )
         
         # Add shadow effect
         # shadow = QGraphicsDropShadowEffect(self)
@@ -229,27 +247,25 @@ class HotkeyManagerDialog(QWidget):
     def _create_title_bar(self):
         """Create the title bar."""
         title_bar = QFrame()
-        title_bar.setStyleSheet("""
-            QFrame {
-                background-color: rgba(30, 30, 35, 255);
-                border-top-left-radius: 15px;
-                border-top-right-radius: 15px;
-            }
-        """)
+        title_bar.setStyleSheet(
+            "QFrame { background-color: "
+            + UI_THEME["surface"]
+            + "; border-top-left-radius: 15px; border-top-right-radius: 15px;"
+            + " border-bottom: 1px solid "
+            + UI_THEME["border"]
+            + "; }"
+        )
         title_bar_layout = QHBoxLayout(title_bar)
         title_bar_layout.setContentsMargins(15, 8, 8, 8)
         title_bar_layout.setSpacing(5)
         
         # Title
         title = QLabel("⌨️ Hotkey Manager")
-        title.setStyleSheet("""
-            QLabel {
-                color: #E0E0E0;
-                font-size: 16px;
-                font-weight: bold;
-                background: transparent;
-            }
-        """)
+        title.setStyleSheet(
+            "QLabel { color: "
+            + UI_THEME["text"]
+            + "; font-size: 16px; font-weight: 900; background: transparent; }"
+        )
         title_bar_layout.addWidget(title)
         title_bar_layout.addStretch()
         
@@ -264,22 +280,23 @@ class HotkeyManagerDialog(QWidget):
         btn = QPushButton(text)
         btn.setFixedSize(28, 28)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setStyleSheet("""
-            QPushButton {
-                background-color: rgba(70, 70, 80, 150);
-                color: #E0E0E0;
-                border: none;
-                border-radius: 4px;
-                font-size: 20px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: rgba(200, 50, 50, 200);
-            }
-            QPushButton:pressed {
-                background-color: rgba(60, 60, 70, 200);
-            }
-        """)
+        btn.setStyleSheet(
+            "QPushButton { background-color: "
+            + UI_THEME["surface2"]
+            + "; color: "
+            + UI_THEME["text"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 6px; font-size: 20px; font-weight: 900; }"
+            "QPushButton:hover { background-color: "
+            + UI_THEME["danger"]
+            + "; border: 1px solid "
+            + UI_THEME["danger"]
+            + "; }"
+            "QPushButton:pressed { background-color: "
+            + UI_THEME["surface"]
+            + "; }"
+        )
         btn.clicked.connect(callback)
         return btn
     
@@ -294,15 +311,15 @@ class HotkeyManagerDialog(QWidget):
         # Info label
         info = QLabel("Click on a field and press a key combination to set a hotkey.\nPress ESC to cancel while editing.")
         info.setWordWrap(True)
-        info.setStyleSheet("""
-            QLabel {
-                color: rgba(200, 200, 220, 200);
-                font-size: 13px;
-                padding: 12px;
-                background-color: rgba(40, 40, 50, 150);
-                border-radius: 8px;
-            }
-        """)
+        info.setStyleSheet(
+            "QLabel { color: "
+            + UI_THEME["muted"]
+            + "; font-size: 13px; padding: 12px; background-color: "
+            + UI_THEME["surface"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 12px; }"
+        )
         content_layout.addWidget(info)
         
         # Hotkey settings
@@ -318,12 +335,12 @@ class HotkeyManagerDialog(QWidget):
         buttons_layout.setSpacing(10)
         
         # Reset button
-        reset_btn = self._create_button("Reset to Defaults", "#FF5722")
+        reset_btn = self._create_button("Reset to Defaults", role="neutral")
         reset_btn.clicked.connect(self.reset_to_defaults)
         buttons_layout.addWidget(reset_btn)
         
         # Save button
-        save_btn = self._create_button("Save Hotkeys", "#4CAF50")
+        save_btn = self._create_button("Save Hotkeys", role="primary")
         save_btn.clicked.connect(self.save_hotkeys)
         buttons_layout.addWidget(save_btn)
         
@@ -334,76 +351,102 @@ class HotkeyManagerDialog(QWidget):
     def _add_hotkey_setting(self, layout, label_text, key_name):
         """Add a hotkey setting row."""
         row = QFrame()
-        row.setStyleSheet("""
-            QFrame {
-                background-color: rgba(40, 40, 50, 150);
-                border-radius: 8px;
-                padding: 5px;
-            }
-        """)
+        row.setStyleSheet(
+            "QFrame { background-color: "
+            + UI_THEME["surface"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 12px; padding: 5px; }"
+        )
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(12, 10, 12, 10)
         
         # Label
         label = QLabel(label_text)
-        label.setStyleSheet("""
-            QLabel {
-                color: #E0E0E0;
-                font-size: 14px;
-                background: transparent;
-            }
-        """)
+        label.setStyleSheet(
+            "QLabel { color: "
+            + UI_THEME["text"]
+            + "; font-size: 14px; background: transparent; }"
+        )
         label.setMinimumWidth(180)
         row_layout.addWidget(label)
         
-        # Input field
-        input_field = HotkeyLineEdit()
-        input_field.setText(self.current_hotkeys.get(key_name, ""))
-        input_field.current_key = self.current_hotkeys.get(key_name, "")
-        input_field.setStyleSheet("""
-            QLineEdit {
-                background-color: rgba(60, 60, 70, 200);
-                color: #E0E0E0;
-                border: 2px solid rgba(103, 126, 234, 100);
-                border-radius: 6px;
-                padding: 12px;
-                font-size: 13px;
-                min-height: 20px;
-            }
-            QLineEdit:focus {
-                border: 2px solid rgba(103, 126, 234, 255);
-            }
-        """)
-        self.hotkey_inputs[key_name] = input_field
-        row_layout.addWidget(input_field)
+        # Input fields (two bindings per action)
+        current_values = self.current_hotkeys.get(key_name, ["", ""])
+        if isinstance(current_values, str):
+            current_values = [current_values, ""]
+        if not isinstance(current_values, list):
+            current_values = ["", ""]
+        current_values = [str(v or "").strip().lower() for v in current_values]
+        while len(current_values) < 2:
+            current_values.append("")
+
+        inputs_container = QFrame()
+        inputs_container.setStyleSheet("QFrame { background: transparent; }")
+        inputs_layout = QVBoxLayout(inputs_container)
+        inputs_layout.setContentsMargins(0, 0, 0, 0)
+        inputs_layout.setSpacing(8)
+
+        edits: list[HotkeyLineEdit] = []
+        for i in range(2):
+            input_field = HotkeyLineEdit()
+            input_field.setText(current_values[i])
+            input_field.current_key = current_values[i]
+            input_field.setStyleSheet(
+                "QLineEdit { background-color: "
+                + UI_THEME["surface2"]
+                + "; color: "
+                + UI_THEME["text"]
+                + "; border: 2px solid "
+                + UI_THEME["border"]
+                + "; border-radius: 10px; padding: 10px; font-size: 13px; min-height: 18px; }"
+                "QLineEdit:focus { border: 2px solid "
+                + UI_THEME["accent"]
+                + "; }"
+            )
+            input_field.setPlaceholderText(f"Hotkey {i + 1} (optional)" if i == 1 else "Hotkey 1")
+            edits.append(input_field)
+            inputs_layout.addWidget(input_field)
+
+        self.hotkey_inputs[key_name] = edits
+        row_layout.addWidget(inputs_container)
         
         layout.addWidget(row)
     
-    def _create_button(self, text, color):
-        """Create a styled button."""
+    def _create_button(self, text: str, role: str = "neutral"):
+        """Create a themed button."""
         btn = QPushButton(text)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        
-        # Calculate hover color
-        hover_color = self._adjust_color_brightness(color, 1.2)
-        
-        btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {color};
-                color: white;
-                border: none;
-                border-radius: 8px;
-                padding: 14px;
-                font-size: 13px;
-                font-weight: bold;
-            }}
-            QPushButton:hover {{
-                background-color: {hover_color};
-            }}
-            QPushButton:pressed {{
-                background-color: {self._adjust_color_brightness(color, 0.8)};
-            }}
-        """)
+
+        if role == "primary":
+            bg = UI_THEME["accent"]
+            fg = UI_THEME["bg"]
+            border = UI_THEME["accent"]
+        elif role == "danger":
+            bg = UI_THEME["danger"]
+            fg = UI_THEME["text"]
+            border = UI_THEME["danger"]
+        else:
+            bg = UI_THEME["surface2"]
+            fg = UI_THEME["text"]
+            border = UI_THEME["border"]
+
+        btn.setStyleSheet(
+            "QPushButton { background-color: "
+            + bg
+            + "; color: "
+            + fg
+            + "; border: 1px solid "
+            + border
+            + "; border-radius: 12px; padding: 14px; font-size: 13px; font-weight: 800; }"
+            "QPushButton:hover { border: 1px solid "
+            + UI_THEME["border_strong"]
+            + "; }"
+            "QPushButton:pressed { background-color: "
+            + UI_THEME["surface"]
+            + "; }"
+            "QPushButton:disabled { background-color: rgba(120,120,140,60); color: rgba(255,255,255,120); border: 1px solid rgba(230,225,255,30); }"
+        )
         return btn
     
     def _adjust_color_brightness(self, hex_color, factor):
@@ -416,24 +459,42 @@ class HotkeyManagerDialog(QWidget):
     
     def reset_to_defaults(self):
         """Reset all hotkeys to defaults."""
-        for key_name, input_field in self.hotkey_inputs.items():
-            default_key = self.default_hotkeys.get(key_name, "")
-            input_field.setText(default_key)
-            input_field.current_key = default_key
+        for key_name, edits in self.hotkey_inputs.items():
+            defaults = self.default_hotkeys.get(key_name, ["", ""])
+            if isinstance(defaults, str):
+                defaults = [defaults, ""]
+            while len(defaults) < 2:
+                defaults.append("")
+            for i, edit in enumerate(edits):
+                value = str(defaults[i] or "").strip().lower()
+                edit.setText(value)
+                edit.current_key = value
     
     def save_hotkeys(self):
         """Save the current hotkey configuration."""
         # Collect all hotkeys
         new_hotkeys = {}
-        for key_name, input_field in self.hotkey_inputs.items():
-            hotkey = input_field.current_key.strip()
-            if hotkey:
-                new_hotkeys[key_name] = hotkey
-            else:
-                new_hotkeys[key_name] = self.default_hotkeys.get(key_name, "")
+        for key_name, edits in self.hotkey_inputs.items():
+            values = []
+            for edit in edits:
+                hk = str(edit.current_key or "").strip().lower()
+                if hk:
+                    values.append(hk)
+            # Keep file format stable (always a list), pad to 2 for UI.
+            while len(values) < 2:
+                values.append("")
+            new_hotkeys[key_name] = values[:2]
         
-        # Check for duplicates
-        hotkey_values = list(new_hotkeys.values())
+        # Check for duplicates across all non-empty bindings
+        hotkey_values = []
+        for v in new_hotkeys.values():
+            if isinstance(v, str):
+                v = [v]
+            if isinstance(v, list):
+                for hk in v:
+                    hk = str(hk or "").strip().lower()
+                    if hk:
+                        hotkey_values.append(hk)
         if len(hotkey_values) != len(set(hotkey_values)):
             QMessageBox.warning(
                 self,
@@ -472,7 +533,21 @@ class HotkeyManagerDialog(QWidget):
         if os.path.exists(self.config_file):
             try:
                 with open(self.config_file, 'r') as f:
-                    return json.load(f)
+                    raw = json.load(f)
+                    if not isinstance(raw, dict):
+                        return self.default_hotkeys.copy()
+                    normalized = {}
+                    for key, defaults in self.default_hotkeys.items():
+                        v = raw.get(key, defaults)
+                        if isinstance(v, str):
+                            v = [v, ""]
+                        if not isinstance(v, list):
+                            v = list(defaults)
+                        v = [str(x or "").strip().lower() for x in v]
+                        while len(v) < 2:
+                            v.append("")
+                        normalized[key] = v[:2]
+                    return normalized
             except:
                 pass
         return self.default_hotkeys.copy()
