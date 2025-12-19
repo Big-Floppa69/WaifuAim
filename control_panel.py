@@ -408,12 +408,12 @@ class DarkControlPanel(QWidget):
             """
         )
         preset_layout = QHBoxLayout(self._preset_container)
-        preset_layout.setContentsMargins(12, 12, 12, 12)
+        preset_layout.setContentsMargins(14, 14, 14, 14)
         preset_layout.setSpacing(12)
 
         preset_label = QLabel("Preset")
         preset_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        preset_label.setFixedHeight(34)
+        preset_label.setFixedHeight(38)
         preset_label.setStyleSheet(
             f"""
             QLabel {{
@@ -422,14 +422,17 @@ class DarkControlPanel(QWidget):
                 background-color: {UI_THEME['surface2']};
                 border: 1px solid {UI_THEME['border']};
                 border-radius: 12px;
-                padding: 6px 10px;
-                min-width: 66px;
+                padding-top: 0px;
+                padding-bottom: 0px;
+                padding-left: 12px;
+                padding-right: 12px;
+                min-width: 72px;
             }}
             """
         )
 
         self.crosshair_preset_combo = QComboBox()
-        self.crosshair_preset_combo.setFixedHeight(34)
+        self.crosshair_preset_combo.setFixedHeight(38)
         self.crosshair_preset_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.crosshair_preset_combo.setCursor(Qt.CursorShape.PointingHandCursor)
         self.crosshair_preset_combo.setStyleSheet(
@@ -439,7 +442,10 @@ class DarkControlPanel(QWidget):
                 color: {UI_THEME['text']};
                 border: 1px solid {UI_THEME['border']};
                 border-radius: 12px;
-                padding: 4px 10px;
+                padding-top: 0px;
+                padding-bottom: 0px;
+                padding-left: 12px;
+                padding-right: 12px;
                 font-size: 12px;
             }}
             QComboBox:hover {{ border: 1px solid {UI_THEME['border_strong']}; }}
@@ -480,7 +486,7 @@ class DarkControlPanel(QWidget):
         mirror_v_btn.clicked.connect(
             lambda: mirror_vertical(self.image_label, self.image_label.pixmap())
         )
-        mirror_h_btn = self._create_segment_button("↔️ Horizontal", position="right", role="neutral")
+        mirror_h_btn = self._create_segment_button("Horizontal ↔️", position="right", role="neutral")
         mirror_h_btn.clicked.connect(
             lambda: mirror_horizontal(self.image_label, self.image_label.pixmap())
         )
@@ -490,7 +496,7 @@ class DarkControlPanel(QWidget):
         mirror_layout.addWidget(mirror_v_btn, 1)
         mirror_layout.addWidget(mirror_h_btn, 1)
         self._register_collapsible_button(mirror_v_btn, "🔄 Vertical")
-        self._register_collapsible_button(mirror_h_btn, "↔️ Horizontal")
+        self._register_collapsible_button(mirror_h_btn, "Horizontal ↔️")
         content_layout.addWidget(self._mirror_container)
         
         # Switch image button
@@ -691,9 +697,11 @@ class DarkControlPanel(QWidget):
         sidebar_layout.addWidget(self._sidebar_preset_frame)
 
         # Mirror controls (available from the sidebar; opacity is intentionally omitted here).
-        mirror_frame = QFrame()
-        mirror_frame.setStyleSheet("QFrame { background: transparent; }")
-        mirror_layout = QHBoxLayout(mirror_frame)
+        # When the drawer is collapsed, the segmented control becomes too narrow to show text,
+        # so we also provide two icon-only buttons for the collapsed state.
+        self._drawer_mirror_frame = QFrame()
+        self._drawer_mirror_frame.setStyleSheet("QFrame { background: transparent; }")
+        mirror_layout = QHBoxLayout(self._drawer_mirror_frame)
         mirror_layout.setContentsMargins(0, 0, 0, 0)
         mirror_layout.setSpacing(0)
 
@@ -707,7 +715,19 @@ class DarkControlPanel(QWidget):
         mirror_layout.addWidget(drawer_mirror_h, 1)
         self._register_collapsible_button(drawer_mirror_v, "🔄 Vertical")
         self._register_collapsible_button(drawer_mirror_h, "↔️ Horizontal")
-        sidebar_layout.addWidget(mirror_frame)
+        sidebar_layout.addWidget(self._drawer_mirror_frame)
+
+        self._drawer_mirror_icon_v = QPushButton("🔄")
+        self._drawer_mirror_icon_h = QPushButton("↔️")
+        for btn, tip, cb in (
+            (self._drawer_mirror_icon_v, "Mirror Vertical", lambda: mirror_vertical(self.image_label, self.image_label.pixmap())),
+            (self._drawer_mirror_icon_h, "Mirror Horizontal", lambda: mirror_horizontal(self.image_label, self.image_label.pixmap())),
+        ):
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(tip)
+            btn.clicked.connect(cb)
+            _apply_sidebar_button_style(btn, True)
+            sidebar_layout.addWidget(btn)
 
         sidebar_layout.addWidget(_mk_sidebar_btn("🖼️ Next Image", self.switch_image))
         sidebar_layout.addWidget(_mk_sidebar_btn("📁 Manage Images", self.open_image_manager))
@@ -730,6 +750,15 @@ class DarkControlPanel(QWidget):
             self._sidebar_preset_frame.setVisible(False)
             if self._drawer_preset_icon_btn is not None:
                 self._drawer_preset_icon_btn.setVisible(True)
+
+            # Collapsed drawer: show icon-only mirror buttons and hide the segmented control.
+            if getattr(self, "_drawer_mirror_frame", None) is not None:
+                self._drawer_mirror_frame.setVisible(False)
+            if getattr(self, "_drawer_mirror_icon_v", None) is not None:
+                self._drawer_mirror_icon_v.setVisible(True)
+            if getattr(self, "_drawer_mirror_icon_h", None) is not None:
+                self._drawer_mirror_icon_h.setVisible(True)
+
             for btn in self._sidebar_buttons:
                 full_text = btn.property("fullText") or btn.text()
                 icon_text = btn.property("iconText") or ""
@@ -761,6 +790,14 @@ class DarkControlPanel(QWidget):
                 self._sidebar_preset_frame.setVisible(bool(self._sidebar_open))
             if getattr(self, "_drawer_preset_icon_btn", None) is not None:
                 self._drawer_preset_icon_btn.setVisible(not bool(self._sidebar_open))
+
+            # Mirror controls: segmented when expanded, icon-only when collapsed.
+            if getattr(self, "_drawer_mirror_frame", None) is not None:
+                self._drawer_mirror_frame.setVisible(bool(self._sidebar_open))
+            if getattr(self, "_drawer_mirror_icon_v", None) is not None:
+                self._drawer_mirror_icon_v.setVisible(not bool(self._sidebar_open))
+            if getattr(self, "_drawer_mirror_icon_h", None) is not None:
+                self._drawer_mirror_icon_h.setVisible(not bool(self._sidebar_open))
         except Exception:
             pass
 
@@ -966,12 +1003,15 @@ class DarkControlPanel(QWidget):
             """
         )
         opacity_layout = QHBoxLayout(opacity_container)
-        opacity_layout.setContentsMargins(14, 14, 14, 14)
+        opacity_layout.setContentsMargins(18, 18, 18, 18)
         opacity_layout.setSpacing(12)
+
+        # Ensure the background card comfortably contains the slider + value pill.
+        opacity_container.setMinimumHeight(86)
         
         # Slider
         self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
-        self.opacity_slider.setMinimum(25)
+        self.opacity_slider.setMinimum(0)
         self.opacity_slider.setMaximum(100)
         self.opacity_slider.setValue(100)
         self.opacity_slider.setFixedHeight(18)
@@ -1005,8 +1045,8 @@ class DarkControlPanel(QWidget):
         # Value label
         self.opacity_value = QLabel("100%")
         self.opacity_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.opacity_value.setFixedHeight(44)
-        self.opacity_value.setMinimumWidth(82)
+        self.opacity_value.setFixedHeight(50)
+        self.opacity_value.setMinimumWidth(94)
         self.opacity_value.setStyleSheet(
             f"""
             QLabel {{
@@ -1016,7 +1056,7 @@ class DarkControlPanel(QWidget):
                 background-color: {UI_THEME['surface2']};
                 border: 1px solid {UI_THEME['border']};
                 border-radius: 16px;
-                padding: 0px 14px;
+                padding: 0px 16px;
             }}
             """
         )
@@ -1106,8 +1146,8 @@ class DarkControlPanel(QWidget):
                 border-bottom-right-radius: {right_radius};
                 padding-left: 10px;
                 padding-right: 10px;
-                padding-top: 10px;
-                padding-bottom: 14px;
+                padding-top: 1px;
+                padding-bottom: 8px;
                 font-size: 13px;
                 font-weight: 700;
                 min-height: 46px;
