@@ -56,7 +56,7 @@ class DarkControlPanel(QWidget):
         self._collapsed_width = 76
         self._crosshair_width = 560
         # Account for the internal title bar so the main menu doesn't get vertically cramped.
-        self._main_size = QSize(320, 820)
+        self._main_size = QSize(320, 960)
         self._crosshair_size = QSize(560, 760)
         self._collapse_btn = None
         self._back_btn = None
@@ -382,6 +382,12 @@ class DarkControlPanel(QWidget):
         content_layout.setContentsMargins(20, 15, 20, 20)
         # Match the original compact spacing.
         content_layout.setSpacing(22)
+
+        # Crosshair settings button (moved to top)
+        standard_btn = self.create_button("⚙️ Crosshair Settings", role="primary")
+        standard_btn.clicked.connect(self.open_standard_crosshair_dialog)
+        self._register_collapsible_button(standard_btn, "⚙️ Crosshair Settings")
+        content_layout.addWidget(standard_btn)
         
         # Visibility toggle buttons
         self.image_toggle_btn = self.create_button("🖼️ Hide Image", role="neutral")
@@ -468,12 +474,6 @@ class DarkControlPanel(QWidget):
         preset_layout.addWidget(preset_label)
         preset_layout.addWidget(self.crosshair_preset_combo, 1)
         content_layout.addWidget(self._preset_container)
-
-        # Standard crosshair button
-        standard_btn = self.create_button("🎯 Standard Crosshair", role="primary")
-        standard_btn.clicked.connect(self.open_standard_crosshair_dialog)
-        self._register_collapsible_button(standard_btn, "🎯 Standard Crosshair")
-        content_layout.addWidget(standard_btn)
 
         # Mirror segmented control (two-half button)
         self._mirror_container = QFrame()

@@ -2846,11 +2846,17 @@ class StandardCrosshairDialog(QWidget):
         save_settings_to_disk(self.settings)
 
     def mousePressEvent(self, event):  # type: ignore[override]
+        if getattr(self, "_embedded", False):
+            super().mousePressEvent(event)
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
 
     def mouseMoveEvent(self, event):  # type: ignore[override]
+        if getattr(self, "_embedded", False):
+            super().mouseMoveEvent(event)
+            return
         if event.buttons() == Qt.MouseButton.LeftButton and self.drag_position is not None:
             self.move(event.globalPosition().toPoint() - self.drag_position)
             event.accept()
@@ -5003,14 +5009,9 @@ class LineBuilderDialog(QWidget):
 
         new_perp_offset = desired_perp_offset
         
-        # Apply magnetic snapping to grid lines when snap is enabled
+        # Apply magnetic snapping to grid guides when snap is enabled
         grid_size = self._effective_grid_size()
         if self.grid_snap_enabled and grid_size > 1:
-            # IMPORTANT: snap to the *visible* grid (axis-aligned in screen space),
-            # not to the line-local axes.
-            snap_threshold_x = max(4.0, float(grid_size) / 6.0)
-            snap_threshold_y = max(4.0, float(grid_size) / 6.0)
-
             self._snap_guides = {}
 
             base_angle, angle_offset = self._current_line_angles()
@@ -5026,17 +5027,20 @@ class LineBuilderDialog(QWidget):
             x_rel = anchor_offset * cos_a - new_perp_offset * sin_a
             y_rel = anchor_offset * sin_a + new_perp_offset * cos_a
 
-            # Snap X
-            nearest_x = round(x_rel / grid_size) * grid_size
-            if abs(x_rel - nearest_x) < snap_threshold_x:
-                x_rel = nearest_x
-                self._snap_guides["x"] = (self._preview_pixmap_size[0] / 2.0) + float(nearest_x)
+            # IMPORTANT: snap to the *visible* grid (screen space),
+            # including optional diagonal guides.
+            x_rel, y_rel, snap_meta = self._snap_screen_point_with_guides(float(x_rel), float(y_rel), int(grid_size))
 
-            # Snap Y
-            nearest_y = round(y_rel / grid_size) * grid_size
-            if abs(y_rel - nearest_y) < snap_threshold_y:
-                y_rel = nearest_y
-                self._snap_guides["y"] = (self._preview_pixmap_size[1] / 2.0) + float(nearest_y)
+            # Record snapped guide(s) so we can highlight them.
+            if isinstance(snap_meta, dict):
+                if "x" in snap_meta:
+                    self._snap_guides["x"] = (self._preview_pixmap_size[0] / 2.0) + float(snap_meta["x"])
+                if "y" in snap_meta:
+                    self._snap_guides["y"] = (self._preview_pixmap_size[1] / 2.0) + float(snap_meta["y"])
+                if "diag_pos" in snap_meta:
+                    self._snap_guides["diag_pos"] = float(snap_meta["diag_pos"])
+                if "diag_neg" in snap_meta:
+                    self._snap_guides["diag_neg"] = float(snap_meta["diag_neg"])
 
             # Align-to-other object anchors (quick tidy-up guides).
             stack = self._current_component_stack() or []
@@ -5407,12 +5411,15 @@ class LineBuilderDialog(QWidget):
             painter.drawLine(0, center_y, w, center_y)
 
             # Optional diagonal grid overlays (follow grid size).
+            # These diagonals align to the same grid intersections as the
+            # axis-aligned lines, so each cell can be visually "sliced".
             if getattr(self, "grid_diag_pos", False) or getattr(self, "grid_diag_neg", False):
                 painter.setPen(QPen(QColor(255, 255, 255, 35), 1))
                 half_w = w / 2.0
                 half_h = h / 2.0
                 step = max(1, int(grid_size))
                 max_c = int((half_w + half_h) + step * 2)
+                n_max = int(max_c / step) + 2
 
                 def draw_diag_pos(c: float) -> None:
                     # x + y = c (relative to center)
@@ -5461,11 +5468,11 @@ class LineBuilderDialog(QWidget):
                         painter.drawLine(int(center_x + x1), int(center_y + y1), int(center_x + x2), int(center_y + y2))
 
                 if getattr(self, "grid_diag_pos", False):
-                    for c in range(-max_c, max_c + 1, step):
-                        draw_diag_pos(float(c))
+                    for n in range(-n_max, n_max + 1):
+                        draw_diag_pos(float(n * step))
                 if getattr(self, "grid_diag_neg", False):
-                    for c in range(-max_c, max_c + 1, step):
-                        draw_diag_neg(float(c))
+                    for n in range(-n_max, n_max + 1):
+                        draw_diag_neg(float(n * step))
         
         painter.end()
         
@@ -5491,6 +5498,64 @@ class LineBuilderDialog(QWidget):
                 painter.drawLine(int(gx), 0, int(gx), h)
             if isinstance(gy, (int, float)):
                 painter.drawLine(0, int(gy), w, int(gy))
+
+            center_x = float(w) / 2.0
+            center_y = float(h) / 2.0
+            half_w = float(w) / 2.0
+            half_h = float(h) / 2.0
+
+            def _draw_diag_pos_guide(c: float) -> None:
+                # x + y = c (relative to center)
+                pts: list[tuple[float, float]] = []
+                x = -half_w
+                y = c - x
+                if -half_h <= y <= half_h:
+                    pts.append((x, y))
+                x = half_w
+                y = c - x
+                if -half_h <= y <= half_h:
+                    pts.append((x, y))
+                y = -half_h
+                x = c - y
+                if -half_w <= x <= half_w:
+                    pts.append((x, y))
+                y = half_h
+                x = c - y
+                if -half_w <= x <= half_w:
+                    pts.append((x, y))
+                if len(pts) >= 2:
+                    (x1, y1), (x2, y2) = pts[0], pts[1]
+                    painter.drawLine(int(center_x + x1), int(center_y + y1), int(center_x + x2), int(center_y + y2))
+
+            def _draw_diag_neg_guide(c: float) -> None:
+                # x - y = c (relative to center)
+                pts: list[tuple[float, float]] = []
+                x = -half_w
+                y = x - c
+                if -half_h <= y <= half_h:
+                    pts.append((x, y))
+                x = half_w
+                y = x - c
+                if -half_h <= y <= half_h:
+                    pts.append((x, y))
+                y = -half_h
+                x = y + c
+                if -half_w <= x <= half_w:
+                    pts.append((x, y))
+                y = half_h
+                x = y + c
+                if -half_w <= x <= half_w:
+                    pts.append((x, y))
+                if len(pts) >= 2:
+                    (x1, y1), (x2, y2) = pts[0], pts[1]
+                    painter.drawLine(int(center_x + x1), int(center_y + y1), int(center_x + x2), int(center_y + y2))
+
+            gdp = self._snap_guides.get("diag_pos")
+            gdn = self._snap_guides.get("diag_neg")
+            if isinstance(gdp, (int, float)):
+                _draw_diag_pos_guide(float(gdp))
+            if isinstance(gdn, (int, float)):
+                _draw_diag_neg_guide(float(gdn))
         
         # Draw selection handles if a component is selected
         if self.selected_component:
@@ -5613,6 +5678,7 @@ class LineBuilderDialog(QWidget):
             candidates.append((x_rel, ny))
 
         # Diagonal grids: x+y=c and x-y=c, where c steps by grid_size.
+        # These align to the same grid intersections as the axis grid.
         root2 = 1.41421356237
 
         if getattr(self, "grid_diag_pos", False):
@@ -5643,6 +5709,66 @@ class LineBuilderDialog(QWidget):
                 best_x, best_y = cx, cy
 
         return best_x, best_y
+
+    def _snap_screen_point_with_guides(
+        self, x_rel: float, y_rel: float, grid_size: int
+    ) -> tuple[float, float, dict[str, float]]:
+        """Snap a screen-space point and return which guide was used.
+
+        Returned guide keys:
+        - x: snapped x (relative-to-center)
+        - y: snapped y (relative-to-center)
+        - diag_pos: snapped constant c for x+y=c
+        - diag_neg: snapped constant c for x-y=c
+        """
+        if not self.grid_snap_enabled or grid_size <= 1:
+            return x_rel, y_rel, {}
+
+        snap_threshold = max(4.0, float(grid_size) / 6.0)
+        candidates: list[tuple[float, float, dict[str, float]]] = []
+
+        # Axis-aligned grid
+        nx = round(x_rel / grid_size) * grid_size
+        if abs(x_rel - nx) < snap_threshold:
+            candidates.append((nx, y_rel, {"x": float(nx)}))
+
+        ny = round(y_rel / grid_size) * grid_size
+        if abs(y_rel - ny) < snap_threshold:
+            candidates.append((x_rel, ny, {"y": float(ny)}))
+
+        # Diagonal grids: x+y=c and x-y=c, where c steps by grid_size.
+        root2 = 1.41421356237
+
+        if getattr(self, "grid_diag_pos", False):
+            s = x_rel + y_rel
+            ns = round(s / grid_size) * grid_size
+            if abs(s - ns) < (snap_threshold * root2):
+                delta = (ns - s) / 2.0
+                candidates.append((x_rel + delta, y_rel + delta, {"diag_pos": float(ns)}))
+
+        if getattr(self, "grid_diag_neg", False):
+            d = x_rel - y_rel
+            nd = round(d / grid_size) * grid_size
+            if abs(d - nd) < (snap_threshold * root2):
+                delta = (nd - d) / 2.0
+                candidates.append((x_rel + delta, y_rel - delta, {"diag_neg": float(nd)}))
+
+        if not candidates:
+            return x_rel, y_rel, {}
+
+        best_x, best_y = x_rel, y_rel
+        best_meta: dict[str, float] = {}
+        best_dist2 = 1e18
+        for cx, cy, meta in candidates:
+            dx = cx - x_rel
+            dy = cy - y_rel
+            dist2 = dx * dx + dy * dy
+            if dist2 < best_dist2:
+                best_dist2 = dist2
+                best_x, best_y = cx, cy
+                best_meta = meta
+
+        return best_x, best_y, best_meta
 
     def _on_draw_mode_toggled(self, enabled: bool) -> None:
         self.draw_mode_enabled = bool(enabled)
