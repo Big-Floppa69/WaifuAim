@@ -1539,11 +1539,11 @@ class StandardCrosshairDialog(QWidget):
         layout.addWidget(self.visibility_btn)
         self._update_visibility_button()
 
-        layout.addWidget(self._create_slider_group())
-        layout.addWidget(self._create_shape_group())
-        layout.addWidget(self._create_dot_group())
-        layout.addWidget(self._create_color_group())
-        layout.addWidget(self._create_projection_group())
+        layout.addWidget(self._create_accordion_section("Basic", self._create_slider_group(carded=False), expanded=True))
+        layout.addWidget(self._create_accordion_section("Transform", self._create_shape_group(carded=False), expanded=False))
+        layout.addWidget(self._create_accordion_section("Dot", self._create_dot_group(carded=False), expanded=False))
+        layout.addWidget(self._create_accordion_section("Color", self._create_color_group(carded=False), expanded=False))
+        layout.addWidget(self._create_accordion_section("Lines & Shapes", self._create_projection_group(carded=False), expanded=False))
 
         buttons_row = QHBoxLayout()
         reset_btn = self._create_primary_button("↺ Reset", UI_THEME["surface2"])
@@ -1556,6 +1556,54 @@ class StandardCrosshairDialog(QWidget):
 
         layout.addLayout(buttons_row)
         return frame
+
+    def _create_accordion_section(self, title: str, content: QWidget, *, expanded: bool = False) -> QFrame:
+        wrapper = QFrame()
+        wrapper.setStyleSheet(
+            f"""
+            QFrame {{
+                background-color: {UI_THEME['surface']};
+                border-radius: 12px;
+                border: 1px solid {UI_THEME['border']};
+            }}
+            """
+        )
+        outer = QVBoxLayout(wrapper)
+        outer.setContentsMargins(10, 8, 10, 10)
+        outer.setSpacing(8)
+
+        header = QToolButton()
+        header.setText(str(title or "Section"))
+        header.setCheckable(True)
+        header.setChecked(bool(expanded))
+        header.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+        header.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        header.setCursor(Qt.CursorShape.PointingHandCursor)
+        header.setStyleSheet(
+            f"""
+            QToolButton {{
+                background: transparent;
+                border: none;
+                color: {UI_THEME['text']};
+                font-size: 12px;
+                font-weight: 800;
+                padding: 4px 2px;
+            }}
+            QToolButton:hover {{ color: {UI_THEME['text']}; }}
+            """
+        )
+
+        content.setVisible(bool(expanded))
+
+        def on_toggle(checked: bool) -> None:
+            content.setVisible(bool(checked))
+            header.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)
+
+        header.toggled.connect(on_toggle)
+
+        outer.addWidget(header)
+        outer.addWidget(content)
+        return wrapper
 
     def _refresh_presets_ui(self) -> None:
         if not hasattr(self, "preset_combo"):
@@ -1646,19 +1694,22 @@ class StandardCrosshairDialog(QWidget):
         self._persist_and_render()
         self.presets_changed.emit()
 
-    def _create_slider_group(self) -> QFrame:
+    def _create_slider_group(self, *, carded: bool = True) -> QFrame:
         frame = QFrame()
-        frame.setStyleSheet(
-            f"""
-            QFrame {{
-                background-color: {UI_THEME['surface']};
-                border-radius: 12px;
-                padding: 8px;
-                border: 1px solid {UI_THEME['border']};
-            }}
-        """
-        )
+        if carded:
+            frame.setStyleSheet(
+                f"""
+                QFrame {{
+                    background-color: {UI_THEME['surface']};
+                    border-radius: 12px;
+                    border: 1px solid {UI_THEME['border']};
+                }}
+            """
+            )
+        else:
+            frame.setStyleSheet("QFrame { background: transparent; border: none; }")
         layout = QVBoxLayout(frame)
+        layout.setContentsMargins(0 if not carded else 8, 0 if not carded else 8, 0 if not carded else 8, 0 if not carded else 8)
         layout.setSpacing(8)
 
         self.length_slider = self._add_slider(layout, "Length", 5, 80, self.settings.length, self._on_length)
@@ -1667,19 +1718,22 @@ class StandardCrosshairDialog(QWidget):
         self.outline_slider = self._add_slider(layout, "Outline", 0, 5, self.settings.outline, self._on_outline, suffix="px")
         return frame
 
-    def _create_shape_group(self) -> QFrame:
+    def _create_shape_group(self, *, carded: bool = True) -> QFrame:
         frame = QFrame()
-        frame.setStyleSheet(
-            f"""
-            QFrame {{
-                background-color: {UI_THEME['surface']};
-                border-radius: 12px;
-                padding: 8px;
-                border: 1px solid {UI_THEME['border']};
-            }}
-        """
-        )
+        if carded:
+            frame.setStyleSheet(
+                f"""
+                QFrame {{
+                    background-color: {UI_THEME['surface']};
+                    border-radius: 12px;
+                    border: 1px solid {UI_THEME['border']};
+                }}
+            """
+            )
+        else:
+            frame.setStyleSheet("QFrame { background: transparent; border: none; }")
         layout = QVBoxLayout(frame)
+        layout.setContentsMargins(0 if not carded else 8, 0 if not carded else 8, 0 if not carded else 8, 0 if not carded else 8)
         layout.setSpacing(8)
 
         style_row = QHBoxLayout()
@@ -1744,19 +1798,22 @@ class StandardCrosshairDialog(QWidget):
 
         return frame
 
-    def _create_dot_group(self) -> QFrame:
+    def _create_dot_group(self, *, carded: bool = True) -> QFrame:
         frame = QFrame()
-        frame.setStyleSheet(
-            f"""
-            QFrame {{
-                background-color: {UI_THEME['surface']};
-                border-radius: 12px;
-                padding: 8px;
-                border: 1px solid {UI_THEME['border']};
-            }}
-        """
-        )
+        if carded:
+            frame.setStyleSheet(
+                f"""
+                QFrame {{
+                    background-color: {UI_THEME['surface']};
+                    border-radius: 12px;
+                    border: 1px solid {UI_THEME['border']};
+                }}
+            """
+            )
+        else:
+            frame.setStyleSheet("QFrame { background: transparent; border: none; }")
         layout = QVBoxLayout(frame)
+        layout.setContentsMargins(0 if not carded else 8, 0 if not carded else 8, 0 if not carded else 8, 0 if not carded else 8)
         layout.setSpacing(8)
 
         self.center_dot_check = QCheckBox("Add Center Dot")
@@ -1801,19 +1858,22 @@ class StandardCrosshairDialog(QWidget):
 
         return frame
 
-    def _create_projection_group(self) -> QFrame:
+    def _create_projection_group(self, *, carded: bool = True) -> QFrame:
         frame = QFrame()
-        frame.setStyleSheet(
-            f"""
-            QFrame {{
-                background-color: {UI_THEME['surface']};
-                border-radius: 12px;
-                padding: 12px;
-                border: 1px solid {UI_THEME['border']};
-            }}
-        """
-        )
+        if carded:
+            frame.setStyleSheet(
+                f"""
+                QFrame {{
+                    background-color: {UI_THEME['surface']};
+                    border-radius: 12px;
+                    border: 1px solid {UI_THEME['border']};
+                }}
+            """
+            )
+        else:
+            frame.setStyleSheet("QFrame { background: transparent; border: none; }")
         layout = QVBoxLayout(frame)
+        layout.setContentsMargins(0 if not carded else 12, 0 if not carded else 12, 0 if not carded else 12, 0 if not carded else 12)
         layout.setSpacing(10)
         layout.addWidget(self._section_label("Lines & Custom Shapes"))
 
@@ -1854,19 +1914,22 @@ class StandardCrosshairDialog(QWidget):
         layout.addWidget(builder_card)
         return frame
 
-    def _create_color_group(self) -> QFrame:
+    def _create_color_group(self, *, carded: bool = True) -> QFrame:
         frame = QFrame()
-        frame.setStyleSheet(
-            f"""
-            QFrame {{
-                background-color: {UI_THEME['surface']};
-                border-radius: 12px;
-                padding: 8px;
-                border: 1px solid {UI_THEME['border']};
-            }}
-        """
-        )
+        if carded:
+            frame.setStyleSheet(
+                f"""
+                QFrame {{
+                    background-color: {UI_THEME['surface']};
+                    border-radius: 12px;
+                    border: 1px solid {UI_THEME['border']};
+                }}
+            """
+            )
+        else:
+            frame.setStyleSheet("QFrame { background: transparent; border: none; }")
         layout = QVBoxLayout(frame)
+        layout.setContentsMargins(0 if not carded else 8, 0 if not carded else 8, 0 if not carded else 8, 0 if not carded else 8)
         layout.setSpacing(8)
 
         self.color_preview = QLabel()

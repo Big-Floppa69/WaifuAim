@@ -1,6 +1,8 @@
 """
 Control panel widget for managing crosshair settings.
 """
+import json
+from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication,
     QLabel,
@@ -12,9 +14,9 @@ from PyQt6.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
     QComboBox,
-    QStackedWidget,
     QSizeGrip,
     QSizePolicy,
+    QToolButton,
 )
 from PyQt6.QtGui import QPixmap, QColor
 from PyQt6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve
@@ -35,6 +37,8 @@ from standard_crosshair import (
 
 class DarkControlPanel(QWidget):
     """A dark-themed control panel for managing crosshair settings."""
+
+    APP_SETTINGS_PATH = Path(__file__).resolve().with_name("app_settings.json")
     
     def __init__(self, image_label, crosshair_label, parent=None):
         super().__init__(parent)
@@ -71,10 +75,21 @@ class DarkControlPanel(QWidget):
         # Sidebar preset icon (collapsed mode)
         self._drawer_preset_icon_btn = None
 
-        # In-panel navigation
-        self._stack = None
-        self._page_main = None
-        self._page_crosshair = None
+        # Single-view layout (no stacked pages).
+        self._content = None
+
+        # Action bar buttons
+        self._btn_toggle_image = None
+        self._btn_toggle_crosshair = None
+        self._btn_next_image = None
+        self._btn_manage_images = None
+        self._btn_hotkeys = None
+        self._btn_mirror_v = None
+        self._btn_mirror_h = None
+
+        # App window opacity
+        self.window_opacity_slider = None
+        self.window_opacity_value = None
 
         # Track programmatic resizing so we can persist user-resized sizes per page.
         self._programmatic_resize = False
@@ -111,10 +126,10 @@ class DarkControlPanel(QWidget):
         # Title bar with buttons
         title_bar = self._create_title_bar()
         layout.addWidget(title_bar)
-        
-        # Content container (stacked pages)
-        self._stack = self._create_content_stack()
-        layout.addWidget(self._stack)
+
+        # Content container (single primary view)
+        self._content = self._create_primary_settings_view()
+        layout.addWidget(self._content)
 
         # Resize handle for the frameless panel.
         self._size_grip = QSizeGrip(main_frame)
@@ -126,10 +141,15 @@ class DarkControlPanel(QWidget):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.addWidget(main_frame)
 
-        self.resize(self._main_size)
+        # Apply persisted window opacity (app-level setting).
+        try:
+            self._apply_window_opacity_from_disk()
+        except Exception:
+            pass
 
-        # Start on main menu title mode.
-        self._set_title_mode("main")
+        # Default size for the Standard Crosshair primary view.
+        self.resize(self._crosshair_size)
+        self._set_title_mode("crosshair")
 
     def resizeEvent(self, event):  # type: ignore[override]
         super().resizeEvent(event)
@@ -244,15 +264,323 @@ class DarkControlPanel(QWidget):
     def _set_title_mode(self, mode: str) -> None:
         """Update title bar widgets depending on current page."""
         mode = (mode or "main").lower()
-        is_main = mode == "main"
+        # Single-view redesign: treat everything as the crosshair/settings page.
+        is_main = False
         try:
             if self._back_btn is not None:
-                self._back_btn.setVisible(not is_main)
+                self._back_btn.setVisible(False)
             if self._title_label is not None:
-                self._title_label.setText("Crosshair Control" if is_main else "Standard Crosshair")
+                self._title_label.setText("Standard Crosshair")
                 self._title_label.setVisible(True)
         except Exception:
             pass
+
+    def _read_app_settings(self) -> dict:
+        try:
+            if self.APP_SETTINGS_PATH.exists():
+                raw = json.loads(self.APP_SETTINGS_PATH.read_text(encoding="utf-8"))
+                return raw if isinstance(raw, dict) else {}
+        except Exception:
+            return {}
+        return {}
+
+    def _write_app_settings(self, data: dict) -> None:
+        try:
+            if not isinstance(data, dict):
+                return
+            self.APP_SETTINGS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception:
+            return
+
+    def _apply_window_opacity_from_disk(self) -> None:
+        data = self._read_app_settings()
+        value = int(data.get("window_opacity", 100))
+        value = max(30, min(100, value))
+        self.setWindowOpacity(value / 100.0)
+        if self.window_opacity_slider is not None:
+            self.window_opacity_slider.blockSignals(True)
+            self.window_opacity_slider.setValue(value)
+            self.window_opacity_slider.blockSignals(False)
+        if self.window_opacity_value is not None:
+            self.window_opacity_value.setText(f"{value}%")
+
+    def _persist_window_opacity(self, value: int) -> None:
+        value = int(value)
+        value = max(30, min(100, value))
+        data = self._read_app_settings()
+        data["window_opacity"] = value
+        self._write_app_settings(data)
+
+    def _set_window_opacity(self, value: int) -> None:
+        value = int(value)
+        value = max(30, min(100, value))
+        try:
+            self.setWindowOpacity(value / 100.0)
+        except Exception:
+            return
+        if self.window_opacity_value is not None:
+            self.window_opacity_value.setText(f"{value}%")
+        self._persist_window_opacity(value)
+
+    def _create_primary_settings_view(self) -> QWidget:
+        """Primary settings view: top actions + opacity accordion + standard crosshair settings."""
+        page = QWidget()
+        page.setStyleSheet("QWidget { background: transparent; }")
+        root = QVBoxLayout(page)
+        root.setContentsMargins(14, 12, 14, 12)
+        root.setSpacing(10)
+
+        root.addWidget(self._create_top_action_bar())
+        root.addWidget(self._create_opacity_accordion())
+
+        # Embedded Standard Crosshair settings.
+        self.crosshair_dialog = StandardCrosshairDialog(
+            self.crosshair_label,
+            self,
+            embedded=True,
+            on_request_close=None,
+        )
+        self.crosshair_dialog.visibility_changed.connect(self._on_crosshair_dialog_visibility)
+        if hasattr(self.crosshair_dialog, "presets_changed"):
+            self.crosshair_dialog.presets_changed.connect(self._refresh_crosshair_presets_ui)
+        root.addWidget(self.crosshair_dialog, 1)
+
+        # Sync action button tooltips/state.
+        self._sync_action_bar_state()
+        return page
+
+    def _square_icon_btn_style(self) -> str:
+        return (
+            f"QPushButton {{"
+            f" background-color: {UI_THEME['surface2']};"
+            f" color: {UI_THEME['text']};"
+            f" border: 1px solid {UI_THEME['border']};"
+            f" border-radius: 14px;"
+            f" font-size: 18px;"
+            f" font-weight: 800;"
+            f" padding: 0px;"
+            f" }}"
+            f"QPushButton:hover {{ border: 1px solid {UI_THEME['border_strong']}; }}"
+            f"QPushButton:pressed {{ background-color: {UI_THEME['surface']}; }}"
+            f"QPushButton:checked {{ background-color: {UI_THEME['accent']}; border: 1px solid {UI_THEME['accent']}; color: {UI_THEME['bg']}; }}"
+        )
+
+    def _create_icon_button(self, icon_text: str, tooltip: str, callback, *, checkable: bool = False) -> QPushButton:
+        btn = QPushButton(icon_text)
+        btn.setFixedSize(44, 44)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setToolTip(tooltip)
+        btn.setCheckable(bool(checkable))
+        btn.setStyleSheet(self._square_icon_btn_style())
+        if callback is not None:
+            btn.clicked.connect(callback)
+        return btn
+
+    def _create_mirror_split_control(self) -> QFrame:
+        """Two halves that read as a single control (mirror vertical/horizontal)."""
+        wrapper = QFrame()
+        wrapper.setStyleSheet("QFrame { background: transparent; }")
+        layout = QHBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        def seg_style(position: str) -> str:
+            left_radius = "14px" if position == "left" else "0px"
+            right_radius = "14px" if position == "right" else "0px"
+            extra_border = "border-left: none;" if position == "right" else ""
+            return (
+                f"QPushButton {{"
+                f" background-color: {UI_THEME['surface2']};"
+                f" color: {UI_THEME['text']};"
+                f" border: 1px solid {UI_THEME['border']};"
+                f" {extra_border}"
+                f" border-top-left-radius: {left_radius};"
+                f" border-bottom-left-radius: {left_radius};"
+                f" border-top-right-radius: {right_radius};"
+                f" border-bottom-right-radius: {right_radius};"
+                f" font-size: 18px;"
+                f" font-weight: 800;"
+                f" padding: 0px;"
+                f" min-width: 44px;"
+                f" min-height: 44px;"
+                f" }}"
+                f"QPushButton:hover {{ border: 1px solid {UI_THEME['border_strong']}; }}"
+                f"QPushButton:pressed {{ background-color: {UI_THEME['surface']}; }}"
+            )
+
+        self._btn_mirror_v = QPushButton("🔄")
+        self._btn_mirror_v.setFixedSize(44, 44)
+        self._btn_mirror_v.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_mirror_v.setToolTip("Mirror Vertical")
+        self._btn_mirror_v.setStyleSheet(seg_style("left"))
+        self._btn_mirror_v.clicked.connect(lambda: mirror_vertical(self.image_label, self.image_label.pixmap()))
+
+        self._btn_mirror_h = QPushButton("↔️")
+        self._btn_mirror_h.setFixedSize(44, 44)
+        self._btn_mirror_h.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_mirror_h.setToolTip("Mirror Horizontal")
+        self._btn_mirror_h.setStyleSheet(seg_style("right"))
+        self._btn_mirror_h.clicked.connect(lambda: mirror_horizontal(self.image_label, self.image_label.pixmap()))
+
+        layout.addWidget(self._btn_mirror_v)
+        layout.addWidget(self._btn_mirror_h)
+        return wrapper
+
+    def _create_top_action_bar(self) -> QFrame:
+        bar = QFrame()
+        bar.setStyleSheet(
+            f"QFrame {{ background-color: {UI_THEME['surface']}; border-radius: 14px; border: 1px solid {UI_THEME['border']}; }}"
+        )
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(10, 10, 10, 10)
+        row.setSpacing(10)
+
+        self._btn_toggle_image = self._create_icon_button("🖼️", "Show/Hide Image", self.toggle_image_visibility, checkable=True)
+        self._btn_toggle_crosshair = self._create_icon_button("🎯", "Show/Hide Crosshair", self.toggle_crosshair_visibility, checkable=True)
+        self._btn_next_image = self._create_icon_button("⏭️", "Next Image", self.switch_image)
+        self._btn_manage_images = self._create_icon_button("📁", "Manage Images", self.open_image_manager)
+        self._btn_hotkeys = self._create_icon_button("⌨️", "Customize Hotkeys", self.open_hotkey_manager)
+        mirror = self._create_mirror_split_control()
+
+        row.addWidget(self._btn_toggle_image)
+        row.addWidget(self._btn_toggle_crosshair)
+        row.addWidget(mirror)
+        row.addStretch(1)
+        row.addWidget(self._btn_next_image)
+        row.addWidget(self._btn_manage_images)
+        row.addWidget(self._btn_hotkeys)
+        return bar
+
+    def _create_accordion(self, title: str, content: QWidget, *, expanded: bool = False) -> QFrame:
+        wrapper = QFrame()
+        wrapper.setStyleSheet(
+            f"QFrame {{ background-color: {UI_THEME['surface']}; border-radius: 14px; border: 1px solid {UI_THEME['border']}; }}"
+        )
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(10, 8, 10, 10)
+        layout.setSpacing(8)
+
+        header = QToolButton()
+        header.setText(title)
+        header.setCheckable(True)
+        header.setChecked(bool(expanded))
+        header.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        header.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+        header.setCursor(Qt.CursorShape.PointingHandCursor)
+        header.setStyleSheet(
+            f"QToolButton {{ background: transparent; border: none; color: {UI_THEME['text']}; font-weight: 800; font-size: 12px; padding: 4px 2px; }}"
+            f"QToolButton:hover {{ color: {UI_THEME['text']}; }}"
+        )
+
+        content.setVisible(bool(expanded))
+
+        def on_toggle(checked: bool) -> None:
+            content.setVisible(bool(checked))
+            header.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)
+
+        header.toggled.connect(on_toggle)
+        layout.addWidget(header)
+        layout.addWidget(content)
+        return wrapper
+
+    def _create_opacity_accordion(self) -> QFrame:
+        content = QFrame()
+        content.setStyleSheet("QFrame { background: transparent; border: none; }")
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        # Crosshair opacity (existing behavior): controls overlay labels.
+        crosshair_row = QFrame()
+        crosshair_row.setStyleSheet(
+            f"QFrame {{ background-color: {UI_THEME['surface2']}; border-radius: 12px; border: 1px solid {UI_THEME['border']}; }}"
+        )
+        crosshair_layout = QHBoxLayout(crosshair_row)
+        crosshair_layout.setContentsMargins(12, 10, 12, 10)
+        crosshair_layout.setSpacing(10)
+        crosshair_label = QLabel("Crosshair Opacity")
+        crosshair_label.setStyleSheet(f"color: {UI_THEME['muted']}; font-size: 11px; font-weight: 700;")
+        crosshair_layout.addWidget(crosshair_label)
+
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setMinimum(0)
+        self.opacity_slider.setMaximum(100)
+        self.opacity_slider.setValue(100)
+        self.opacity_slider.setFixedHeight(18)
+        self.opacity_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.opacity_slider.setStyleSheet(
+            f"""
+            QSlider::groove:horizontal {{ border: none; height: 6px; background: rgba(230, 225, 255, 35); border-radius: 3px; }}
+            QSlider::sub-page:horizontal {{ background: {UI_THEME['accent']}; border-radius: 3px; }}
+            QSlider::handle:horizontal {{ background: {UI_THEME['accent']}; border: none; width: 16px; margin: -5px 0; border-radius: 8px; }}
+            QSlider::handle:horizontal:hover {{ background: {UI_THEME.get('accent2', UI_THEME['accent'])}; }}
+            """
+        )
+        self.opacity_slider.valueChanged.connect(self.change_opacity)
+
+        self.opacity_value = QLabel("100%")
+        self.opacity_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.opacity_value.setFixedHeight(26)
+        self.opacity_value.setMinimumWidth(62)
+        self.opacity_value.setStyleSheet(
+            f"QLabel {{ color: {UI_THEME['text']}; font-size: 11px; font-weight: 800; background-color: {UI_THEME['surface']}; border: 1px solid {UI_THEME['border']}; border-radius: 10px; padding: 0px 10px; }}"
+        )
+        crosshair_layout.addWidget(self.opacity_slider, 1)
+        crosshair_layout.addWidget(self.opacity_value)
+        layout.addWidget(crosshair_row)
+
+        # Window opacity (new app-level setting): controls the control panel window.
+        window_row = QFrame()
+        window_row.setStyleSheet(
+            f"QFrame {{ background-color: {UI_THEME['surface2']}; border-radius: 12px; border: 1px solid {UI_THEME['border']}; }}"
+        )
+        window_layout = QHBoxLayout(window_row)
+        window_layout.setContentsMargins(12, 10, 12, 10)
+        window_layout.setSpacing(10)
+        window_label = QLabel("Window Opacity")
+        window_label.setStyleSheet(f"color: {UI_THEME['muted']}; font-size: 11px; font-weight: 700;")
+        window_layout.addWidget(window_label)
+
+        self.window_opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.window_opacity_slider.setMinimum(30)
+        self.window_opacity_slider.setMaximum(100)
+        self.window_opacity_slider.setValue(100)
+        self.window_opacity_slider.setFixedHeight(18)
+        self.window_opacity_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.window_opacity_slider.setStyleSheet(self.opacity_slider.styleSheet())
+        self.window_opacity_slider.valueChanged.connect(self._set_window_opacity)
+
+        self.window_opacity_value = QLabel("100%")
+        self.window_opacity_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.window_opacity_value.setFixedHeight(26)
+        self.window_opacity_value.setMinimumWidth(62)
+        self.window_opacity_value.setStyleSheet(self.opacity_value.styleSheet())
+        window_layout.addWidget(self.window_opacity_slider, 1)
+        window_layout.addWidget(self.window_opacity_value)
+        layout.addWidget(window_row)
+
+        # Apply persisted window opacity now that controls exist.
+        try:
+            self._apply_window_opacity_from_disk()
+        except Exception:
+            pass
+
+        return self._create_accordion("Opacity", content, expanded=False)
+
+    def _sync_action_bar_state(self) -> None:
+        try:
+            if self._btn_toggle_image is not None:
+                self._btn_toggle_image.blockSignals(True)
+                self._btn_toggle_image.setChecked(bool(self.image_label.isVisible()))
+                self._btn_toggle_image.blockSignals(False)
+                self._btn_toggle_image.setToolTip("Hide Image" if self.image_label.isVisible() else "Show Image")
+            if self._btn_toggle_crosshair is not None:
+                self._btn_toggle_crosshair.blockSignals(True)
+                self._btn_toggle_crosshair.setChecked(bool(self.crosshair_label.isVisible()))
+                self._btn_toggle_crosshair.blockSignals(False)
+                self._btn_toggle_crosshair.setToolTip("Hide Crosshair" if self.crosshair_label.isVisible() else "Show Crosshair")
+        except Exception:
+            return
 
     def _register_collapsible_button(self, btn: QPushButton, full_text: str) -> None:
         """Track a button so it can collapse to an icon-only variant."""
@@ -362,17 +690,8 @@ class DarkControlPanel(QWidget):
         btn.clicked.connect(callback)
         return btn
     
-    def _create_content_stack(self) -> QStackedWidget:
-        """Create stacked pages so navigation happens in one window."""
-        stack = QStackedWidget()
-        self._page_main = self._create_main_menu_page()
-        stack.addWidget(self._page_main)
-
-        self._page_crosshair = self._create_crosshair_page()
-        stack.addWidget(self._page_crosshair)
-
-        stack.setCurrentWidget(self._page_main)
-        return stack
+    # NOTE: The previous stacked main-menu + drawer UI has been removed in favor of a
+    # single Standard Crosshair primary view.
 
     def _create_main_menu_page(self) -> QFrame:
         """Create the main menu page."""
@@ -1222,6 +1541,7 @@ class DarkControlPanel(QWidget):
         else:
             self.image_label.show()
         self._update_image_toggle_text()
+        self._sync_action_bar_state()
     
     def toggle_crosshair_visibility(self):
         """Toggle generated crosshair visibility."""
@@ -1235,6 +1555,7 @@ class DarkControlPanel(QWidget):
         save_crosshair_visibility(self.crosshair_label.isVisible())
         if self.crosshair_dialog is not None:
             self.crosshair_dialog.sync_with_label()
+        self._sync_action_bar_state()
 
     def change_opacity(self, value):
         """Change the opacity of the crosshair."""
@@ -1282,8 +1603,13 @@ class DarkControlPanel(QWidget):
 
     def open_standard_crosshair_dialog(self):
         """Open the standard crosshair configuration dialog."""
-        # In-panel navigation: switch to embedded settings page.
-        self._show_crosshair_settings()
+        # Single-view redesign: already on Standard Crosshair.
+        try:
+            if self.crosshair_dialog is not None:
+                self.crosshair_dialog.sync_with_label()
+                self.crosshair_dialog.raise_()
+        except Exception:
+            pass
 
     def _on_crosshair_dialog_destroyed(self, *args):
         self.crosshair_dialog = None
@@ -1296,6 +1622,7 @@ class DarkControlPanel(QWidget):
             self.crosshair_label.raise_()
         self._update_crosshair_toggle_text()
         save_crosshair_visibility(self.crosshair_label.isVisible())
+        self._sync_action_bar_state()
     
     def _refresh_hotkey_display(self, hotkeys):
         """Refresh the hotkey info display after changes."""
