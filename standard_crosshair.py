@@ -1441,7 +1441,7 @@ class StandardCrosshairDialog(QWidget):
         layout.setContentsMargins(14 if self._embedded else 12, 10 if self._embedded else 12, 14 if self._embedded else 12, 12 if self._embedded else 14)
         layout.setSpacing(10)
 
-        info = QLabel("Configure a simple crosshair without importing images.")
+        info = QLabel("Choose or edit a preset for generated crosshairs.")
         info.setWordWrap(True)
         info.setStyleSheet(f"color: {UI_THEME['muted']};")
         layout.addWidget(info)
@@ -1543,7 +1543,9 @@ class StandardCrosshairDialog(QWidget):
         layout.addWidget(self._create_accordion_section("Transform", self._create_shape_group(carded=False), expanded=False))
         layout.addWidget(self._create_accordion_section("Dot", self._create_dot_group(carded=False), expanded=False))
         layout.addWidget(self._create_accordion_section("Color", self._create_color_group(carded=False), expanded=False))
-        layout.addWidget(self._create_accordion_section("Lines & Shapes", self._create_projection_group(carded=False), expanded=False))
+
+        # Line Builder: keep as a standalone button card (no accordion wrapper).
+        layout.addWidget(self._create_projection_group(carded=False))
 
         buttons_row = QHBoxLayout()
         reset_btn = self._create_primary_button("↺ Reset", UI_THEME["surface2"])
@@ -1579,6 +1581,7 @@ class StandardCrosshairDialog(QWidget):
         header.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
         header.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         header.setCursor(Qt.CursorShape.PointingHandCursor)
+        header.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         header.setStyleSheet(
             f"""
             QToolButton {{
@@ -1875,7 +1878,6 @@ class StandardCrosshairDialog(QWidget):
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(0 if not carded else 12, 0 if not carded else 12, 0 if not carded else 12, 0 if not carded else 12)
         layout.setSpacing(10)
-        layout.addWidget(self._section_label("Lines & Custom Shapes"))
 
         builder_card = QFrame()
         builder_card.setStyleSheet(

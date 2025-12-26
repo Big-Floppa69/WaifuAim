@@ -13,6 +13,7 @@ from control_panel import DarkControlPanel
 from tray_icon import create_tray_icon
 from hotkeys import setup_hotkeys
 from standard_crosshair import initialize_standard_crosshair
+from utils import set_label_image_from_path
 
 
 def create_crosshair_label(app, image_path="display_images/astra_yao.png"):
@@ -21,15 +22,21 @@ def create_crosshair_label(app, image_path="display_images/astra_yao.png"):
     screen_geometry = screen.geometry()
 
     label = QLabel()
-    if image_path:
-        pixmap = QPixmap(image_path)
-    else:
+    if not image_path:
         pixmap = QPixmap(screen_geometry.width(), screen_geometry.height())
         pixmap.fill(Qt.GlobalColor.transparent)
+        label.setPixmap(pixmap)
 
     label.setFixedWidth(screen_geometry.width())
     label.setFixedHeight(screen_geometry.height())
-    label.setPixmap(pixmap)
+
+    # If this is an image-based overlay, load it through the colorblind-aware
+    # pipeline so the persisted mode affects the displayed image.
+    if image_path:
+        try:
+            set_label_image_from_path(label, image_path)
+        except Exception:
+            label.setPixmap(QPixmap(image_path))
     label.setWindowFlags(
         Qt.WindowType.FramelessWindowHint
         | Qt.WindowType.WindowStaysOnTopHint

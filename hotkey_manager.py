@@ -3,9 +3,20 @@ Hotkey Manager Dialog for customizing keyboard shortcuts.
 """
 import json
 import os
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
-                             QLabel, QFrame, QGraphicsDropShadowEffect, QLineEdit,
-                             QMessageBox)
+from PyQt6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+    QLabel,
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QLineEdit,
+    QMessageBox,
+    QScrollArea,
+    QSizePolicy,
+    QSizeGrip,
+)
 from PyQt6.QtGui import QColor, QKeyEvent
 from PyQt6.QtCore import Qt, pyqtSignal
 from utils import UI_THEME
@@ -162,9 +173,19 @@ class HotkeyManagerDialog(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.drag_position = None
+        # Resizing (frameless)
+        self._resize_margin = 7
+        self._resizing = False
+        self._resize_edges: set[str] = set()
+        self._resize_start_pos = None
+        self._resize_start_geom = None
+        self._size_grip = None
+
         self.config_file = "hotkey_config.json"
         # key_name -> list[HotkeyLineEdit] (multiple bindings per action)
         self.hotkey_inputs: dict[str, list[HotkeyLineEdit]] = {}
+        # key_name -> list[QWidget] row widgets (edit + delete)
+        self._hotkey_row_widgets: dict[str, list[QWidget]] = {}
         # key_name -> QVBoxLayout that holds the HotkeyLineEdit rows (plus an add-row widget at the end)
         self._hotkey_inputs_layouts: dict[str, QVBoxLayout] = {}
         self._hotkey_add_row_widgets: dict[str, QWidget] = {}
@@ -219,6 +240,7 @@ class HotkeyManagerDialog(QWidget):
         
         # Title bar
         title_bar = self._create_title_bar()
+        self._title_bar = title_bar
         layout.addWidget(title_bar)
         
         # Content frame
@@ -230,10 +252,56 @@ class HotkeyManagerDialog(QWidget):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.addWidget(main_frame)
 
+        # Resize handle for the frameless dialog.
+        self._size_grip = QSizeGrip(main_frame)
+        self._size_grip.setFixedSize(16, 16)
+        self._size_grip.setStyleSheet("QSizeGrip { background: transparent; }")
+
         # Resizable window (frameless), but keep a sensible minimum.
-        self.setMinimumSize(560, 420)
-        self.resize(650, 550)
+        # The dialog can grow vertically when multiple hotkeys are added; the
+        # content scrolls instead of squishing.
+        self.setMinimumSize(720, 560)
+        self.resize(820, 760)
         self.center_on_screen()
+
+    def resizeEvent(self, event):  # type: ignore[override]
+        super().resizeEvent(event)
+        try:
+            if self._size_grip is not None:
+                margin = 8
+                self._size_grip.move(
+                    self.width() - self._size_grip.width() - margin,
+                    self.height() - self._size_grip.height() - margin,
+                )
+                self._size_grip.raise_()
+        except Exception:
+            pass
+
+    def _hit_test_edges(self, pos) -> set[str]:
+        m = int(self._resize_margin)
+        edges: set[str] = set()
+        x = int(pos.x())
+        y = int(pos.y())
+        if x <= m:
+            edges.add("left")
+        if x >= self.width() - m:
+            edges.add("right")
+        if y <= m:
+            edges.add("top")
+        if y >= self.height() - m:
+            edges.add("bottom")
+        return edges
+
+    def _cursor_for_edges(self, edges: set[str]):
+        if not edges:
+            return Qt.CursorShape.ArrowCursor
+        if edges == {"left"} or edges == {"right"}:
+            return Qt.CursorShape.SizeHorCursor
+        if edges == {"top"} or edges == {"bottom"}:
+            return Qt.CursorShape.SizeVerCursor
+        if ("left" in edges and "top" in edges) or ("right" in edges and "bottom" in edges):
+            return Qt.CursorShape.SizeFDiagCursor
+        return Qt.CursorShape.SizeBDiagCursor
     
     def _create_main_frame(self):
         """Create the main frame with styling."""
@@ -316,9 +384,9 @@ class HotkeyManagerDialog(QWidget):
         """Create the content frame with hotkey settings."""
         content_frame = QFrame()
         content_frame.setStyleSheet("QFrame { background: transparent; }")
-        content_layout = QVBoxLayout(content_frame)
-        content_layout.setContentsMargins(25, 20, 25, 25)
-        content_layout.setSpacing(18)
+        outer = QVBoxLayout(content_frame)
+        outer.setContentsMargins(25, 20, 25, 25)
+        outer.setSpacing(18)
         
         # Info label
         info = QLabel("Click on a field and press a key combination to set a hotkey.\nPress ESC to cancel while editing.")
@@ -332,15 +400,33 @@ class HotkeyManagerDialog(QWidget):
             + UI_THEME["border"]
             + "; border-radius: 12px; }"
         )
+        # Hotkey settings live in a scroll area so adding bindings won't squash
+        # the UI; it will expand and become scrollable.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        scroll_body = QWidget()
+        scroll_body.setStyleSheet("QWidget { background: transparent; }")
+        content_layout = QVBoxLayout(scroll_body)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(18)
+
         content_layout.addWidget(info)
-        
+
         # Hotkey settings
         self._add_hotkey_setting(content_layout, "Toggle Visibility", "toggle_visibility")
         self._add_hotkey_setting(content_layout, "Mirror Vertical", "mirror_vertical")
         self._add_hotkey_setting(content_layout, "Mirror Horizontal", "mirror_horizontal")
         self._add_hotkey_setting(content_layout, "Switch Image", "switch_image")
-        
-        content_layout.addStretch()
+
+        content_layout.addStretch(1)
+
+        scroll.setWidget(scroll_body)
+        outer.addWidget(scroll, 1)
         
         # Action buttons
         buttons_layout = QHBoxLayout()
@@ -356,7 +442,7 @@ class HotkeyManagerDialog(QWidget):
         save_btn.clicked.connect(self.save_hotkeys)
         buttons_layout.addWidget(save_btn)
         
-        content_layout.addLayout(buttons_layout)
+        outer.addLayout(buttons_layout)
         
         return content_frame
     
@@ -400,6 +486,7 @@ class HotkeyManagerDialog(QWidget):
         inputs_layout.setSpacing(8)
 
         self.hotkey_inputs[key_name] = []
+        self._hotkey_row_widgets[key_name] = []
         self._hotkey_inputs_layouts[key_name] = inputs_layout
 
         # Add-row widget (always last) so we can insert new edits above it.
@@ -407,11 +494,13 @@ class HotkeyManagerDialog(QWidget):
         add_row.setStyleSheet("QFrame { background: transparent; }")
         add_row_layout = QHBoxLayout(add_row)
         add_row_layout.setContentsMargins(0, 0, 0, 0)
-        add_row_layout.setSpacing(8)
-        add_row_layout.addStretch(1)
+        add_row_layout.setSpacing(0)
 
         add_btn = QPushButton("+")
-        add_btn.setFixedSize(28, 28)
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_btn.setToolTip("Add another hotkey")
+        add_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        add_btn.setFixedHeight(34)
         add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         add_btn.setStyleSheet(
             "QPushButton { background-color: "
@@ -420,7 +509,7 @@ class HotkeyManagerDialog(QWidget):
             + UI_THEME["text"]
             + "; border: 1px solid "
             + UI_THEME["border"]
-            + "; border-radius: 10px; font-size: 18px; font-weight: 900; }"
+            + "; border-radius: 10px; font-size: 18px; font-weight: 900; text-align: center; }"
             "QPushButton:hover { border: 1px solid "
             + UI_THEME["border_strong"]
             + "; }"
@@ -429,7 +518,7 @@ class HotkeyManagerDialog(QWidget):
             + "; }"
         )
         add_btn.clicked.connect(lambda: self._add_binding_row(key_name))
-        add_row_layout.addWidget(add_btn)
+        add_row_layout.addWidget(add_btn, 1)
 
         self._hotkey_add_row_widgets[key_name] = add_row
         inputs_layout.addWidget(add_row)
@@ -527,22 +616,98 @@ class HotkeyManagerDialog(QWidget):
 
         placeholder = f"Hotkey {len(edits) + 1}" if len(edits) > 0 else "Hotkey 1"
         input_field = self._make_hotkey_input(placeholder, initial_value)
+        row = QFrame()
+        row.setStyleSheet("QFrame { background: transparent; }")
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(8)
+        row_layout.addWidget(input_field, 1)
+
+        del_btn = QPushButton("×")
+        del_btn.setFixedSize(28, 28)
+        del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        del_btn.setToolTip("Remove this hotkey")
+        del_btn.setStyleSheet(
+            "QPushButton { background-color: "
+            + UI_THEME["surface2"]
+            + "; color: "
+            + UI_THEME["text"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 10px; font-size: 18px; font-weight: 900; }"
+            "QPushButton:hover { background-color: "
+            + UI_THEME["danger"]
+            + "; border: 1px solid "
+            + UI_THEME["danger"]
+            + "; }"
+            "QPushButton:pressed { background-color: "
+            + UI_THEME["surface"]
+            + "; }"
+        )
+        del_btn.clicked.connect(lambda: self._remove_binding_row(key_name, input_field))
+        row_layout.addWidget(del_btn)
+
         edits.append(input_field)
-        inputs_layout.insertWidget(insert_index, input_field)
+        self._hotkey_row_widgets.setdefault(key_name, []).append(row)
+        inputs_layout.insertWidget(insert_index, row)
+
+    def _remove_binding_row(self, key_name: str, edit: HotkeyLineEdit) -> None:
+        edits = self.hotkey_inputs.get(key_name) or []
+        if edit not in edits:
+            return
+
+        # Keep at least one input row so the UI doesn't collapse.
+        if len(edits) <= 1:
+            try:
+                edit.current_key = ""
+                edit.setText("")
+            except Exception:
+                pass
+            return
+
+        idx = edits.index(edit)
+        edits.pop(idx)
+
+        rows = self._hotkey_row_widgets.get(key_name) or []
+        row = rows.pop(idx) if idx < len(rows) else None
+        if row is not None:
+            try:
+                row.setParent(None)
+                row.deleteLater()
+            except Exception:
+                pass
+        else:
+            try:
+                edit.setParent(None)
+                edit.deleteLater()
+            except Exception:
+                pass
+
+        # Renumber placeholders after deletion.
+        self._renumber_action_placeholders(key_name)
+
+    def _renumber_action_placeholders(self, key_name: str) -> None:
+        edits = self.hotkey_inputs.get(key_name) or []
+        for i, e in enumerate(edits, start=1):
+            try:
+                e.setPlaceholderText(f"Hotkey {i}")
+            except Exception:
+                pass
 
     def _set_action_bindings(self, key_name: str, values: list[str]) -> None:
         inputs_layout = self._hotkey_inputs_layouts.get(key_name)
         if inputs_layout is None:
             return
 
-        # Remove existing edit widgets.
-        for edit in self.hotkey_inputs.get(key_name, []) or []:
+        # Remove existing row widgets.
+        for row in self._hotkey_row_widgets.get(key_name, []) or []:
             try:
-                edit.setParent(None)
-                edit.deleteLater()
+                row.setParent(None)
+                row.deleteLater()
             except Exception:
                 pass
         self.hotkey_inputs[key_name] = []
+        self._hotkey_row_widgets[key_name] = []
 
         # Ensure at least one row.
         cleaned = [str(v or "").strip().lower() for v in (values or []) if str(v or "").strip()]
@@ -551,6 +716,8 @@ class HotkeyManagerDialog(QWidget):
 
         for v in cleaned:
             self._add_binding_row(key_name, initial_value=v)
+
+        self._renumber_action_placeholders(key_name)
     
     def save_hotkeys(self):
         """Save the current hotkey configuration."""
@@ -640,9 +807,57 @@ class HotkeyManagerDialog(QWidget):
     def mousePressEvent(self, event):
         """Handle mouse press for window dragging."""
         if event.button() == Qt.MouseButton.LeftButton:
+            edges = self._hit_test_edges(event.position())
+            if edges:
+                self._resizing = True
+                self._resize_edges = edges
+                self._resize_start_pos = event.globalPosition().toPoint()
+                self._resize_start_geom = self.geometry()
+                event.accept()
+                return
+
             self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
     
     def mouseMoveEvent(self, event):
         """Handle mouse move for window dragging."""
+        if self._resizing and self._resize_start_pos is not None and self._resize_start_geom is not None:
+            delta = event.globalPosition().toPoint() - self._resize_start_pos
+            geom = self._resize_start_geom
+            x = geom.x()
+            y = geom.y()
+            w = geom.width()
+            h = geom.height()
+
+            if "left" in self._resize_edges:
+                x = geom.x() + delta.x()
+                w = geom.width() - delta.x()
+            if "right" in self._resize_edges:
+                w = geom.width() + delta.x()
+            if "top" in self._resize_edges:
+                y = geom.y() + delta.y()
+                h = geom.height() - delta.y()
+            if "bottom" in self._resize_edges:
+                h = geom.height() + delta.y()
+
+            w = max(self.minimumWidth(), w)
+            h = max(self.minimumHeight(), h)
+            self.setGeometry(x, y, w, h)
+            event.accept()
+            return
+
+        # Update cursor when hovering near edges.
+        if event.buttons() == Qt.MouseButton.NoButton:
+            edges = self._hit_test_edges(event.position())
+            self.setCursor(self._cursor_for_edges(edges))
+
         if event.buttons() == Qt.MouseButton.LeftButton and self.drag_position:
             self.move(event.globalPosition().toPoint() - self.drag_position)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._resizing = False
+            self._resize_edges = set()
+            self._resize_start_pos = None
+            self._resize_start_geom = None
+            self.drag_position = None
+        super().mouseReleaseEvent(event)

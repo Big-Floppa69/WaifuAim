@@ -1,6 +1,14 @@
 {
-    "toggle_visibility": "ctrl+alt",
-    "mirror_vertical": "f3",
-    "mirror_horizontal": "f4",
-    "switch_image": "f2"
+    "toggle_visibility": [
+        "ctrl+alt"
+    ],
+    "mirror_vertical": [
+        "f3"
+    ],
+    "mirror_horizontal": [
+        "f4"
+    ],
+    "switch_image": [
+        "f2"
+    ]
 }

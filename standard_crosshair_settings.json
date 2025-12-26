@@ -8,7 +8,7 @@
   "green": 255,
   "blue": 120,
   "alpha": 255,
-  "visible": false,
+  "visible": true,
   "dot_shape": "circle",
   "dot_size": 6,
   "show_left": true,

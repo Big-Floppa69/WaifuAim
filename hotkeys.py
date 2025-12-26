@@ -6,7 +6,7 @@ import json
 import os
 import time
 from PyQt6.QtGui import QPixmap
-from utils import mirror_vertical, mirror_horizontal, get_art_list
+from utils import mirror_vertical, mirror_horizontal, get_art_list, set_label_image_from_path
 
 
 # Global reference to the label
@@ -149,8 +149,12 @@ def reload_hotkeys():
         if not arts:
             return
         index[0] = (index[0] + 1) % len(arts)
-        pix = QPixmap(arts[index[0]])
-        _label_ref.setPixmap(pix)
+        path = arts[index[0]]
+        try:
+            set_label_image_from_path(_label_ref, path)
+        except Exception:
+            pix = QPixmap(path)
+            _label_ref.setPixmap(pix)
     
     _register_many(config.get('switch_image', ['f2']), switch)
 

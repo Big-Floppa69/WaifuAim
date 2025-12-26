@@ -2,6 +2,9 @@
 Control panel widget for managing crosshair settings.
 """
 import json
+import traceback
+import time
+import os
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication,
@@ -17,10 +20,20 @@ from PyQt6.QtWidgets import (
     QSizeGrip,
     QSizePolicy,
     QToolButton,
+    QScrollBar,
+    QAbstractItemView,
 )
-from PyQt6.QtGui import QPixmap, QColor
-from PyQt6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve
-from utils import mirror_vertical, mirror_horizontal, get_art_list, transparent, UI_THEME
+from PyQt6.QtGui import QPixmap, QColor, QIcon, QFont, QPainter
+from PyQt6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve, QRectF
+from utils import (
+    mirror_vertical,
+    mirror_horizontal,
+    get_art_list,
+    set_label_image_from_path,
+    refresh_label_pixmap_for_colorblind_mode,
+    transparent,
+    UI_THEME,
+)
 from image_manager import ImageManagerDialog
 from hotkey_manager import HotkeyManagerDialog
 from standard_crosshair import (
@@ -65,6 +78,7 @@ class DarkControlPanel(QWidget):
         self._collapse_btn = None
         self._back_btn = None
         self._title_label = None
+        self._title_bar = None
         self._collapsible_buttons: list[QPushButton] = []
         self._preset_container = None
         self._mirror_container = None
@@ -77,6 +91,17 @@ class DarkControlPanel(QWidget):
 
         # Single-view layout (no stacked pages).
         self._content = None
+
+        # Compact mode: when panel is resized to the minimum size, hide all UI
+        # below the main action buttons row.
+        self._below_action_container = None
+        self._is_compact_mode = False
+
+        # Track last panel position to avoid "teleporting" when reopening.
+        self._last_panel_pos = None
+
+        # Opacity accordion header (to show current colorblind mode in title).
+        self._opacity_accordion_header = None
 
         # Action bar buttons
         self._btn_toggle_image = None
@@ -91,6 +116,9 @@ class DarkControlPanel(QWidget):
         self.window_opacity_slider = None
         self.window_opacity_value = None
 
+        # Accessibility: colorblindness mode (persisted, currently UI-only)
+        self.colorblind_mode_combo = None
+
         # Track programmatic resizing so we can persist user-resized sizes per page.
         self._programmatic_resize = False
 
@@ -102,6 +130,10 @@ class DarkControlPanel(QWidget):
         self._resize_start_geom = None
         self._size_grip = None
         self.init_ui()
+        # Dragging helpers
+        self._maybe_drag = False
+        self._press_pos = None
+        self._drag_offset = None
         
     def init_ui(self):
         """Initialize the user interface."""
@@ -113,7 +145,7 @@ class DarkControlPanel(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
         # Allow manual resizing.
-        self.setMinimumSize(280, 520)
+        self.setMinimumSize(450, 150)
         
         # Main container with dark background and rounded edges
         main_frame = self._create_main_frame()
@@ -125,6 +157,7 @@ class DarkControlPanel(QWidget):
         
         # Title bar with buttons
         title_bar = self._create_title_bar()
+        self._title_bar = title_bar
         layout.addWidget(title_bar)
 
         # Content container (single primary view)
@@ -151,6 +184,41 @@ class DarkControlPanel(QWidget):
         self.resize(self._crosshair_size)
         self._set_title_mode("crosshair")
 
+    # Instrumentation: override move/setGeometry to capture callers when the
+    # control panel is unexpectedly moved. Writes timestamped stack traces to
+    # move_debug.log in the project root so we can identify the caller.
+    def move(self, *args, **kwargs):
+        try:
+            try:
+                log_path = Path(__file__).resolve().with_name("move_debug.log")
+            except Exception:
+                log_path = Path("move_debug.log")
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(f"\n--- MOVE called at {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+                fh.write("Args: %r, Kwargs: %r\n" % (args, kwargs))
+                for line in traceback.format_stack():
+                    fh.write(line)
+                fh.write("--- END STACK ---\n")
+        except Exception:
+            pass
+        return super().move(*args, **kwargs)
+
+    def setGeometry(self, *args, **kwargs):
+        try:
+            try:
+                log_path = Path(__file__).resolve().with_name("move_debug.log")
+            except Exception:
+                log_path = Path("move_debug.log")
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(f"\n--- setGeometry called at {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+                fh.write("Args: %r, Kwargs: %r\n" % (args, kwargs))
+                for line in traceback.format_stack():
+                    fh.write(line)
+                fh.write("--- END STACK ---\n")
+        except Exception:
+            pass
+        return super().setGeometry(*args, **kwargs)
+
     def resizeEvent(self, event):  # type: ignore[override]
         super().resizeEvent(event)
         try:
@@ -163,6 +231,34 @@ class DarkControlPanel(QWidget):
                 self._size_grip.raise_()
         except Exception:
             pass
+
+        # Enter compact mode only when hitting the minimum size.
+        try:
+            self._update_compact_mode()
+        except Exception:
+            pass
+
+    def _update_compact_mode(self) -> None:
+        container = getattr(self, "_below_action_container", None)
+        if container is None:
+            return
+
+        # The panel already has a minimum size (450x150). When the user shrinks
+        # the window to that minimum, only the top icon row should remain.
+        w = int(self.width())
+        h = int(self.height())
+        min_w = int(self.minimumWidth())
+        min_h = int(self.minimumHeight())
+
+        # Use a small epsilon because Qt may report off-by-1 sizes depending on
+        # platform/window frame rounding.
+        eps = 2
+        compact = (w <= (min_w + eps)) and (h <= (min_h + eps))
+
+        if compact == bool(getattr(self, "_is_compact_mode", False)):
+            return
+        self._is_compact_mode = bool(compact)
+        container.setVisible(not compact)
 
     def _hit_test_edges(self, pos) -> set[str]:
         """Return a set of edges (left/right/top/bottom) if pos is near them."""
@@ -311,6 +407,56 @@ class DarkControlPanel(QWidget):
         data["window_opacity"] = value
         self._write_app_settings(data)
 
+    def _persist_colorblind_mode(self, mode: str) -> None:
+        mode = str(mode or "default").strip().lower() or "default"
+        data = self._read_app_settings()
+        data["colorblind_mode"] = mode
+        self._write_app_settings(data)
+
+        try:
+            self._update_opacity_accordion_title()
+        except Exception:
+            pass
+
+        # Apply immediately to the currently displayed image overlay.
+        try:
+            refresh_label_pixmap_for_colorblind_mode(self.image_label)
+        except Exception:
+            pass
+
+    def _format_colorblind_mode_label(self, mode: str) -> str:
+        mode = str(mode or "default").strip().lower() or "default"
+        mapping = {
+            "default": "Default",
+            "protanopia": "Protanopia",
+            "deuteranopia": "Deuteranopia",
+            "tritanopia": "Tritanopia",
+            "achromatopsia": "Achromatopsia",
+        }
+        return mapping.get(mode, mode.capitalize())
+
+    def _update_opacity_accordion_title(self) -> None:
+        header = getattr(self, "_opacity_accordion_header", None)
+        if header is None:
+            return
+        data = self._read_app_settings()
+        mode = str(data.get("colorblind_mode", "default") or "default").strip().lower()
+        header.setText(f"Opacity (Colorblind: {self._format_colorblind_mode_label(mode)})")
+
+    def _apply_colorblind_mode_from_disk(self) -> None:
+        combo = getattr(self, "colorblind_mode_combo", None)
+        if combo is None:
+            return
+        data = self._read_app_settings()
+        mode = str(data.get("colorblind_mode", "default") or "default").strip().lower()
+        idx = combo.findData(mode)
+        if idx < 0:
+            idx = combo.findData("default")
+        combo.blockSignals(True)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+        combo.blockSignals(False)
+
     def _set_window_opacity(self, value: int) -> None:
         value = int(value)
         value = max(30, min(100, value))
@@ -331,7 +477,16 @@ class DarkControlPanel(QWidget):
         root.setSpacing(10)
 
         root.addWidget(self._create_top_action_bar())
-        root.addWidget(self._create_opacity_accordion())
+
+        # Everything below the main action bar is grouped into a single container
+        # so we can hide it when the window is shrunk to its minimum size.
+        self._below_action_container = QWidget()
+        self._below_action_container.setStyleSheet("QWidget { background: transparent; }")
+        below = QVBoxLayout(self._below_action_container)
+        below.setContentsMargins(0, 0, 0, 0)
+        below.setSpacing(10)
+
+        below.addWidget(self._create_opacity_accordion())
 
         # Embedded Standard Crosshair settings.
         self.crosshair_dialog = StandardCrosshairDialog(
@@ -343,10 +498,18 @@ class DarkControlPanel(QWidget):
         self.crosshair_dialog.visibility_changed.connect(self._on_crosshair_dialog_visibility)
         if hasattr(self.crosshair_dialog, "presets_changed"):
             self.crosshair_dialog.presets_changed.connect(self._refresh_crosshair_presets_ui)
-        root.addWidget(self.crosshair_dialog, 1)
+        below.addWidget(self.crosshair_dialog, 1)
+
+        root.addWidget(self._below_action_container, 1)
 
         # Sync action button tooltips/state.
         self._sync_action_bar_state()
+
+        # Apply compact-mode visibility for the initial geometry.
+        try:
+            self._update_compact_mode()
+        except Exception:
+            pass
         return page
 
     def _square_icon_btn_style(self) -> str:
@@ -364,6 +527,20 @@ class DarkControlPanel(QWidget):
             f"QPushButton:pressed {{ background-color: {UI_THEME['surface']}; }}"
             f"QPushButton:checked {{ background-color: {UI_THEME['accent']}; border: 1px solid {UI_THEME['accent']}; color: {UI_THEME['bg']}; }}"
         )
+
+    def _rotated_text_icon(self, text: str, angle: float, size: int = 36, font_size: int = 20) -> QIcon:
+        pix = QPixmap(size, size)
+        pix.fill(Qt.GlobalColor.transparent)
+        font = QFont()
+        font.setPointSize(font_size)
+        painter = QPainter(pix)
+        painter.setFont(font)
+        painter.setPen(QColor(UI_THEME['text']))
+        painter.translate(size / 2, size / 2)
+        painter.rotate(angle)
+        painter.drawText(QRectF(-size / 2, -size / 2, size, size), Qt.AlignmentFlag.AlignCenter, text)
+        painter.end()
+        return QIcon(pix)
 
     def _create_icon_button(self, icon_text: str, tooltip: str, callback, *, checkable: bool = False) -> QPushButton:
         btn = QPushButton(icon_text)
@@ -401,18 +578,25 @@ class DarkControlPanel(QWidget):
                 f" font-size: 18px;"
                 f" font-weight: 800;"
                 f" padding: 0px;"
-                f" min-width: 44px;"
-                f" min-height: 44px;"
+                f" min-width: 40px;"
+                f" min-height: 35px;"
                 f" }}"
                 f"QPushButton:hover {{ border: 1px solid {UI_THEME['border_strong']}; }}"
                 f"QPushButton:pressed {{ background-color: {UI_THEME['surface']}; }}"
             )
 
-        self._btn_mirror_v = QPushButton("🔄")
+        self._btn_mirror_v = QPushButton()
         self._btn_mirror_v.setFixedSize(44, 44)
         self._btn_mirror_v.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_mirror_v.setToolTip("Mirror Vertical")
         self._btn_mirror_v.setStyleSheet(seg_style("left"))
+        # Render a rotated arrow icon (90°) for vertical mirror
+        try:
+            self._btn_mirror_v.setText("")
+            self._btn_mirror_v.setIcon(self._rotated_text_icon("↔️", 90, size=44, font_size=14))
+            self._btn_mirror_v.setIconSize(QSize(44, 44))
+        except Exception:
+            self._btn_mirror_v.setText("↔️")
         self._btn_mirror_v.clicked.connect(lambda: mirror_vertical(self.image_label, self.image_label.pixmap()))
 
         self._btn_mirror_h = QPushButton("↔️")
@@ -434,6 +618,11 @@ class DarkControlPanel(QWidget):
         row = QHBoxLayout(bar)
         row.setContentsMargins(10, 10, 10, 10)
         row.setSpacing(10)
+
+        # Keep the top action bar a fixed height so its background doesn't
+        # expand when the rest of the UI is hidden (compact mode).
+        bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        bar.setFixedHeight(64)
 
         self._btn_toggle_image = self._create_icon_button("🖼️", "Show/Hide Image", self.toggle_image_visibility, checkable=True)
         self._btn_toggle_crosshair = self._create_icon_button("🎯", "Show/Hide Crosshair", self.toggle_crosshair_visibility, checkable=True)
@@ -467,6 +656,7 @@ class DarkControlPanel(QWidget):
         header.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         header.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
         header.setCursor(Qt.CursorShape.PointingHandCursor)
+        header.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         header.setStyleSheet(
             f"QToolButton {{ background: transparent; border: none; color: {UI_THEME['text']}; font-weight: 800; font-size: 12px; padding: 4px 2px; }}"
             f"QToolButton:hover {{ color: {UI_THEME['text']}; }}"
@@ -481,6 +671,12 @@ class DarkControlPanel(QWidget):
         header.toggled.connect(on_toggle)
         layout.addWidget(header)
         layout.addWidget(content)
+
+        # Expose header for callers that want to update the title.
+        try:
+            setattr(wrapper, "_header_btn", header)
+        except Exception:
+            pass
         return wrapper
 
     def _create_opacity_accordion(self) -> QFrame:
@@ -559,13 +755,57 @@ class DarkControlPanel(QWidget):
         window_layout.addWidget(self.window_opacity_value)
         layout.addWidget(window_row)
 
+        # Colorblindness mode (UI selector; persisted for future use).
+        mode_row = QFrame()
+        mode_row.setStyleSheet(
+            f"QFrame {{ background-color: {UI_THEME['surface2']}; border-radius: 12px; border: 1px solid {UI_THEME['border']}; }}"
+        )
+        mode_layout = QHBoxLayout(mode_row)
+        mode_layout.setContentsMargins(12, 10, 12, 10)
+        mode_layout.setSpacing(10)
+        mode_label = QLabel("Colorblind Mode")
+        mode_label.setStyleSheet(f"color: {UI_THEME['muted']}; font-size: 11px; font-weight: 700;")
+        mode_layout.addWidget(mode_label)
+
+        self.colorblind_mode_combo = QComboBox()
+        self.colorblind_mode_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.colorblind_mode_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.colorblind_mode_combo.setStyleSheet(
+            f"QComboBox {{ background-color: {UI_THEME['surface']}; color: {UI_THEME['text']}; border: 1px solid {UI_THEME['border']}; border-radius: 10px; padding: 6px 10px; font-size: 11px; font-weight: 800; }}"
+            f"QComboBox:hover {{ border: 1px solid {UI_THEME['border_strong']}; }}"
+            f"QComboBox::drop-down {{ border: none; width: 18px; }}"
+            f"QComboBox QAbstractItemView {{ background-color: {UI_THEME['surface']}; color: {UI_THEME['text']}; border: 1px solid {UI_THEME['border']}; selection-background-color: {UI_THEME['accent']}; }}"
+        )
+        self.colorblind_mode_combo.addItem("Default", "default")
+        self.colorblind_mode_combo.addItem("Protanopia", "protanopia")
+        self.colorblind_mode_combo.addItem("Deuteranopia", "deuteranopia")
+        self.colorblind_mode_combo.addItem("Tritanopia", "tritanopia")
+        self.colorblind_mode_combo.addItem("Achromatopsia", "achromatopsia")
+        self.colorblind_mode_combo.currentIndexChanged.connect(
+            lambda _: self._persist_colorblind_mode(self.colorblind_mode_combo.currentData())
+        )
+        mode_layout.addWidget(self.colorblind_mode_combo, 1)
+        layout.addWidget(mode_row)
+
         # Apply persisted window opacity now that controls exist.
         try:
             self._apply_window_opacity_from_disk()
         except Exception:
             pass
 
-        return self._create_accordion("Opacity", content, expanded=False)
+        # Apply persisted colorblind mode now that the combo exists.
+        try:
+            self._apply_colorblind_mode_from_disk()
+        except Exception:
+            pass
+
+        wrapper = self._create_accordion("Opacity", content, expanded=False)
+        try:
+            self._opacity_accordion_header = getattr(wrapper, "_header_btn", None)
+            self._update_opacity_accordion_title()
+        except Exception:
+            pass
+        return wrapper
 
     def _sync_action_bar_state(self) -> None:
         try:
@@ -786,6 +1026,24 @@ class DarkControlPanel(QWidget):
             """
         )
         self.crosshair_preset_combo.currentTextChanged.connect(self._on_crosshair_preset_selected)
+
+        # Instrument combo popup to log show/hide events for debugging teleport
+        try:
+            orig_show = self.crosshair_preset_combo.showPopup
+            def _logged_show():
+                try:
+                    log_path = Path(__file__).resolve().with_name("move_debug.log")
+                except Exception:
+                    log_path = Path("move_debug.log")
+                with open(log_path, "a", encoding="utf-8") as fh:
+                    fh.write(f"\n--- Combo showPopup at {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+                    for line in traceback.format_stack():
+                        fh.write(line)
+                    fh.write("--- END ---\n")
+                return orig_show()
+            self.crosshair_preset_combo.showPopup = _logged_show
+        except Exception:
+            pass
 
         preset_layout.setAlignment(preset_label, Qt.AlignmentFlag.AlignVCenter)
         preset_layout.setAlignment(self.crosshair_preset_combo, Qt.AlignmentFlag.AlignVCenter)
@@ -1223,6 +1481,20 @@ class DarkControlPanel(QWidget):
     def _refresh_crosshair_presets_ui(self):
         """Refresh the preset/profile dropdown from persisted settings."""
         try:
+            try:
+                log_path = Path(__file__).resolve().with_name("move_debug.log")
+            except Exception:
+                log_path = Path("move_debug.log")
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(f"\n--- Refreshing presets at {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+        except Exception:
+            pass
+            # Preserve panel position to avoid visual jumps when repopulating
+            # combo contents (some platforms may adjust window stacking/geometry).
+            try:
+                _preserve_pos = self.pos()
+            except Exception:
+                _preserve_pos = None
             settings = load_settings_from_disk()
             presets = getattr(settings, "presets", {})
             names = list(presets.keys()) if isinstance(presets, dict) else []
@@ -1247,6 +1519,11 @@ class DarkControlPanel(QWidget):
                 if idx >= 0:
                     combo.setCurrentIndex(idx)
                 combo.blockSignals(False)
+            try:
+                if _preserve_pos is not None:
+                    self.move(_preserve_pos)
+            except Exception:
+                pass
         except Exception:
             try:
                 if self.crosshair_preset_combo is not None:
@@ -1261,8 +1538,20 @@ class DarkControlPanel(QWidget):
         preset_name = (preset_name or "").strip()
         if not preset_name:
             return
-
         try:
+            try:
+                log_path = Path(__file__).resolve().with_name("move_debug.log")
+            except Exception:
+                log_path = Path("move_debug.log")
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(f"\n--- Preset selected: {preset_name} at {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+        except Exception:
+            pass
+        try:
+            try:
+                _preserve_pos = self.pos()
+            except Exception:
+                _preserve_pos = None
             settings = load_settings_from_disk()
             presets = getattr(settings, "presets", {})
             if not isinstance(presets, dict) or preset_name not in presets:
@@ -1284,7 +1573,17 @@ class DarkControlPanel(QWidget):
             if self.crosshair_dialog is not None:
                 self.crosshair_dialog.settings = settings
                 self.crosshair_dialog.sync_with_label()
+            try:
+                if _preserve_pos is not None:
+                    self.move(_preserve_pos)
+            except Exception:
+                pass
         except Exception:
+            try:
+                if _preserve_pos is not None:
+                    self.move(_preserve_pos)
+            except Exception:
+                pass
             return
     
     def _add_opacity_controls(self, layout):
@@ -1580,8 +1879,12 @@ class DarkControlPanel(QWidget):
         if not self.image_list:
             return
         self.current_image_index = (self.current_image_index + 1) % len(self.image_list)
-        pix = QPixmap(self.image_list[self.current_image_index])
-        self.image_label.setPixmap(pix)
+        path = self.image_list[self.current_image_index]
+        try:
+            set_label_image_from_path(self.image_label, path)
+        except Exception:
+            pix = QPixmap(path)
+            self.image_label.setPixmap(pix)
     
     def open_image_manager(self):
         """Open the image manager dialog."""
@@ -1635,13 +1938,32 @@ class DarkControlPanel(QWidget):
     
     def toggle_panel(self):
         """Toggle the control panel visibility."""
+        try:
+            try:
+                log_path = Path(__file__).resolve().with_name("move_debug.log")
+            except Exception:
+                log_path = Path("move_debug.log")
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(f"\n--- toggle_panel called at {time.strftime('%Y-%m-%d %H:%M:%S')} (is_visible={self.is_visible}) ---\n")
+        except Exception:
+            pass
         if self.is_visible:
+            try:
+                self._last_panel_pos = self.pos()
+            except Exception:
+                pass
             self.hide()
             self.is_visible = False
         else:
-            # Position near top-right corner
-            screen = QApplication.primaryScreen().geometry()
-            self.move(screen.width() - self.width() - 20, 20)
+            # Preserve last position to avoid shifting when reopening.
+            try:
+                if self._last_panel_pos is not None:
+                    self.move(self._last_panel_pos)
+                else:
+                    screen = QApplication.primaryScreen().geometry()
+                    self.move(screen.width() - self.width() - 20, 20)
+            except Exception:
+                pass
             self.show()
             self.is_visible = True
     
@@ -1657,7 +1979,37 @@ class DarkControlPanel(QWidget):
                 event.accept()
                 return
 
-            self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            # Drag only from the title bar (prevents accidental moves while
+            # interacting with sliders/combos which can feel like "teleporting").
+            try:
+                if self._title_bar is None:
+                    return
+                local = event.position().toPoint()
+                # Allow dragging from any non-interactive area. If the clicked
+                # widget (or any of its parents) is an interactive control
+                # (buttons, sliders, combo boxes, scrollbars, list views,
+                # size grips), do not start a drag — otherwise allow it.
+                child = self.childAt(local)
+                if child is not None:
+                    widget = child
+                    while widget is not None:
+                        if isinstance(widget, (QPushButton, QToolButton, QSlider, QComboBox, QSizeGrip, QScrollBar, QAbstractItemView)):
+                            return
+                        widget = widget.parent()
+            except Exception:
+                return
+
+            # Defer starting a drag until the mouse has moved beyond the
+            # platform's drag threshold to avoid immediate 'teleport' caused
+            # by spurious move events on press.
+            try:
+                self._maybe_drag = True
+                self._press_pos = event.globalPosition().toPoint()
+                self._drag_offset = None
+            except Exception:
+                self._maybe_drag = False
+                self._press_pos = None
+                self._drag_offset = None
             event.accept()
     
     def mouseMoveEvent(self, event):
@@ -1692,9 +2044,21 @@ class DarkControlPanel(QWidget):
             edges = self._hit_test_edges(event.position())
             self.setCursor(self._cursor_for_edges(edges))
 
-        if event.buttons() == Qt.MouseButton.LeftButton and self.drag_position is not None:
-            self.move(event.globalPosition().toPoint() - self.drag_position)
-            event.accept()
+        if event.buttons() == Qt.MouseButton.LeftButton:
+            # Only begin moving after the user has moved past the drag start
+            # threshold. This prevents accidental instant-reposition on clicks.
+            try:
+                if self._maybe_drag and self._drag_offset is None and self._press_pos is not None:
+                    dist = event.globalPosition().toPoint() - self._press_pos
+                    thresh = QApplication.startDragDistance()
+                    if abs(dist.x()) >= thresh or abs(dist.y()) >= thresh:
+                        self._drag_offset = self._press_pos - self.frameGeometry().topLeft()
+                        self.drag_position = self._drag_offset
+                if self.drag_position is not None:
+                    self.move(event.globalPosition().toPoint() - self.drag_position)
+                    event.accept()
+            except Exception:
+                pass
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1702,4 +2066,13 @@ class DarkControlPanel(QWidget):
             self._resize_edges = set()
             self._resize_start_pos = None
             self._resize_start_geom = None
+            try:
+                self._last_panel_pos = self.pos()
+            except Exception:
+                pass
+            # Clear deferred-drag state
+            self._maybe_drag = False
+            self._press_pos = None
+            self._drag_offset = None
+            self.drag_position = None
         super().mouseReleaseEvent(event)
