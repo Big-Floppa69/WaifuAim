@@ -1,4 +1,6 @@
 {
   "window_opacity": 100,
-  "colorblind_mode": "default"
+  "colorblind_mode": "default",
+  "autostart_enabled": true,
+  "hotkeys_enabled": true
 }

@@ -12,6 +12,7 @@ from PyQt6.QtGui import QPixmap, QColor, QIcon
 from PyQt6.QtCore import Qt, QSize
 from image_editor import ImageEditorDialog
 from utils import UI_THEME
+import cv2
 
 
 class ImageManagerDialog(QWidget):
@@ -82,7 +83,6 @@ class ImageManagerDialog(QWidget):
         return main_frame
     
     def _create_title_bar(self):
-        """Create the title bar with close button."""
         title_bar = QFrame()
         title_bar.setStyleSheet(
             "QFrame { background-color: "
@@ -143,7 +143,6 @@ class ImageManagerDialog(QWidget):
         content_frame.setStyleSheet("QFrame { background: transparent; }")
         content_layout = QVBoxLayout(content_frame)
         content_layout.setContentsMargins(20, 15, 20, 20)
-        content_layout.setSpacing(15)
         
         # Info label
         info_label = QLabel("Manage your crosshair images")
@@ -180,22 +179,15 @@ class ImageManagerDialog(QWidget):
         # Button container
         button_layout = QHBoxLayout()
         button_layout.setSpacing(10)
-        
-        # Add image button
-        add_btn = self._create_button("➕ Add Image", role="neutral")
+        add_btn = self._create_button("➕ Add Art", role="neutral")
         add_btn.clicked.connect(self.add_image)
         button_layout.addWidget(add_btn)
-        
-        # Edit image button
         edit_btn = self._create_button("✏️ Edit", role="neutral")
         edit_btn.clicked.connect(self.edit_image)
         button_layout.addWidget(edit_btn)
-        
-        # Remove image button
         remove_btn = self._create_button("🗑️ Remove", role="danger")
         remove_btn.clicked.connect(self.remove_image)
         button_layout.addWidget(remove_btn)
-        
         content_layout.addLayout(button_layout)
         
         # Refresh button
@@ -204,7 +196,7 @@ class ImageManagerDialog(QWidget):
         content_layout.addWidget(refresh_btn)
         
         # Info text
-        info_text = QLabel("Supported formats: PNG, JPG, JPEG, WEBP")
+        info_text = QLabel("Supported formats: PNG, JPG, JPEG, WEBP, GIF, MP4, AVI, MOV, WEBM")
         info_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
         info_text.setStyleSheet("""
             QLabel {
@@ -304,7 +296,7 @@ class ImageManagerDialog(QWidget):
         """Open file dialog to add a new image."""
         file_dialog = QFileDialog(self)
         file_dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)
-        file_dialog.setNameFilter("Images (*.png *.jpg *.jpeg *.webp)")
+        file_dialog.setNameFilter("Art Files (*.png *.jpg *.jpeg *.webp *.gif *.mp4 *.avi *.mov *.webm)")
         
         if file_dialog.exec():
             files = file_dialog.selectedFiles()
