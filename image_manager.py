@@ -8,11 +8,11 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QListWidget, QListWidgetItem, QFileDialog, 
                              QLabel, QFrame, QGraphicsDropShadowEffect, 
                              QMessageBox, QApplication)
-from PyQt6.QtGui import QPixmap, QColor, QIcon
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtGui import QPixmap, QColor, QIcon, QPainter, QPen
+from PyQt6.QtCore import Qt, QSize, QUrl, QPoint
+from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from image_editor import ImageEditorDialog
-from utils import UI_THEME
-import cv2
+from utils import UI_THEME, ART_EXTS, IMAGE_EXTS, is_video_path
 
 
 class ImageManagerDialog(QWidget):
@@ -24,6 +24,12 @@ class ImageManagerDialog(QWidget):
         self.images_folder = os.path.abspath(images_folder)
         self.drag_position = None
         self.image_editor = None
+        self._thumb_player = None
+        self._thumb_sink = None
+        self._thumb_audio = None
+        self._thumb_queue = []  # list[tuple[QListWidgetItem,str]]
+        self._thumb_current = None
+        self._thumb_timer = None
         self.init_ui()
         self.load_images()
     
@@ -97,7 +103,7 @@ class ImageManagerDialog(QWidget):
         title_bar_layout.setSpacing(5)
         
         # Title
-        title = QLabel("🖼️ Image Manager")
+        title = QLabel("🎨 Art Manager")
         title.setStyleSheet(
             "QLabel { color: "
             + UI_THEME["text"]
@@ -145,7 +151,7 @@ class ImageManagerDialog(QWidget):
         content_layout.setContentsMargins(20, 15, 20, 20)
         
         # Info label
-        info_label = QLabel("Manage your crosshair images")
+        info_label = QLabel("Manage your crosshair art (images + videos)")
         info_label.setStyleSheet(
             "QLabel { color: "
             + UI_THEME["muted"]
@@ -196,7 +202,7 @@ class ImageManagerDialog(QWidget):
         content_layout.addWidget(refresh_btn)
         
         # Info text
-        info_text = QLabel("Supported formats: PNG, JPG, JPEG, WEBP, GIF, MP4, AVI, MOV, WEBM")
+        info_text = QLabel("Supported formats: PNG, JPG, JPEG, WEBP, GIF, BMP, MP4, AVI, MOV, WEBM, MKV, M4V")
         info_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
         info_text.setStyleSheet("""
             QLabel {
@@ -262,7 +268,7 @@ class ImageManagerDialog(QWidget):
         self.move(x, y)
     
     def load_images(self):
-        """Load and display images from the images folder."""
+        """Load and display art from the display_images folder."""
         self.image_list.clear()
         
         # Ensure folder exists
@@ -271,32 +277,199 @@ class ImageManagerDialog(QWidget):
             os.makedirs(abs_folder_path)
             return
         
-        # Load images
-        exts = ('.png', '.jpg', '.jpeg', '.webp')
+        def _video_icon() -> QIcon:
+            pm = QPixmap(48, 48)
+            pm.fill(Qt.GlobalColor.transparent)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setPen(QPen(QColor(UI_THEME["border_strong"]), 2))
+            p.drawRoundedRect(4, 8, 40, 30, 6, 6)
+            p.setBrush(QColor(UI_THEME["accent"]))
+            pts = [
+                (20, 16),
+                (20, 32),
+                (34, 24),
+            ]
+            try:
+                from PyQt6.QtCore import QPoint
+                from PyQt6.QtGui import QPolygon
+                poly = QPolygon([QPoint(x, y) for x, y in pts])
+                p.drawPolygon(poly)
+            except Exception:
+                # Fallback triangle.
+                p.drawPolygon(
+                    QPoint(20, 16),
+                    QPoint(20, 32),
+                    QPoint(34, 24),
+                )
+            p.end()
+            return QIcon(pm)
+
+        vid_icon = _video_icon()
+
+        # Stop any in-flight thumbnail generation.
+        self._stop_thumbnailer()
+        self._thumb_queue = []
+        self._thumb_current = None
+
         for filename in sorted(os.listdir(self.images_folder)):
-            if filename.lower().endswith(exts):
-                file_path = os.path.join(self.images_folder, filename)
-                item = QListWidgetItem(filename)
-                
-                # Try to load thumbnail
-                try:
+            if not filename.lower().endswith(ART_EXTS):
+                continue
+            file_path = os.path.join(self.images_folder, filename)
+            item = QListWidgetItem(filename)
+
+            try:
+                if filename.lower().endswith(IMAGE_EXTS):
                     pixmap = QPixmap(file_path)
                     if not pixmap.isNull():
-                        # Create thumbnail
-                        scaled_pixmap = pixmap.scaled(48, 48, 
-                                                      Qt.AspectRatioMode.KeepAspectRatio,
-                                                      Qt.TransformationMode.SmoothTransformation)
+                        scaled_pixmap = pixmap.scaled(
+                            48,
+                            48,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
                         item.setIcon(QIcon(scaled_pixmap))
+                else:
+                    item.setIcon(vid_icon)
+                    # Queue for async first-frame thumbnail extraction.
+                    self._thumb_queue.append((item, file_path))
+            except Exception:
+                pass
+
+            self.image_list.addItem(item)
+
+        # Kick off thumbnail generation after list is populated.
+        self._start_thumbnailer()
+
+    def _start_thumbnailer(self) -> None:
+        if not self._thumb_queue:
+            return
+
+        try:
+            if self._thumb_timer is None:
+                from PyQt6.QtCore import QTimer
+                self._thumb_timer = QTimer(self)
+                self._thumb_timer.setSingleShot(True)
+                self._thumb_timer.timeout.connect(self._process_next_thumbnail)
+            self._thumb_timer.start(10)
+        except Exception:
+            self._process_next_thumbnail()
+
+    def _stop_thumbnailer(self) -> None:
+        try:
+            if self._thumb_timer is not None:
+                self._thumb_timer.stop()
+        except Exception:
+            pass
+
+        try:
+            if self._thumb_sink is not None:
+                try:
+                    self._thumb_sink.videoFrameChanged.disconnect(self._on_thumb_frame)
                 except Exception:
                     pass
-                
-                self.image_list.addItem(item)
+            if self._thumb_player is not None:
+                try:
+                    self._thumb_player.mediaStatusChanged.disconnect(self._on_thumb_status)
+                except Exception:
+                    pass
+                try:
+                    self._thumb_player.stop()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        self._thumb_player = None
+        self._thumb_sink = None
+        self._thumb_audio = None
+
+    def _process_next_thumbnail(self) -> None:
+        if not self._thumb_queue:
+            self._thumb_current = None
+            self._stop_thumbnailer()
+            return
+
+        item, file_path = self._thumb_queue.pop(0)
+        self._thumb_current = (item, file_path)
+
+        try:
+            # Lazily create player/sink once.
+            if self._thumb_audio is None:
+                self._thumb_audio = QAudioOutput()
+                try:
+                    self._thumb_audio.setVolume(0.0)
+                except Exception:
+                    pass
+            if self._thumb_sink is None:
+                self._thumb_sink = QVideoSink()
+            if self._thumb_player is None:
+                self._thumb_player = QMediaPlayer()
+                self._thumb_player.setAudioOutput(self._thumb_audio)
+                self._thumb_player.setVideoOutput(self._thumb_sink)
+                self._thumb_sink.videoFrameChanged.connect(self._on_thumb_frame)
+                self._thumb_player.mediaStatusChanged.connect(self._on_thumb_status)
+
+            self._thumb_player.stop()
+            self._thumb_player.setSource(QUrl.fromLocalFile(os.path.abspath(file_path)))
+            # Play briefly to force frame delivery; we stop on first frame.
+            self._thumb_player.play()
+        except Exception:
+            self._thumb_current = None
+            self._start_thumbnailer()
+
+    def _on_thumb_status(self, status) -> None:
+        # If media is invalid or already ended without a frame, advance.
+        try:
+            if status in (
+                QMediaPlayer.MediaStatus.InvalidMedia,
+                QMediaPlayer.MediaStatus.NoMedia,
+            ):
+                self._thumb_current = None
+                self._start_thumbnailer()
+        except Exception:
+            pass
+
+    def _on_thumb_frame(self, frame) -> None:
+        cur = self._thumb_current
+        if not cur:
+            return
+
+        item, _file_path = cur
+        try:
+            img = frame.toImage()
+        except Exception:
+            img = None
+        if img is None or getattr(img, "isNull", lambda: True)():
+            return
+
+        try:
+            pm = QPixmap.fromImage(img)
+            pm = pm.scaled(
+                48,
+                48,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            item.setIcon(QIcon(pm))
+        except Exception:
+            pass
+
+        # Stop quickly and move on.
+        try:
+            if self._thumb_player is not None:
+                self._thumb_player.stop()
+        except Exception:
+            pass
+
+        self._thumb_current = None
+        self._start_thumbnailer()
     
     def add_image(self):
         """Open file dialog to add a new image."""
         file_dialog = QFileDialog(self)
         file_dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)
-        file_dialog.setNameFilter("Art Files (*.png *.jpg *.jpeg *.webp *.gif *.mp4 *.avi *.mov *.webm)")
+        file_dialog.setNameFilter("Art Files (*.png *.jpg *.jpeg *.webp *.gif *.bmp *.mp4 *.avi *.mov *.webm *.mkv *.m4v)")
         
         if file_dialog.exec():
             files = file_dialog.selectedFiles()
@@ -348,13 +521,13 @@ class ImageManagerDialog(QWidget):
             if files:
                 reply = QMessageBox.question(
                     self,
-                    'Edit Image',
-                    'Would you like to edit the added image(s)?',
+                    'Edit Art',
+                    'Would you like to edit the added item(s)?',
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
                 )
                 
                 if reply == QMessageBox.StandardButton.Yes:
-                    # Edit the first added image
+                    # Edit the first added item
                     first_file = files[0]
                     filename = os.path.basename(first_file)
                     dest_path = os.path.join(self.images_folder, filename)
@@ -362,8 +535,29 @@ class ImageManagerDialog(QWidget):
                     if self.image_editor is None:
                         self.image_editor = ImageEditorDialog(dest_path)
                         self.image_editor.image_saved.connect(self.on_image_saved)
+                        try:
+                            self.image_editor.asset_renamed.connect(self.on_asset_renamed)
+                        except Exception:
+                            pass
+                        try:
+                            self.image_editor.asset_deleted.connect(self.on_asset_deleted)
+                        except Exception:
+                            pass
                     else:
-                        self.image_editor.load_image(dest_path)
+                        try:
+                            self.image_editor.close()
+                        except Exception:
+                            pass
+                        self.image_editor = ImageEditorDialog(dest_path)
+                        self.image_editor.image_saved.connect(self.on_image_saved)
+                        try:
+                            self.image_editor.asset_renamed.connect(self.on_asset_renamed)
+                        except Exception:
+                            pass
+                        try:
+                            self.image_editor.asset_deleted.connect(self.on_asset_deleted)
+                        except Exception:
+                            pass
                     
                     self.image_editor.show()
                     self.image_editor.raise_()
@@ -376,19 +570,42 @@ class ImageManagerDialog(QWidget):
             QMessageBox.information(
                 self,
                 'No Selection',
-                'Please select an image to edit.'
+                'Please select an item to edit.'
             )
             return
         
         filename = current_item.text()
         file_path = os.path.join(self.images_folder, filename)
         
-        # Create or show image editor
+        # Create or show image editor. The editor will auto-load a matching
+        # sidecar project (e.g., X.zzc.json) if it exists, so reopening a saved
+        # composite stays editable (layers), not a fused MP4.
         if self.image_editor is None:
             self.image_editor = ImageEditorDialog(file_path)
             self.image_editor.image_saved.connect(self.on_image_saved)
+            try:
+                self.image_editor.asset_renamed.connect(self.on_asset_renamed)
+            except Exception:
+                pass
+            try:
+                self.image_editor.asset_deleted.connect(self.on_asset_deleted)
+            except Exception:
+                pass
         else:
-            self.image_editor.load_image(file_path)
+            try:
+                self.image_editor.close()
+            except Exception:
+                pass
+            self.image_editor = ImageEditorDialog(file_path)
+            self.image_editor.image_saved.connect(self.on_image_saved)
+            try:
+                self.image_editor.asset_renamed.connect(self.on_asset_renamed)
+            except Exception:
+                pass
+            try:
+                self.image_editor.asset_deleted.connect(self.on_asset_deleted)
+            except Exception:
+                pass
         
         self.image_editor.show()
         self.image_editor.raise_()
@@ -396,6 +613,19 @@ class ImageManagerDialog(QWidget):
     
     def on_image_saved(self, file_path):
         """Handle image saved signal from editor."""
+        self.load_images()
+
+    def on_asset_renamed(self, old_path: str, new_path: str) -> None:
+        self.load_images()
+        try:
+            new_name = os.path.basename(new_path)
+            matches = self.image_list.findItems(new_name, Qt.MatchFlag.MatchExactly)
+            if matches:
+                self.image_list.setCurrentItem(matches[0])
+        except Exception:
+            pass
+
+    def on_asset_deleted(self, deleted_path: str) -> None:
         self.load_images()
     
     def remove_image(self):
@@ -405,7 +635,7 @@ class ImageManagerDialog(QWidget):
             QMessageBox.information(
                 self,
                 'No Selection',
-                'Please select an image to remove.'
+                'Please select an item to remove.'
             )
             return
         
@@ -430,6 +660,13 @@ class ImageManagerDialog(QWidget):
                     'Error',
                     f'Failed to delete {filename}: {str(e)}'
                 )
+
+    def closeEvent(self, event):  # type: ignore[override]
+        try:
+            self._stop_thumbnailer()
+        except Exception:
+            pass
+        return super().closeEvent(event)
     
     def mousePressEvent(self, event):
         """Handle mouse press events for dragging."""

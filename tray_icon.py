@@ -74,6 +74,17 @@ def _create_tray_menu(label, control_panel, controller, app, tray_icon):
             if hasattr(control_panel, "crosshair_label"):
                 control_panel.crosshair_label.show()
 
+        # Keep control panel toggle buttons in sync with actual visibility.
+        try:
+            if hasattr(control_panel, "_update_image_toggle_text"):
+                control_panel._update_image_toggle_text()
+            if hasattr(control_panel, "_update_crosshair_toggle_text"):
+                control_panel._update_crosshair_toggle_text()
+            if hasattr(control_panel, "_sync_action_bar_state"):
+                control_panel._sync_action_bar_state()
+        except Exception:
+            pass
+
     # 🔥 КЛЮЧЕВО: применяем состояние СРАЗУ при создании tray
     apply_autostart_state(settings.get("autostart_enabled", False))
 

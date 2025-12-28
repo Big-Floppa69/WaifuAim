@@ -13,7 +13,7 @@ from control_panel import DarkControlPanel
 from tray_icon import create_tray_icon
 from hotkeys import setup_hotkeys
 from standard_crosshair import initialize_standard_crosshair
-from utils import set_label_image_from_path
+from utils import read_app_settings, set_label_art_from_path
 
 
 def create_crosshair_label(app, image_path="display_images/astra_yao.png"):
@@ -34,7 +34,7 @@ def create_crosshair_label(app, image_path="display_images/astra_yao.png"):
     # pipeline so the persisted mode affects the displayed image.
     if image_path:
         try:
-            set_label_image_from_path(label, image_path)
+            set_label_art_from_path(label, image_path)
         except Exception:
             label.setPixmap(QPixmap(image_path))
     label.setWindowFlags(
@@ -54,13 +54,31 @@ def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # Important for tray applications
 
+    settings = {}
+    try:
+        settings = read_app_settings()
+    except Exception:
+        settings = {}
+    autostart_enabled = bool(settings.get("autostart_enabled", False))
+
     # Create crosshair label
     image_label = create_crosshair_label(app)
-    image_label.show()
+    if not autostart_enabled:
+        image_label.show()
 
     # Create separate label for generated crosshair overlay and load saved settings
     crosshair_label = create_crosshair_label(app, image_path=None)
     initialize_standard_crosshair(crosshair_label)
+    if autostart_enabled:
+        try:
+            crosshair_label.hide()
+        except Exception:
+            pass
+    else:
+        try:
+            crosshair_label.show()
+        except Exception:
+            pass
 
     # Ensure GUI is initialized
     app.processEvents()

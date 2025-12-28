@@ -29,7 +29,7 @@ from utils import (
     mirror_vertical,
     mirror_horizontal,
     get_art_list,
-    set_label_image_from_path,
+    set_label_art_from_path,
     refresh_label_pixmap_for_colorblind_mode,
     transparent,
     UI_THEME,
@@ -627,7 +627,7 @@ class DarkControlPanel(QWidget):
         self._btn_toggle_image = self._create_icon_button("🖼️", "Show/Hide Image", self.toggle_image_visibility, checkable=True)
         self._btn_toggle_crosshair = self._create_icon_button("🎯", "Show/Hide Crosshair", self.toggle_crosshair_visibility, checkable=True)
         self._btn_next_image = self._create_icon_button("⏭️", "Next Image", self.switch_image)
-        self._btn_manage_images = self._create_icon_button("📁", "Manage Images", self.open_image_manager)
+        self._btn_manage_images = self._create_icon_button("🎨", "Art Manager", self.open_image_manager)
         self._btn_hotkeys = self._create_icon_button("⌨️", "Customize Hotkeys", self.open_hotkey_manager)
         mirror = self._create_mirror_split_control()
 
@@ -1082,10 +1082,10 @@ class DarkControlPanel(QWidget):
         self._register_collapsible_button(switch_btn, "🖼️ Next Image")
         content_layout.addWidget(switch_btn)
         
-        # Manage images button
-        manage_btn = self.create_button("📁 Manage Images", role="neutral")
+        # Art manager button
+        manage_btn = self.create_button("🎨 Art Manager", role="neutral")
         manage_btn.clicked.connect(self.open_image_manager)
-        self._register_collapsible_button(manage_btn, "📁 Manage Images")
+        self._register_collapsible_button(manage_btn, "🎨 Art Manager")
         content_layout.addWidget(manage_btn)
         
         # Hotkey manager button
@@ -1307,7 +1307,7 @@ class DarkControlPanel(QWidget):
             sidebar_layout.addWidget(btn)
 
         sidebar_layout.addWidget(_mk_sidebar_btn("🖼️ Next Image", self.switch_image))
-        sidebar_layout.addWidget(_mk_sidebar_btn("📁 Manage Images", self.open_image_manager))
+        sidebar_layout.addWidget(_mk_sidebar_btn("🎨 Art Manager", self.open_image_manager))
         sidebar_layout.addWidget(_mk_sidebar_btn("⌨️ Customize Hotkeys", self.open_hotkey_manager))
         sidebar_layout.addStretch(1)
 
@@ -1881,7 +1881,7 @@ class DarkControlPanel(QWidget):
         self.current_image_index = (self.current_image_index + 1) % len(self.image_list)
         path = self.image_list[self.current_image_index]
         try:
-            set_label_image_from_path(self.image_label, path)
+            set_label_art_from_path(self.image_label, path)
         except Exception:
             pix = QPixmap(path)
             self.image_label.setPixmap(pix)

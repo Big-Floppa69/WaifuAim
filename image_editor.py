@@ -1,14 +1,45 @@
 """
 Image Editor Dialog with positioning tools.
 """
+from __future__ import annotations
+
 import os
+from dataclasses import dataclass
+from typing import Optional
+
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QLabel, QFrame, QGraphicsDropShadowEffect, 
                              QMessageBox, QApplication, QSlider, QFileDialog,
                              QGraphicsView, QGraphicsScene, QGraphicsPixmapItem)
-from PyQt6.QtGui import QPixmap, QColor, QPainter, QPen
-from PyQt6.QtCore import Qt, QRectF, pyqtSignal
+from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QPen
+from PyQt6.QtCore import Qt, QRectF, QUrl, pyqtSignal
+from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from utils import UI_THEME
+from utils import (
+    ART_EXTS,
+    is_video_path,
+)
+
+try:
+    import cv2  # type: ignore
+except Exception:  # pragma: no cover
+    cv2 = None
+
+try:
+    import numpy as np  # type: ignore
+except Exception:  # pragma: no cover
+    np = None
+
+
+@dataclass
+class _Layer:
+    item: QGraphicsPixmapItem
+    source_path: str
+    is_video: bool
+    player: Optional[QMediaPlayer] = None
+    sink: Optional[QVideoSink] = None
+    audio: Optional[QAudioOutput] = None
+    pending_center: Optional[tuple[float, float]] = None
 
 
 class ImageCanvas(QGraphicsView):
@@ -22,31 +53,49 @@ class ImageCanvas(QGraphicsView):
         # Canvas settings
         self.setStyleSheet(
             "QGraphicsView { background-color: "
-            + UI_THEME["bg2"]
+            + UI_THEME["surface2"]
             + "; border: 1px solid "
             + UI_THEME["border"]
             + "; border-radius: 12px; }"
         )
+        try:
+            self.setBackgroundBrush(QColor(0, 0, 0, 0))
+        except Exception:
+            pass
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         
-        # Image item
-        self.image_item = None
-        self.original_pixmap = None
-        self.zoom_level = 1.0
-        self.rotation_angle = 0
+        self.show_guides = True
         
         # Canvas size (1920x1080 for crosshair preview)
         self.canvas_width = 1920
         self.canvas_height = 1080
         self.setSceneRect(0, 0, self.canvas_width, self.canvas_height)
-        self.setFixedSize(800, 450)  # Display at ~40% scale
-        self.scale(800 / self.canvas_width, 450 / self.canvas_height)
+
+        # Let the canvas expand to fill the dialog; we scale to fit on resize.
+        self.setMinimumSize(720, 405)
+        self._fit_scene()
+
+    def resizeEvent(self, event):  # type: ignore[override]
+        super().resizeEvent(event)
+        self._fit_scene()
+
+    def _fit_scene(self) -> None:
+        try:
+            self.resetTransform()
+            self.fitInView(self.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        except Exception:
+            pass
         
     def drawBackground(self, painter, rect):
         """Draw background with center guides."""
         super().drawBackground(painter, rect)
+
+        if not bool(getattr(self, "show_guides", True)):
+            return
         
         # Draw center lines
         painter.setPen(QPen(QColor(UI_THEME["muted"]), 2, Qt.PenStyle.DashLine))
@@ -67,95 +116,68 @@ class ImageCanvas(QGraphicsView):
         painter.drawLine(int(center_x), int(center_y - crosshair_size), 
                         int(center_x), int(center_y + crosshair_size))
     
-    def set_image(self, pixmap):
-        """Set the image to display and center it."""
-        self.original_pixmap = pixmap
-        self.rotation_angle = 0
-        self.zoom_level = 1.0
-        self._update_image()
-    
-    def _update_image(self):
-        """Update the displayed image with current transformations."""
-        if self.original_pixmap is None:
-            return
-        
-        # Remove old image
-        if self.image_item:
-            self.scene.removeItem(self.image_item)
-        
-        # Apply transformations
-        pixmap = self.original_pixmap.scaled(
-            int(self.original_pixmap.width() * self.zoom_level),
-            int(self.original_pixmap.height() * self.zoom_level),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
-        
-        # Create new item
-        self.image_item = QGraphicsPixmapItem(pixmap)
-        self.image_item.setFlags(
+    def add_layer_pixmap(self, pixmap: QPixmap) -> QGraphicsPixmapItem:
+        item = QGraphicsPixmapItem(pixmap)
+        item.setFlags(
             QGraphicsPixmapItem.GraphicsItemFlag.ItemIsMovable |
             QGraphicsPixmapItem.GraphicsItemFlag.ItemIsSelectable
         )
-        
-        # Apply rotation
-        self.image_item.setTransformOriginPoint(pixmap.width() / 2, pixmap.height() / 2)
-        self.image_item.setRotation(self.rotation_angle)
-        
-        # Center the image
+        try:
+            item.setTransformOriginPoint(pixmap.width() / 2, pixmap.height() / 2)
+        except Exception:
+            pass
+
         center_x = self.canvas_width / 2 - pixmap.width() / 2
         center_y = self.canvas_height / 2 - pixmap.height() / 2
-        self.image_item.setPos(center_x, center_y)
-        
-        self.scene.addItem(self.image_item)
-    
-    def set_zoom(self, zoom):
-        """Set zoom level (0.1 to 3.0)."""
-        self.zoom_level = zoom
-        self._update_image()
-    
-    def set_rotation(self, angle):
-        """Set rotation angle."""
-        self.rotation_angle = angle
-        self._update_image()
-    
-    def get_final_image(self):
-        """Get the final positioned image as QPixmap."""
-        if not self.image_item:
-            return None
-        
-        # Create a transparent canvas
-        final_image = QPixmap(self.canvas_width, self.canvas_height)
-        final_image.fill(Qt.GlobalColor.transparent)
-        
-        # Paint the scene onto it
-        painter = QPainter(final_image)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        
-        # Only render the image item
-        self.scene.render(painter, QRectF(0, 0, self.canvas_width, self.canvas_height),
-                         QRectF(0, 0, self.canvas_width, self.canvas_height))
-        painter.end()
-        
-        return final_image
+        item.setPos(center_x, center_y)
+
+        self.scene.addItem(item)
+        return item
+
+    def render_final_pixmap(self, *, include_guides: bool = False) -> QPixmap:
+        prev = bool(getattr(self, "show_guides", True))
+        try:
+            self.show_guides = bool(include_guides)
+            out = QPixmap(self.canvas_width, self.canvas_height)
+            out.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(out)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            self.scene.render(
+                painter,
+                QRectF(0, 0, self.canvas_width, self.canvas_height),
+                QRectF(0, 0, self.canvas_width, self.canvas_height),
+            )
+            painter.end()
+            return out
+        finally:
+            self.show_guides = prev
 
 
 class ImageEditorDialog(QWidget):
     """Dialog for editing images with positioning tools."""
     
-    image_saved = pyqtSignal(str)  # Signal emitted when image is saved
+    image_saved = pyqtSignal(str)  # emitted when a new composite is saved
+    asset_renamed = pyqtSignal(str, str)  # old_path, new_path (source file)
+    asset_deleted = pyqtSignal(str)  # selected element removed (source path)
     
     def __init__(self, image_path=None, parent=None):
         super().__init__(parent)
-        self.image_path = image_path
+        self.image_path = None
         self.drag_position = None
-        self.current_pixmap = None
+        self._layers: list[_Layer] = []
+        self._updating_controls = False
         
         self.init_ui()
         
         if image_path and os.path.exists(image_path):
-            self.load_image(image_path)
+            # If this looks like a previously saved composite, load its project
+            # so the user can keep editing layers (not a single fused MP4/PNG).
+            project_path = self._project_path_for_output(str(image_path))
+            if project_path and os.path.exists(project_path):
+                self._load_project(project_path)
+            else:
+                self.add_art(image_path)
     
     def init_ui(self):
         """Initialize the user interface."""
@@ -187,7 +209,7 @@ class ImageEditorDialog(QWidget):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.addWidget(main_frame)
         
-        self.setFixedSize(900, 700)
+        self.setFixedSize(900, 740)
         self.center_on_screen()
     
     def _create_main_frame(self):
@@ -227,7 +249,7 @@ class ImageEditorDialog(QWidget):
         title_bar_layout.setSpacing(5)
         
         # Title
-        title = QLabel("✂️ Image Editor")
+        title = QLabel("✂️ Art Editor")
         title.setStyleSheet(
             "QLabel { color: "
             + UI_THEME["text"]
@@ -272,11 +294,16 @@ class ImageEditorDialog(QWidget):
         content_frame = QFrame()
         content_frame.setStyleSheet("QFrame { background: transparent; }")
         content_layout = QVBoxLayout(content_frame)
-        content_layout.setContentsMargins(20, 15, 20, 20)
-        content_layout.setSpacing(15)
+        # Tighter layout so the canvas nearly reaches the edges.
+        content_layout.setContentsMargins(10, 10, 10, 10)
+        content_layout.setSpacing(10)
         
         # Canvas
         self.canvas = ImageCanvas()
+        try:
+            self.canvas.scene.selectionChanged.connect(self._sync_controls_from_selection)
+        except Exception:
+            pass
         content_layout.addWidget(self.canvas)
         
         # Controls section
@@ -297,10 +324,10 @@ class ImageEditorDialog(QWidget):
             + UI_THEME["surface"]
             + "; border: 1px solid "
             + UI_THEME["border"]
-            + "; border-radius: 12px; padding: 15px; }"
+            + "; border-radius: 12px; padding: 10px; }"
         )
         controls_layout = QVBoxLayout(controls_frame)
-        controls_layout.setSpacing(12)
+        controls_layout.setSpacing(10)
         
         # Zoom control
         zoom_layout = QHBoxLayout()
@@ -310,8 +337,9 @@ class ImageEditorDialog(QWidget):
         
         self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
         self.zoom_slider.setMinimum(10)
-        self.zoom_slider.setMaximum(300)
+        self.zoom_slider.setMaximum(1000)
         self.zoom_slider.setValue(100)
+        self.zoom_slider.setFixedHeight(16)
         self.zoom_slider.setStyleSheet(self._get_slider_style())
         self.zoom_slider.valueChanged.connect(self.on_zoom_changed)
         zoom_layout.addWidget(self.zoom_slider)
@@ -332,8 +360,9 @@ class ImageEditorDialog(QWidget):
         
         self.rotation_slider = QSlider(Qt.Orientation.Horizontal)
         self.rotation_slider.setMinimum(0)
-        self.rotation_slider.setMaximum(359)
+        self.rotation_slider.setMaximum(360)
         self.rotation_slider.setValue(0)
+        self.rotation_slider.setFixedHeight(16)
         self.rotation_slider.setStyleSheet(self._get_slider_style())
         self.rotation_slider.valueChanged.connect(self.on_rotation_changed)
         rotation_layout.addWidget(self.rotation_slider)
@@ -345,6 +374,29 @@ class ImageEditorDialog(QWidget):
         rotation_layout.addWidget(self.rotation_value_label)
         
         controls_layout.addLayout(rotation_layout)
+
+        # Opacity control
+        opacity_layout = QHBoxLayout()
+        opacity_label = QLabel("Opacity:")
+        opacity_label.setStyleSheet("color: " + UI_THEME["muted"] + "; font-size: 12px;")
+        opacity_layout.addWidget(opacity_label)
+
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setMinimum(0)
+        self.opacity_slider.setMaximum(100)
+        self.opacity_slider.setValue(100)
+        self.opacity_slider.setFixedHeight(16)
+        self.opacity_slider.setStyleSheet(self._get_slider_style())
+        self.opacity_slider.valueChanged.connect(self.on_opacity_changed)
+        opacity_layout.addWidget(self.opacity_slider)
+
+        self.opacity_value_label = QLabel("100%")
+        self.opacity_value_label.setStyleSheet(
+            "color: " + UI_THEME["text"] + "; font-size: 12px; min-width: 45px;"
+        )
+        opacity_layout.addWidget(self.opacity_value_label)
+
+        controls_layout.addLayout(opacity_layout)
         
         return controls_frame
     
@@ -372,10 +424,20 @@ class ImageEditorDialog(QWidget):
         buttons_layout = QHBoxLayout()
         buttons_layout.setSpacing(10)
         
-        # Load image button
-        load_btn = self._create_button("📁 Load Image", role="neutral")
-        load_btn.clicked.connect(self.load_image_dialog)
+        # Load art button
+        load_btn = self._create_button("📁 Load Art", role="neutral")
+        load_btn.clicked.connect(self.load_art_dialog)
         buttons_layout.addWidget(load_btn)
+
+        # Rename button
+        rename_btn = self._create_button("✏️ Rename", role="neutral")
+        rename_btn.clicked.connect(self.rename_asset)
+        buttons_layout.addWidget(rename_btn)
+
+        # Delete button
+        delete_btn = self._create_button("🗑️ Delete", role="danger")
+        delete_btn.clicked.connect(self.delete_asset)
+        buttons_layout.addWidget(delete_btn)
         
         # Reset button
         reset_btn = self._create_button("🔄 Reset", role="neutral")
@@ -384,7 +446,7 @@ class ImageEditorDialog(QWidget):
         
         # Save button
         save_btn = self._create_button("💾 Save", role="primary")
-        save_btn.clicked.connect(self.save_image)
+        save_btn.clicked.connect(self.save_current)
         buttons_layout.addWidget(save_btn)
         
         return buttons_layout
@@ -414,7 +476,7 @@ class ImageEditorDialog(QWidget):
             + fg
             + "; border: 1px solid "
             + border
-            + "; border-radius: 10px; padding: 10px 16px; font-size: 12px; font-weight: 700; }"
+            + "; border-radius: 10px; padding: 8px 12px; font-size: 11px; font-weight: 700; }"
             "QPushButton:hover { border: 1px solid "
             + UI_THEME["border_strong"]
             + "; }"
@@ -440,78 +502,755 @@ class ImageEditorDialog(QWidget):
         y = (screen.height() - self.height()) // 2
         self.move(x, y)
     
-    def load_image_dialog(self):
-        """Open file dialog to load an image."""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Image",
-            "",
-            "Images (*.png *.jpg *.jpeg *.webp *.bmp)"
+    def load_art_dialog(self):
+        """Import one or more art files into display_images and add them as layers."""
+
+        file_dialog = QFileDialog(self)
+        file_dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)
+        file_dialog.setNameFilter(
+            "Art Files (*.png *.jpg *.jpeg *.webp *.gif *.bmp *.mp4 *.avi *.mov *.webm *.mkv *.m4v)"
         )
-        
-        if file_path:
-            self.load_image(file_path)
-    
-    def load_image(self, file_path):
-        """Load an image into the editor."""
+
+        if not file_dialog.exec():
+            return
+
+        files = file_dialog.selectedFiles() or []
+        if not files:
+            return
+
+        imported = self._import_art_files(files)
+        for p in imported:
+            self.add_art(p)
+
+    def add_art(self, file_path: str) -> None:
+        file_path = str(file_path or "").strip()
+        if not file_path or not os.path.exists(file_path):
+            return
+        if is_video_path(file_path):
+            self._add_video_layer(file_path)
+        else:
+            self._add_image_layer(file_path)
+
+        # Select the newest layer.
         try:
-            self.image_path = file_path
-            
-            # Load image as QPixmap
-            self.current_pixmap = QPixmap(file_path)
-            if self.current_pixmap.isNull():
+            if self._layers:
+                self.canvas.scene.clearSelection()
+                self._layers[-1].item.setSelected(True)
+        except Exception:
+            pass
+    
+    def _add_image_layer(self, file_path: str) -> None:
+        try:
+            pm = QPixmap(file_path)
+            if pm.isNull():
                 raise ValueError("Failed to load image")
-            
-            self.canvas.set_image(self.current_pixmap)
-            
+            item = self.canvas.add_layer_pixmap(pm)
+            self._layers.append(_Layer(item=item, source_path=file_path, is_video=False))
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to load image: {str(e)}")
+            QMessageBox.warning(self, "Error", f"Failed to add image: {str(e)}")
+
+    def _add_video_layer(self, file_path: str) -> None:
+        try:
+            # Placeholder pixmap until the first frame arrives.
+            pm = QPixmap(4, 4)
+            pm.fill(Qt.GlobalColor.transparent)
+            item = self.canvas.add_layer_pixmap(pm)
+
+            audio = QAudioOutput()
+            try:
+                audio.setVolume(0.0)
+            except Exception:
+                pass
+            sink = QVideoSink()
+            player = QMediaPlayer()
+            player.setAudioOutput(audio)
+            player.setVideoOutput(sink)
+
+            layer = _Layer(item=item, source_path=file_path, is_video=True, player=player, sink=sink, audio=audio)
+            self._layers.append(layer)
+
+            def on_status(status) -> None:
+                try:
+                    if status == QMediaPlayer.MediaStatus.EndOfMedia and layer.player is not None:
+                        layer.player.setPosition(0)
+                        layer.player.play()
+                except Exception:
+                    pass
+
+            def on_frame(frame) -> None:
+                try:
+                    img = frame.toImage()
+                except Exception:
+                    img = None
+                if img is None or getattr(img, "isNull", lambda: True)():
+                    return
+                try:
+                    pm2 = QPixmap.fromImage(img)
+                    layer.item.setPixmap(pm2)
+                    layer.item.setTransformOriginPoint(pm2.width() / 2, pm2.height() / 2)
+
+                    # If we have a pending center (from project load), apply once
+                    # now that we know the real frame size.
+                    if layer.pending_center is not None:
+                        try:
+                            cx, cy = layer.pending_center
+                            layer.item.setPos(float(cx) - pm2.width() / 2, float(cy) - pm2.height() / 2)
+                        except Exception:
+                            pass
+                        layer.pending_center = None
+                except Exception:
+                    pass
+
+            sink.videoFrameChanged.connect(on_frame)
+            player.mediaStatusChanged.connect(on_status)
+
+            player.setSource(QUrl.fromLocalFile(os.path.abspath(file_path)))
+            player.play()
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to add video: {str(e)}")
     
     def reset_image(self):
-        """Reset image to original state."""
-        if self.image_path and os.path.exists(self.image_path):
-            self.load_image(self.image_path)
-            self.zoom_slider.setValue(100)
-            self.rotation_slider.setValue(0)
-    
-    def save_image(self):
-        """Save the edited image."""
-        if self.canvas.image_item is None:
-            QMessageBox.information(self, "No Image", "No image to save.")
+        """Reset selected layers (or all layers if none selected)."""
+        items = list(self.canvas.scene.selectedItems())
+        targets = set(items) if items else set(l.item for l in self._layers)
+        if not targets:
             return
-        
-        # Get save location
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Image",
-            "display_images/edited_image.png",
-            "PNG Image (*.png)"
-        )
-        
-        if file_path:
+
+        cx = self.canvas.canvas_width / 2
+        cy = self.canvas.canvas_height / 2
+        for it in targets:
             try:
-                # Get final image from canvas
-                final_pixmap = self.canvas.get_final_image()
-                
-                # Save
-                final_pixmap.save(file_path, "PNG")
-                
-                QMessageBox.information(self, "Success", f"Image saved to:\n{file_path}")
-                self.image_saved.emit(file_path)
-                
-            except Exception as e:
-                QMessageBox.warning(self, "Error", f"Failed to save image: {str(e)}")
+                it.setScale(1.0)
+                it.setRotation(0.0)
+                it.setOpacity(1.0)
+                pm = it.pixmap()
+                w = pm.width() if pm is not None else 0
+                h = pm.height() if pm is not None else 0
+                it.setPos(cx - w / 2, cy - h / 2)
+            except Exception:
+                pass
+
+        self._sync_controls_from_selection()
+    
+    def save_current(self):
+        """Export a new composite file.
+
+        - If only images: saves PNG.
+        - If any videos: saves MP4.
+        """
+
+        if not self._layers:
+            QMessageBox.information(self, "No Content", "Add images/videos first.")
+            return
+
+        has_video = any(l.is_video for l in self._layers)
+        if has_video and (cv2 is None or np is None):
+            QMessageBox.warning(
+                self,
+                "Missing Dependency",
+                "MP4 export requires opencv-python (and numpy). Install it and restart the app."
+            )
+            return
+
+        if has_video:
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Video",
+                "display_images/edited_composite.mp4",
+                "MP4 Video (*.mp4)",
+            )
+        else:
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Image",
+                "display_images/edited_composite.png",
+                "PNG Image (*.png)",
+            )
+
+        if not file_path:
+            return
+
+        try:
+            if has_video:
+                self._export_composite_mp4(file_path)
+            else:
+                pm = self.canvas.render_final_pixmap(include_guides=False)
+                pm.save(file_path, "PNG")
+
+            # Persist a sidecar project so reopening stays editable.
+            try:
+                project_path = self._project_path_for_output(file_path)
+                if project_path:
+                    self._save_project(project_path, output_path=file_path)
+            except Exception:
+                pass
+
+            QMessageBox.information(self, "Saved", f"Saved to:\n{file_path}")
+            self.image_saved.emit(file_path)
+            try:
+                self.close()
+            except Exception:
+                pass
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to save: {str(e)}")
+
+    def _export_composite_mp4(self, output_path: str) -> None:
+        # Use OpenCV to step frames for each source video; render the Qt scene
+        # to a frame image so rotations/scales are applied correctly.
+        assert cv2 is not None and np is not None
+
+        video_layers = [l for l in self._layers if l.is_video]
+        # Stop Qt playback to avoid Windows file locks and racing updates.
+        for l in video_layers:
+            try:
+                self._stop_layer_video(l)
+            except Exception:
+                pass
+
+        captures = []
+        for l in video_layers:
+            cap = cv2.VideoCapture(l.source_path)
+            captures.append(cap)
+
+        def _cap_fps(cap) -> float:
+            try:
+                fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+                return fps if fps > 0 else 0.0
+            except Exception:
+                return 0.0
+
+        def _cap_frames(cap) -> int:
+            try:
+                n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                return n if n > 0 else 0
+            except Exception:
+                return 0
+
+        out_fps = 0.0
+        out_frames = 0
+        for cap in captures:
+            out_fps = max(out_fps, _cap_fps(cap))
+            out_frames = max(out_frames, _cap_frames(cap))
+
+        if out_fps <= 0:
+            out_fps = 30.0
+        if out_frames <= 0:
+            out_frames = int(out_fps * 5)
+
+        w = int(self.canvas.canvas_width)
+        h = int(self.canvas.canvas_height)
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(output_path, fourcc, float(out_fps), (w, h))
+
+        try:
+            for _i in range(out_frames):
+                # Update each video layer pixmap.
+                for layer, cap in zip(video_layers, captures):
+                    ok, frame = cap.read()
+                    if not ok or frame is None:
+                        try:
+                            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        except Exception:
+                            pass
+                        ok, frame = cap.read()
+                    if not ok or frame is None:
+                        continue
+
+                    # OpenCV gives BGR.
+                    try:
+                        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        qimg = QImage(rgb.data, rgb.shape[1], rgb.shape[0], rgb.strides[0], QImage.Format.Format_RGB888)
+                        pm = QPixmap.fromImage(qimg)
+                        layer.item.setPixmap(pm)
+                        layer.item.setTransformOriginPoint(pm.width() / 2, pm.height() / 2)
+                    except Exception:
+                        pass
+
+                # Render without guides.
+                pm = self.canvas.render_final_pixmap(include_guides=False)
+                img = pm.toImage().convertToFormat(QImage.Format.Format_RGB888)
+                ptr = img.bits()
+                ptr.setsize(img.height() * img.bytesPerLine())
+                arr = np.frombuffer(ptr, dtype=np.uint8).reshape((img.height(), img.bytesPerLine() // 3, 3))
+                arr = arr[:, : img.width(), :]
+                bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+                writer.write(bgr)
+        finally:
+            try:
+                writer.release()
+            except Exception:
+                pass
+            for cap in captures:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+
+            # Restart preview playback (best-effort).
+            for l in video_layers:
+                try:
+                    self._restart_layer_video(l)
+                except Exception:
+                    pass
+
+    def _project_path_for_output(self, output_path: str) -> str:
+        base, _ext = os.path.splitext(str(output_path))
+        return base + ".zzc.json"
+
+    def _save_project(self, project_path: str, *, output_path: Optional[str] = None) -> None:
+        import json
+
+        base_dir = os.path.dirname(os.path.abspath(project_path))
+        layers_payload = []
+        for z, layer in enumerate(self._layers):
+            try:
+                pm = layer.item.pixmap()
+                w = pm.width() if pm is not None else 0
+                h = pm.height() if pm is not None else 0
+                pos = layer.item.pos()
+                cx = float(pos.x()) + (w / 2.0)
+                cy = float(pos.y()) + (h / 2.0)
+            except Exception:
+                cx, cy = 0.0, 0.0
+
+            try:
+                rel = os.path.relpath(os.path.abspath(layer.source_path), base_dir)
+            except Exception:
+                rel = layer.source_path
+
+            layers_payload.append(
+                {
+                    "path": rel.replace("\\", "/"),
+                    "is_video": bool(layer.is_video),
+                    "center": [cx, cy],
+                    "scale": float(getattr(layer.item, "scale", lambda: 1.0)()),
+                    "rotation": float(getattr(layer.item, "rotation", lambda: 0.0)()),
+                    "opacity": float(getattr(layer.item, "opacity", lambda: 1.0)()),
+                    "z": float(getattr(layer.item, "zValue", lambda: float(z))()),
+                }
+            )
+
+        payload = {
+            "version": 1,
+            "canvas": {"width": int(self.canvas.canvas_width), "height": int(self.canvas.canvas_height)},
+            "output": os.path.basename(output_path) if output_path else None,
+            "layers": layers_payload,
+        }
+
+        with open(project_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    def _load_project(self, project_path: str) -> None:
+        import json
+
+        # Clear existing.
+        try:
+            self.canvas.scene.clear()
+        except Exception:
+            pass
+        for l in list(self._layers):
+            if l.is_video:
+                try:
+                    self._stop_layer_video(l)
+                except Exception:
+                    pass
+        self._layers = []
+
+        base_dir = os.path.dirname(os.path.abspath(project_path))
+        try:
+            with open(project_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            QMessageBox.warning(self, "Project", f"Failed to load project: {str(e)}")
+            return
+
+        layers = data.get("layers") if isinstance(data, dict) else None
+        if not isinstance(layers, list):
+            return
+
+        # Load in z-order.
+        def _z(v):
+            try:
+                return float(v.get("z", 0.0))
+            except Exception:
+                return 0.0
+
+        for entry in sorted([e for e in layers if isinstance(e, dict)], key=_z):
+            rel = str(entry.get("path", "")).strip()
+            if not rel:
+                continue
+            abs_path = os.path.abspath(os.path.join(base_dir, rel))
+            if not os.path.exists(abs_path):
+                continue
+
+            is_vid = bool(entry.get("is_video", is_video_path(abs_path)))
+            center = entry.get("center")
+            try:
+                cx, cy = float(center[0]), float(center[1])
+            except Exception:
+                cx, cy = self.canvas.canvas_width / 2.0, self.canvas.canvas_height / 2.0
+            try:
+                scale = float(entry.get("scale", 1.0))
+            except Exception:
+                scale = 1.0
+            try:
+                rot = float(entry.get("rotation", 0.0))
+            except Exception:
+                rot = 0.0
+            try:
+                opacity = float(entry.get("opacity", 1.0))
+            except Exception:
+                opacity = 1.0
+            try:
+                zval = float(entry.get("z", 0.0))
+            except Exception:
+                zval = 0.0
+
+            if is_vid:
+                # Create video layer; position will be applied once first frame arrives.
+                before = len(self._layers)
+                self._add_video_layer(abs_path)
+                if len(self._layers) > before:
+                    layer = self._layers[-1]
+                    layer.pending_center = (cx, cy)
+                    try:
+                        layer.item.setScale(scale)
+                        layer.item.setRotation(rot)
+                        layer.item.setOpacity(opacity)
+                        layer.item.setZValue(zval)
+                    except Exception:
+                        pass
+            else:
+                pm = QPixmap(abs_path)
+                if pm.isNull():
+                    continue
+                item = self.canvas.add_layer_pixmap(pm)
+                try:
+                    item.setPos(cx - pm.width() / 2, cy - pm.height() / 2)
+                    item.setScale(scale)
+                    item.setRotation(rot)
+                    item.setOpacity(opacity)
+                    item.setZValue(zval)
+                except Exception:
+                    pass
+                self._layers.append(_Layer(item=item, source_path=abs_path, is_video=False))
+
+        # Select topmost for immediate editing.
+        try:
+            if self._layers:
+                self.canvas.scene.clearSelection()
+                self._layers[-1].item.setSelected(True)
+        except Exception:
+            pass
+        self._sync_controls_from_selection()
     
     def on_zoom_changed(self, value):
         """Handle zoom slider change."""
+        if self._updating_controls:
+            return
         zoom = value / 100.0
-        self.canvas.set_zoom(zoom)
+        for it in self.canvas.scene.selectedItems():
+            try:
+                it.setScale(float(zoom))
+            except Exception:
+                pass
         self.zoom_value_label.setText(f"{value}%")
     
     def on_rotation_changed(self, value):
         """Handle rotation slider change."""
-        self.canvas.set_rotation(value)
+        if self._updating_controls:
+            return
+        for it in self.canvas.scene.selectedItems():
+            try:
+                it.setRotation(float(value))
+            except Exception:
+                pass
         self.rotation_value_label.setText(f"{value}°")
+
+    def on_opacity_changed(self, value):
+        """Handle opacity slider change."""
+        if self._updating_controls:
+            return
+        op = max(0.0, min(1.0, float(value) / 100.0))
+        for it in self.canvas.scene.selectedItems():
+            try:
+                it.setOpacity(op)
+            except Exception:
+                pass
+        try:
+            self.opacity_value_label.setText(f"{int(value)}%")
+        except Exception:
+            pass
+
+    def rename_asset(self) -> None:
+        layer = self._selected_layer()
+        if layer is None or not layer.source_path or not os.path.exists(layer.source_path):
+            QMessageBox.information(self, "No Selection", "Select an element to rename.")
+            return
+
+        # Stop that layer's video playback so Windows doesn't lock the file.
+        if layer.is_video:
+            self._stop_layer_video(layer)
+
+        # Lazy import to keep the top imports stable.
+        try:
+            from PyQt6.QtWidgets import QInputDialog
+        except Exception:
+            QInputDialog = None
+        if QInputDialog is None:
+            return
+
+        folder = os.path.dirname(layer.source_path)
+        old_name = os.path.basename(layer.source_path)
+        root, ext = os.path.splitext(old_name)
+
+        # Let the user edit the full filename (without forcing extension), but
+        # keep the old extension if they omit one.
+        new_name, ok = QInputDialog.getText(self, "Rename", "New file name:", text=old_name)
+        if not ok:
+            return
+        new_name = str(new_name or "").strip()
+        if not new_name:
+            return
+
+        # Preserve extension if user didn't type it.
+        if os.path.splitext(new_name)[1] == "":
+            new_name = new_name + ext
+
+        new_path = os.path.join(folder, new_name)
+        if os.path.abspath(new_path) == os.path.abspath(layer.source_path):
+            return
+        if os.path.exists(new_path):
+            QMessageBox.warning(self, "Rename", "A file with that name already exists.")
+            return
+
+        old_path = layer.source_path
+        try:
+            os.rename(old_path, new_path)
+        except Exception as e:
+            QMessageBox.warning(self, "Rename", f"Failed to rename: {str(e)}")
+            return
+
+        layer.source_path = new_path
+        self.asset_renamed.emit(old_path, new_path)
+
+        # Restart playback if needed.
+        if layer.is_video:
+            self._restart_layer_video(layer)
+
+    def delete_asset(self) -> None:
+        selected = list(self.canvas.scene.selectedItems())
+        if not selected:
+            QMessageBox.information(self, "No Selection", "Select element(s) to delete.")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Remove Element",
+            "Remove selected element(s) from the editor? (Files will NOT be deleted)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        removed_paths: list[str] = []
+        for it in selected:
+            layer = self._layer_for_item(it)
+            if layer is None:
+                try:
+                    self.canvas.scene.removeItem(it)
+                except Exception:
+                    pass
+                continue
+
+            if layer.is_video:
+                self._stop_layer_video(layer)
+            try:
+                self.canvas.scene.removeItem(layer.item)
+            except Exception:
+                pass
+            removed_paths.append(layer.source_path)
+            try:
+                self._layers.remove(layer)
+            except Exception:
+                pass
+
+        for p in removed_paths:
+            try:
+                self.asset_deleted.emit(p)
+            except Exception:
+                pass
+
+        self._sync_controls_from_selection(force_defaults=(not bool(self._layers)))
+
+    def _import_art_files(self, files: list[str]) -> list[str]:
+        """Copy selected files into display_images and return destination paths."""
+        out: list[str] = []
+        try:
+            dest_folder = os.path.abspath("display_images")
+            os.makedirs(dest_folder, exist_ok=True)
+        except Exception:
+            dest_folder = os.path.abspath("display_images")
+
+        for src in files:
+            try:
+                if not src:
+                    continue
+                src = os.path.abspath(str(src))
+                if not os.path.exists(src):
+                    continue
+
+                # Only accept supported extensions.
+                if not str(src).lower().endswith(ART_EXTS):
+                    continue
+
+                name = os.path.basename(src)
+                dst = os.path.join(dest_folder, name)
+                if os.path.exists(dst):
+                    reply = QMessageBox.question(
+                        self,
+                        "File Exists",
+                        f"{name} already exists in display_images. Overwrite?",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    )
+                    if reply != QMessageBox.StandardButton.Yes:
+                        # Still allow loading the existing one.
+                        out.append(dst)
+                        continue
+
+                import shutil
+                shutil.copy2(src, dst)
+                out.append(dst)
+            except Exception:
+                continue
+
+        return out
+
+    def _layer_for_item(self, it) -> Optional[_Layer]:
+        for l in self._layers:
+            if l.item is it:
+                return l
+        return None
+
+    def _selected_layer(self) -> Optional[_Layer]:
+        items = list(self.canvas.scene.selectedItems())
+        if not items:
+            return None
+        # Prefer the last selected in Qt's ordering (top-most), but any is fine.
+        return self._layer_for_item(items[-1])
+
+    def _stop_layer_video(self, layer: _Layer) -> None:
+        try:
+            if layer.player is not None:
+                layer.player.stop()
+        except Exception:
+            pass
+        # Disconnecting is optional; on close the QObject tree is destroyed.
+        layer.player = None
+        layer.sink = None
+        layer.audio = None
+
+    def _restart_layer_video(self, layer: _Layer) -> None:
+        # Easiest is to re-add it as a new layer; but we want to keep transforms.
+        # So we create a new player/sink and keep the same item.
+        try:
+            audio = QAudioOutput()
+            try:
+                audio.setVolume(0.0)
+            except Exception:
+                pass
+            sink = QVideoSink()
+            player = QMediaPlayer()
+            player.setAudioOutput(audio)
+            player.setVideoOutput(sink)
+
+            def on_status(status) -> None:
+                try:
+                    if status == QMediaPlayer.MediaStatus.EndOfMedia and player is not None:
+                        player.setPosition(0)
+                        player.play()
+                except Exception:
+                    pass
+
+            def on_frame(frame) -> None:
+                try:
+                    img = frame.toImage()
+                except Exception:
+                    img = None
+                if img is None or getattr(img, "isNull", lambda: True)():
+                    return
+                try:
+                    pm2 = QPixmap.fromImage(img)
+                    layer.item.setPixmap(pm2)
+                    layer.item.setTransformOriginPoint(pm2.width() / 2, pm2.height() / 2)
+                except Exception:
+                    pass
+
+            sink.videoFrameChanged.connect(on_frame)
+            player.mediaStatusChanged.connect(on_status)
+            player.setSource(QUrl.fromLocalFile(os.path.abspath(layer.source_path)))
+            player.play()
+
+            layer.player = player
+            layer.sink = sink
+            layer.audio = audio
+        except Exception:
+            pass
+
+    def _sync_controls_from_selection(self, *, force_defaults: bool = False) -> None:
+        if self._updating_controls:
+            return
+        self._updating_controls = True
+        try:
+            if force_defaults:
+                self.zoom_slider.setValue(100)
+                self.rotation_slider.setValue(0)
+                try:
+                    self.opacity_slider.setValue(100)
+                    self.opacity_value_label.setText("100%")
+                except Exception:
+                    pass
+                self.zoom_value_label.setText("100%")
+                self.rotation_value_label.setText("0°")
+                return
+
+            items = list(self.canvas.scene.selectedItems())
+            if not items:
+                return
+            it = items[-1]
+            try:
+                zv = int(round(float(it.scale()) * 100))
+                zv = max(self.zoom_slider.minimum(), min(self.zoom_slider.maximum(), zv))
+                self.zoom_slider.setValue(zv)
+                self.zoom_value_label.setText(f"{zv}%")
+            except Exception:
+                pass
+            try:
+                rv = int(round(float(it.rotation())))
+                rv = max(self.rotation_slider.minimum(), min(self.rotation_slider.maximum(), rv))
+                self.rotation_slider.setValue(rv)
+                self.rotation_value_label.setText(f"{rv}°")
+            except Exception:
+                pass
+
+            try:
+                ov = int(round(float(it.opacity()) * 100))
+                ov = max(self.opacity_slider.minimum(), min(self.opacity_slider.maximum(), ov))
+                self.opacity_slider.setValue(ov)
+                self.opacity_value_label.setText(f"{ov}%")
+            except Exception:
+                pass
+        finally:
+            self._updating_controls = False
+
+    def closeEvent(self, event):  # type: ignore[override]
+        try:
+            for l in list(self._layers):
+                if l.is_video:
+                    self._stop_layer_video(l)
+        except Exception:
+            pass
+        return super().closeEvent(event)
     
     def mousePressEvent(self, event):
         """Handle mouse press events for dragging."""

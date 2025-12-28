@@ -8,8 +8,14 @@ from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtWidgets import QLabel
-from PyQt6.QtGui import QImage, QPixmap
-from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
+from PyQt6.QtGui import QImage, QPixmap, QPainter
+from PyQt6.QtCore import QObject, QThread, QTimer, QUrl, Qt, pyqtSignal
+from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
+
+try:
+    import numpy as np  # type: ignore
+except Exception:  # pragma: no cover
+    np = None
 
 
 # Shared UI theme colors (dark purple system)
@@ -75,8 +81,9 @@ def mirror_horizontal(label, pixmap):
 
 
 def get_art_list(folder="display_images"):
-    """Get list of image files in the display_images folder."""
-    exts = ('.png', '.jpg', '.jpeg', '.webp')
+    """Get list of art files (images + videos) in the display_images folder."""
+
+    exts = ART_EXTS
     files = []
     
     # Ensure folder exists
@@ -90,6 +97,264 @@ def get_art_list(folder="display_images"):
             files.append(os.path.join(folder, f))
     
     return files
+
+
+# --- Art file types -----------------------------------------------------------------
+
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
+VIDEO_EXTS = (".mp4", ".avi", ".mov", ".webm", ".mkv", ".m4v")
+ART_EXTS = tuple(sorted(set(IMAGE_EXTS + VIDEO_EXTS)))
+
+
+def is_video_path(path: str) -> bool:
+    p = str(path or "").strip().lower()
+    return any(p.endswith(ext) for ext in VIDEO_EXTS)
+
+
+def _key_out_near_black(img: QImage, *, threshold: int = 12) -> QImage:
+    """Turn near-black pixels transparent.
+
+    Used to emulate transparency for MP4 composites (which have no alpha).
+    Threshold is in 0..255; smaller means less aggressive.
+    """
+    try:
+        if np is None:
+            return img
+        if img is None or getattr(img, "isNull", lambda: True)():
+            return img
+
+        rgba = img.convertToFormat(QImage.Format.Format_RGBA8888)
+        w = rgba.width()
+        h = rgba.height()
+        ptr = rgba.bits()
+        ptr.setsize(h * rgba.bytesPerLine())
+        arr = np.frombuffer(ptr, dtype=np.uint8).reshape((h, rgba.bytesPerLine() // 4, 4))
+        arr = arr[:, :w, :]
+
+        # RGBA order.
+        r = arr[:, :, 0]
+        g = arr[:, :, 1]
+        b = arr[:, :, 2]
+        mask = (r <= threshold) & (g <= threshold) & (b <= threshold)
+        arr[mask, 3] = 0
+        return rgba
+    except Exception:
+        return img
+
+
+def _get_project_root() -> Path:
+    try:
+        return Path(__file__).resolve().parent
+    except Exception:
+        return Path(".")
+
+
+def _art_transform_path() -> Path:
+    return _get_project_root() / "art_transforms.json"
+
+
+def load_art_transforms() -> dict:
+    """Load persisted transforms for video assets."""
+    path = _art_transform_path()
+    try:
+        if path.exists():
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+    return {}
+
+
+def save_art_transforms(data: dict) -> None:
+    path = _art_transform_path()
+    try:
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _normalize_art_key(path: str) -> str:
+    """Normalize art path for transform storage.
+
+    Prefers a stable key relative to the project root when possible.
+    """
+    p = str(path or "").strip()
+    if not p:
+        return ""
+    try:
+        root = _get_project_root()
+        return os.path.relpath(p, str(root)).replace("\\", "/")
+    except Exception:
+        return p.replace("\\", "/")
+
+
+class _LabelVideoPlayer(QObject):
+    """Plays a video into a QLabel by rendering frames to a pixmap.
+
+    This avoids needing a QVideoWidget and keeps compatibility with the existing
+    QLabel overlay pipeline.
+    """
+
+    def __init__(
+        self,
+        label: QLabel,
+        source_path: str,
+        canvas_size=(1920, 1080),
+        transform: Optional[dict] = None,
+        *,
+        key_black: bool = False,
+        key_threshold: int = 12,
+    ):
+        super().__init__(label)
+        self._label = label
+        self._source_path = str(source_path)
+        self._canvas_w = int(canvas_size[0])
+        self._canvas_h = int(canvas_size[1])
+        self._transform = transform or {}
+        self._key_black = bool(key_black)
+        self._key_threshold = int(key_threshold)
+
+        self._audio = QAudioOutput()
+        try:
+            self._audio.setVolume(0.0)
+        except Exception:
+            pass
+
+        self._sink = QVideoSink()
+        self._player = QMediaPlayer()
+        self._player.setAudioOutput(self._audio)
+        self._player.setVideoOutput(self._sink)
+
+        self._sink.videoFrameChanged.connect(self._on_frame)
+        self._player.mediaStatusChanged.connect(self._on_status)
+
+    def set_transform(self, transform: Optional[dict]) -> None:
+        self._transform = transform or {}
+
+    def start(self) -> None:
+        try:
+            self._player.setSource(QUrl.fromLocalFile(os.path.abspath(self._source_path)))
+            self._player.play()
+        except Exception:
+            pass
+
+    def stop(self) -> None:
+        try:
+            self._player.stop()
+        except Exception:
+            pass
+        try:
+            self._sink.videoFrameChanged.disconnect(self._on_frame)
+        except Exception:
+            pass
+        try:
+            self._player.mediaStatusChanged.disconnect(self._on_status)
+        except Exception:
+            pass
+
+    def _on_status(self, status) -> None:
+        # Loop forever.
+        try:
+            if status == QMediaPlayer.MediaStatus.EndOfMedia:
+                self._player.setPosition(0)
+                self._player.play()
+        except Exception:
+            pass
+
+    def _on_frame(self, frame) -> None:
+        try:
+            img = frame.toImage()
+        except Exception:
+            img = None
+        if img is None or getattr(img, "isNull", lambda: True)():
+            return
+
+        if self._key_black:
+            img = _key_out_near_black(img, threshold=self._key_threshold)
+
+        # Transform defaults.
+        zoom = float(self._transform.get("zoom", 1.0) or 1.0)
+        rotation = float(self._transform.get("rotation", 0.0) or 0.0)
+        pos_x = float(self._transform.get("x", (self._canvas_w - img.width()) / 2.0) or 0.0)
+        pos_y = float(self._transform.get("y", (self._canvas_h - img.height()) / 2.0) or 0.0)
+
+        canvas = QImage(self._canvas_w, self._canvas_h, QImage.Format.Format_ARGB32)
+        canvas.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(canvas)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+        pm = QPixmap.fromImage(img)
+        if zoom != 1.0:
+            target_w = max(1, int(pm.width() * zoom))
+            target_h = max(1, int(pm.height() * zoom))
+            pm = pm.scaled(target_w, target_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+
+        # Draw rotated about its center.
+        painter.save()
+        painter.translate(pos_x + pm.width() / 2.0, pos_y + pm.height() / 2.0)
+        painter.rotate(rotation)
+        painter.translate(-pm.width() / 2.0, -pm.height() / 2.0)
+        painter.drawPixmap(0, 0, pm)
+        painter.restore()
+        painter.end()
+
+        try:
+            self._label.setPixmap(QPixmap.fromImage(canvas))
+        except Exception:
+            pass
+
+
+def _stop_label_video_if_any(label: QLabel) -> None:
+    player = _get_attr(label, "_zzz_video_player", None)
+    if player is None:
+        return
+    try:
+        player.stop()
+    except Exception:
+        pass
+    _set_attr(label, "_zzz_video_player", None)
+
+
+def set_label_art_from_path(label: QLabel, path: str) -> None:
+    """Set the overlay label content from either an image or a video path."""
+    path = str(path or "").strip()
+    if not path:
+        return
+
+    _stop_label_video_if_any(label)
+
+    if not is_video_path(path):
+        set_label_image_from_path(label, path)
+        return
+
+    # Clear any stored image source so image-only operations don't interfere.
+    try:
+        _set_attr(label, _LABEL_SOURCE_IMAGE_PROP, None)
+        _set_attr(label, "_zzz_cvd_cache", {})
+    except Exception:
+        pass
+
+    # Videos: render frames into label pixmap (looping) and apply saved transform.
+    transforms = load_art_transforms()
+    key = _normalize_art_key(path)
+    transform = transforms.get(key) if isinstance(transforms, dict) else None
+
+    # If this video is a saved composite (has a sidecar project), treat near-black
+    # pixels as transparent during playback.
+    base, _ext = os.path.splitext(os.path.abspath(path))
+    sidecar = base + ".zzc.json"
+    key_black = os.path.exists(sidecar)
+
+    player = _LabelVideoPlayer(
+        label,
+        path,
+        canvas_size=(1920, 1080),
+        transform=transform,
+        key_black=key_black,
+        key_threshold=12,
+    )
+    _set_attr(label, "_zzz_video_player", player)
+    player.start()
 
 
 def transparent(label, percent):
