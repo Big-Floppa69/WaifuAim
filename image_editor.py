@@ -10,9 +10,9 @@ from typing import Optional
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QLabel, QFrame, QGraphicsDropShadowEffect, 
                              QMessageBox, QApplication, QSlider, QFileDialog,
-                             QGraphicsView, QGraphicsScene, QGraphicsPixmapItem)
+                             QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QProgressDialog)
 from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QPen
-from PyQt6.QtCore import Qt, QRectF, QUrl, pyqtSignal
+from PyQt6.QtCore import Qt, QRectF, QUrl, pyqtSignal, QTimer
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from utils import UI_THEME
 from utils import (
@@ -672,7 +672,7 @@ class ImageEditorDialog(QWidget):
 
         try:
             if has_video:
-                self._export_composite_mp4(file_path)
+                self._start_export_mp4(file_path)
             else:
                 pm = self.canvas.render_final_pixmap(include_guides=False)
                 pm.save(file_path, "PNG")
@@ -685,16 +685,17 @@ class ImageEditorDialog(QWidget):
             except Exception:
                 pass
 
-            QMessageBox.information(self, "Saved", f"Saved to:\n{file_path}")
-            self.image_saved.emit(file_path)
-            try:
-                self.close()
-            except Exception:
-                pass
+            if not has_video:
+                QMessageBox.information(self, "Saved", f"Saved to:\n{file_path}")
+                self.image_saved.emit(file_path)
+                try:
+                    self.close()
+                except Exception:
+                    pass
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to save: {str(e)}")
 
-    def _export_composite_mp4(self, output_path: str) -> None:
+    def _start_export_mp4(self, output_path: str) -> None:
         # Use OpenCV to step frames for each source video; render the Qt scene
         # to a frame image so rotations/scales are applied correctly.
         assert cv2 is not None and np is not None
@@ -742,56 +743,116 @@ class ImageEditorDialog(QWidget):
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(output_path, fourcc, float(out_fps), (w, h))
 
-        try:
-            for _i in range(out_frames):
-                # Update each video layer pixmap.
-                for layer, cap in zip(video_layers, captures):
-                    ok, frame = cap.read()
-                    if not ok or frame is None:
-                        try:
-                            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                        except Exception:
-                            pass
-                        ok, frame = cap.read()
-                    if not ok or frame is None:
-                        continue
+        self._export_state = {
+            'captures': captures,
+            'writer': writer,
+            'video_layers': video_layers,
+            'out_frames': out_frames,
+            'current_frame': 0,
+            'output_path': output_path
+        }
 
-                    # OpenCV gives BGR.
-                    try:
-                        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        qimg = QImage(rgb.data, rgb.shape[1], rgb.shape[0], rgb.strides[0], QImage.Format.Format_RGB888)
-                        pm = QPixmap.fromImage(qimg)
-                        layer.item.setPixmap(pm)
-                        layer.item.setTransformOriginPoint(pm.width() / 2, pm.height() / 2)
-                    except Exception:
-                        pass
+        self._progress = QProgressDialog("Exporting video...", "Cancel", 0, out_frames, self)
+        self._progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self._progress.canceled.connect(self._cancel_export)
+        self._progress.show()
 
-                # Render without guides.
-                pm = self.canvas.render_final_pixmap(include_guides=False)
-                img = pm.toImage().convertToFormat(QImage.Format.Format_RGB888)
-                ptr = img.bits()
-                ptr.setsize(img.height() * img.bytesPerLine())
-                arr = np.frombuffer(ptr, dtype=np.uint8).reshape((img.height(), img.bytesPerLine() // 3, 3))
-                arr = arr[:, : img.width(), :]
-                bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-                writer.write(bgr)
-        finally:
+        self._export_timer = QTimer(self)
+        self._export_timer.timeout.connect(self._process_next_frame)
+        self._export_timer.start(0)
+
+    def _process_next_frame(self) -> None:
+        if self._progress.wasCanceled():
+            self._finish_export(canceled=True)
+            return
+
+        state = self._export_state
+        i = state['current_frame']
+        if i >= state['out_frames']:
+            self._finish_export()
+            return
+
+        # Update each video layer pixmap.
+        for layer, cap in zip(state['video_layers'], state['captures']):
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                try:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                except Exception:
+                    pass
+                ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+
+            # OpenCV gives BGR.
             try:
-                writer.release()
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                qimg = QImage(rgb.data, rgb.shape[1], rgb.shape[0], rgb.strides[0], QImage.Format.Format_RGB888)
+                pm = QPixmap.fromImage(qimg)
+                layer.item.setPixmap(pm)
+                layer.item.setTransformOriginPoint(pm.width() / 2, pm.height() / 2)
             except Exception:
                 pass
-            for cap in captures:
-                try:
-                    cap.release()
-                except Exception:
-                    pass
 
-            # Restart preview playback (best-effort).
-            for l in video_layers:
-                try:
-                    self._restart_layer_video(l)
-                except Exception:
-                    pass
+        # Render without guides.
+        pm = self.canvas.render_final_pixmap(include_guides=False)
+        img = pm.toImage().convertToFormat(QImage.Format.Format_RGB888)
+        ptr = img.bits()
+        ptr.setsize(img.height() * img.bytesPerLine())
+        arr = np.frombuffer(ptr, dtype=np.uint8).reshape((img.height(), img.bytesPerLine() // 3, 3))
+        arr = arr[:, : img.width(), :]
+        bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        state['writer'].write(bgr)
+
+        state['current_frame'] += 1
+        self._progress.setValue(i + 1)
+
+    def _cancel_export(self) -> None:
+        self._finish_export(canceled=True)
+
+    def _finish_export(self, canceled: bool = False) -> None:
+        state = self._export_state
+        try:
+            state['writer'].release()
+        except Exception:
+            pass
+        for cap in state['captures']:
+            try:
+                cap.release()
+            except Exception:
+                pass
+
+        # Restart preview playback (best-effort).
+        for l in state['video_layers']:
+            try:
+                self._restart_layer_video(l)
+            except Exception:
+                pass
+
+        self._progress.close()
+
+        if not canceled:
+            # Save project
+            try:
+                project_path = self._project_path_for_output(state['output_path'])
+                if project_path:
+                    self._save_project(project_path, output_path=state['output_path'])
+            except Exception:
+                pass
+
+            QMessageBox.information(self, "Saved", f"Saved to:\n{state['output_path']}")
+            self.image_saved.emit(state['output_path'])
+            try:
+                self.close()
+            except Exception:
+                pass
+
+        # Clean up
+        if hasattr(self, '_export_timer'):
+            self._export_timer.stop()
+            del self._export_timer
+        del self._export_state
+        del self._progress
 
     def _project_path_for_output(self, output_path: str) -> str:
         base, _ext = os.path.splitext(str(output_path))

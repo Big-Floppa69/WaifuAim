@@ -16,6 +16,10 @@ try:
     import numpy as np  # type: ignore
 except Exception:  # pragma: no cover
     np = None
+try:
+    import cv2  # type: ignore
+except Exception:
+    cv2 = None
 
 
 # Shared UI theme colors (dark purple system)
@@ -124,6 +128,14 @@ def _key_out_near_black(img: QImage, *, threshold: int = 12) -> QImage:
             return img
 
         rgba = img.convertToFormat(QImage.Format.Format_RGBA8888)
+        # Work on a copy to avoid mutating any shared QImage memory the
+        # caller might still be using elsewhere (in-place numpy views can
+        # unexpectedly alter other components). This prevents accidental
+        # transparency applied to unrelated UI images.
+        try:
+            rgba = rgba.copy()
+        except Exception:
+            pass
         w = rgba.width()
         h = rgba.height()
         ptr = rgba.bits()
@@ -135,8 +147,91 @@ def _key_out_near_black(img: QImage, *, threshold: int = 12) -> QImage:
         r = arr[:, :, 0]
         g = arr[:, :, 1]
         b = arr[:, :, 2]
-        mask = (r <= threshold) & (g <= threshold) & (b <= threshold)
-        arr[mask, 3] = 0
+        # Only key-out fully opaque pixels (avoid touching already-transparent
+        # areas). This reduces accidental alpha changes for layered artwork.
+        a = arr[:, :, 3]
+        opaque = (a == 255)
+        near_black = (r <= threshold) & (g <= threshold) & (b <= threshold)
+        candidates = near_black & opaque
+
+        # Require a majority of the 3x3 neighborhood to also be near-black
+        # before treating the pixel as background. This avoids removing
+        # small black details in artwork (like shading on clothing).
+        try:
+            if np.any(candidates):
+                total = int(w) * int(h)
+                # Minimum connected component area to consider background.
+                min_area = max(500, int(total * 0.001))
+
+                # Prefer OpenCV for efficient connected-component analysis if available.
+                if cv2 is not None:
+                    try:
+                        comp = cv2.connectedComponentsWithStats(candidates.astype(np.uint8), connectivity=8)
+                        nlabels = int(comp[0])
+                        labels = comp[1]
+                        stats = comp[2]
+                        # feather width in pixels for soft edges
+                        feather_px = max(3, int(min(w, h) * 0.005))
+                        for lbl in range(1, nlabels):
+                            area = int(stats[lbl, cv2.CC_STAT_AREA])
+                            if area >= min_area:
+                                # Create mask for this component
+                                comp_mask = (labels == lbl)
+                                # distance transform requires 8-bit mask with foreground >0
+                                mask8 = (comp_mask.astype(np.uint8) * 255)
+                                try:
+                                    # Use a blurred mask to create a soft/feathered alpha.
+                                    k = max(1, int(feather_px) * 2 + 1)
+                                    # Gaussian blur the 8-bit mask to produce soft edges
+                                    blur = cv2.GaussianBlur(mask8, (k, k), 0)
+                                    soft = blur.astype(np.float32) / 255.0
+                                except Exception:
+                                    # Fallback: treat whole component as hard-transparent
+                                    arr[comp_mask, 3] = 0
+                                    continue
+
+                                # Apply softness only to candidate pixels inside this component
+                                idx = comp_mask & candidates & (soft > 0)
+                                if np.any(idx):
+                                    orig = arr[idx, 3].astype(np.float32) / 255.0
+                                    new_alpha = orig * (1.0 - soft[idx])
+                                    arr[idx, 3] = (np.clip(new_alpha, 0.0, 1.0) * 255.0).astype(np.uint8)
+                    except Exception:
+                        # If OpenCV call fails, fall back to neighborhood rule below.
+                        raise
+                else:
+                    # No OpenCV: use a stricter neighborhood rule (8/9 majority)
+                    pad = np.pad(candidates.astype(np.uint8), ((1, 1), (1, 1)), mode="constant")
+                    neigh = (
+                        pad[:-2, :-2]
+                        + pad[:-2, 1:-1]
+                        + pad[:-2, 2:]
+                        + pad[1:-1, :-2]
+                        + pad[1:-1, 1:-1]
+                        + pad[1:-1, 2:]
+                        + pad[2:, :-2]
+                        + pad[2:, 1:-1]
+                        + pad[2:, 2:]
+                    )
+                    bg_mask = (neigh >= 8) & candidates
+                    arr[bg_mask, 3] = 0
+        except Exception:
+            # Conservative fallback: only key pixels where the immediate
+            # neighborhood is entirely near-black.
+            pad = np.pad(candidates.astype(np.uint8), ((1, 1), (1, 1)), mode="constant")
+            neigh = (
+                pad[:-2, :-2]
+                + pad[:-2, 1:-1]
+                + pad[:-2, 2:]
+                + pad[1:-1, :-2]
+                + pad[1:-1, 1:-1]
+                + pad[1:-1, 2:]
+                + pad[2:, :-2]
+                + pad[2:, 1:-1]
+                + pad[2:, 2:]
+            )
+            bg_mask = (neigh >= 9) & candidates
+            arr[bg_mask, 3] = 0
         return rgba
     except Exception:
         return img
@@ -214,6 +309,11 @@ class _LabelVideoPlayer(QObject):
         self._key_black = bool(key_black)
         self._key_threshold = int(key_threshold)
 
+        self._latest_frame = None
+        self._update_timer = QTimer(self)
+        self._update_timer.timeout.connect(self._update_display)
+        self._update_timer.start(1000 // 30)  # 30 fps
+
         self._audio = QAudioOutput()
         try:
             self._audio.setVolume(0.0)
@@ -235,6 +335,7 @@ class _LabelVideoPlayer(QObject):
         try:
             self._player.setSource(QUrl.fromLocalFile(os.path.abspath(self._source_path)))
             self._player.play()
+            self._update_timer.start(1000 // 30)
         except Exception:
             pass
 
@@ -249,6 +350,10 @@ class _LabelVideoPlayer(QObject):
             pass
         try:
             self._player.mediaStatusChanged.disconnect(self._on_status)
+        except Exception:
+            pass
+        try:
+            self._update_timer.stop()
         except Exception:
             pass
 
@@ -268,6 +373,14 @@ class _LabelVideoPlayer(QObject):
             img = None
         if img is None or getattr(img, "isNull", lambda: True)():
             return
+
+        self._latest_frame = img
+
+    def _update_display(self) -> None:
+        if self._latest_frame is None:
+            return
+
+        img = self._latest_frame
 
         if self._key_black:
             img = _key_out_near_black(img, threshold=self._key_threshold)
