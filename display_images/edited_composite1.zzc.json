@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "canvas": {
+    "width": 1920,
+    "height": 1080
+  },
+  "output": "edited_composite1.mp4",
+  "layers": [
+    {
+      "path": "miyabi-hoshimi-miyabi.mp4",
+      "is_video": true,
+      "center": [
+        313.5454545454546,
+        854.090909090909
+      ],
+      "scale": 1.0,
+      "rotation": 0.0,
+      "opacity": 0.09,
+      "z": 0.0
+    },
+    {
+      "path": "jane_doe2.png",
+      "is_video": false,
+      "center": [
+        449.4545454545456,
+        414.818181818182
+      ],
+      "scale": 0.34,
+      "rotation": 0.0,
+      "opacity": 0.1,
+      "z": 0.0
+    }
+  ]
+}

@@ -135,8 +135,19 @@ class ImageCanvas(QGraphicsView):
         return item
 
     def render_final_pixmap(self, *, include_guides: bool = False) -> QPixmap:
-        prev = bool(getattr(self, "show_guides", True))
+        prev_guides = bool(getattr(self, "show_guides", True))
+        selected = []
         try:
+            # Important: QGraphicsScene renders selection highlights (the dashed
+            # outline) into the output. Clear selection while exporting so the
+            # UI-only outline is never baked into saved PNG/MP4 frames.
+            try:
+                selected = list(self.scene.selectedItems())
+                if selected:
+                    self.scene.clearSelection()
+            except Exception:
+                selected = []
+
             self.show_guides = bool(include_guides)
             out = QPixmap(self.canvas_width, self.canvas_height)
             out.fill(Qt.GlobalColor.transparent)
@@ -151,7 +162,17 @@ class ImageCanvas(QGraphicsView):
             painter.end()
             return out
         finally:
-            self.show_guides = prev
+            self.show_guides = prev_guides
+            try:
+                # Restore selection after export.
+                if selected:
+                    for it in selected:
+                        try:
+                            it.setSelected(True)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
 
 class ImageEditorDialog(QWidget):
@@ -762,6 +783,10 @@ class ImageEditorDialog(QWidget):
         self._export_timer.start(0)
 
     def _process_next_frame(self) -> None:
+        # Export can be canceled/finished and cleaned up while the timer still
+        # has a queued timeout. Bail out safely if state is already gone.
+        if not hasattr(self, "_export_state") or not hasattr(self, "_progress"):
+            return
         if self._progress.wasCanceled():
             self._finish_export(canceled=True)
             return
@@ -811,48 +836,78 @@ class ImageEditorDialog(QWidget):
         self._finish_export(canceled=True)
 
     def _finish_export(self, canceled: bool = False) -> None:
-        state = self._export_state
+        # Make this idempotent (can be called via timer + cancel + internal
+        # finish conditions).
+        if getattr(self, "_export_finishing", False):
+            return
+        state = getattr(self, "_export_state", None)
+        if state is None:
+            return
+
+        self._export_finishing = True
         try:
-            state['writer'].release()
-        except Exception:
-            pass
-        for cap in state['captures']:
             try:
-                cap.release()
+                state['writer'].release()
+            except Exception:
+                pass
+            for cap in state.get('captures', []):
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+
+            # Restart preview playback (best-effort).
+            for l in state.get('video_layers', []):
+                try:
+                    self._restart_layer_video(l)
+                except Exception:
+                    pass
+
+            try:
+                self._progress.close()
             except Exception:
                 pass
 
-        # Restart preview playback (best-effort).
-        for l in state['video_layers']:
+            if not canceled:
+                # Save project
+                try:
+                    project_path = self._project_path_for_output(state['output_path'])
+                    if project_path:
+                        self._save_project(project_path, output_path=state['output_path'])
+                except Exception:
+                    pass
+
+                try:
+                    QMessageBox.information(self, "Saved", f"Saved to:\n{state['output_path']}")
+                except Exception:
+                    pass
+                try:
+                    self.image_saved.emit(state['output_path'])
+                except Exception:
+                    pass
+                try:
+                    self.close()
+                except Exception:
+                    pass
+        finally:
+            # Clean up
             try:
-                self._restart_layer_video(l)
+                if hasattr(self, '_export_timer'):
+                    self._export_timer.stop()
+                    del self._export_timer
             except Exception:
                 pass
-
-        self._progress.close()
-
-        if not canceled:
-            # Save project
             try:
-                project_path = self._project_path_for_output(state['output_path'])
-                if project_path:
-                    self._save_project(project_path, output_path=state['output_path'])
+                if hasattr(self, '_export_state'):
+                    del self._export_state
             except Exception:
                 pass
-
-            QMessageBox.information(self, "Saved", f"Saved to:\n{state['output_path']}")
-            self.image_saved.emit(state['output_path'])
             try:
-                self.close()
+                if hasattr(self, '_progress'):
+                    del self._progress
             except Exception:
                 pass
-
-        # Clean up
-        if hasattr(self, '_export_timer'):
-            self._export_timer.stop()
-            del self._export_timer
-        del self._export_state
-        del self._progress
+            self._export_finishing = False
 
     def _project_path_for_output(self, output_path: str) -> str:
         base, _ext = os.path.splitext(str(output_path))

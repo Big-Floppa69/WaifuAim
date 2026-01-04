@@ -127,15 +127,20 @@ def _key_out_near_black(img: QImage, *, threshold: int = 12) -> QImage:
         if img is None or getattr(img, "isNull", lambda: True)():
             return img
 
+        # Fast-ish soft key: compute a gradual alpha ramp near the threshold.
+        # To avoid making dark subjects disappear, prefer removing only near-
+        # black pixels connected to the frame border (typical "black background"
+        # composites). This keeps interior dark details.
+        t0 = int(max(0, min(255, threshold)))
+        # Feather band width (in brightness levels). Keep modest.
+        t1 = int(max(t0 + 1, min(255, t0 + 12)))
+
         rgba = img.convertToFormat(QImage.Format.Format_RGBA8888)
-        # Work on a copy to avoid mutating any shared QImage memory the
-        # caller might still be using elsewhere (in-place numpy views can
-        # unexpectedly alter other components). This prevents accidental
-        # transparency applied to unrelated UI images.
         try:
             rgba = rgba.copy()
         except Exception:
             pass
+
         w = rgba.width()
         h = rgba.height()
         ptr = rgba.bits()
@@ -143,105 +148,82 @@ def _key_out_near_black(img: QImage, *, threshold: int = 12) -> QImage:
         arr = np.frombuffer(ptr, dtype=np.uint8).reshape((h, rgba.bytesPerLine() // 4, 4))
         arr = arr[:, :w, :]
 
-        # RGBA order.
-        r = arr[:, :, 0]
-        g = arr[:, :, 1]
-        b = arr[:, :, 2]
-        # Only key-out fully opaque pixels (avoid touching already-transparent
-        # areas). This reduces accidental alpha changes for layered artwork.
-        a = arr[:, :, 3]
-        opaque = (a == 255)
-        near_black = (r <= threshold) & (g <= threshold) & (b <= threshold)
-        candidates = near_black & opaque
+        rgb_max = np.maximum.reduce([arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]]).astype(np.int16)
+        a = arr[:, :, 3].astype(np.float32)
 
-        # Require a majority of the 3x3 neighborhood to also be near-black
-        # before treating the pixel as background. This avoids removing
-        # small black details in artwork (like shading on clothing).
-        try:
-            if np.any(candidates):
-                total = int(w) * int(h)
-                # Minimum connected component area to consider background.
-                min_area = max(500, int(total * 0.001))
+        denom = float(max(1, (t1 - t0)))
+        scale = (rgb_max.astype(np.float32) - float(t0)) / denom
+        np.clip(scale, 0.0, 1.0, out=scale)
 
-                # Prefer OpenCV for efficient connected-component analysis if available.
-                if cv2 is not None:
-                    try:
-                        comp = cv2.connectedComponentsWithStats(candidates.astype(np.uint8), connectivity=8)
-                        nlabels = int(comp[0])
-                        labels = comp[1]
-                        stats = comp[2]
-                        # feather width in pixels for soft edges
-                        feather_px = max(3, int(min(w, h) * 0.005))
-                        for lbl in range(1, nlabels):
-                            area = int(stats[lbl, cv2.CC_STAT_AREA])
-                            if area >= min_area:
-                                # Create mask for this component
-                                comp_mask = (labels == lbl)
-                                # distance transform requires 8-bit mask with foreground >0
-                                mask8 = (comp_mask.astype(np.uint8) * 255)
-                                try:
-                                    # Use a blurred mask to create a soft/feathered alpha.
-                                    k = max(1, int(feather_px) * 2 + 1)
-                                    # Gaussian blur the 8-bit mask to produce soft edges
-                                    blur = cv2.GaussianBlur(mask8, (k, k), 0)
-                                    soft = blur.astype(np.float32) / 255.0
-                                except Exception:
-                                    # Fallback: treat whole component as hard-transparent
-                                    arr[comp_mask, 3] = 0
-                                    continue
+        # Determine which pixels we are allowed to key.
+        # Candidates are near-black within the feather band.
+        candidates = (rgb_max <= t1)
+        bg_mask = candidates
 
-                                # Apply softness only to candidate pixels inside this component
-                                idx = comp_mask & candidates & (soft > 0)
-                                if np.any(idx):
-                                    orig = arr[idx, 3].astype(np.float32) / 255.0
-                                    new_alpha = orig * (1.0 - soft[idx])
-                                    arr[idx, 3] = (np.clip(new_alpha, 0.0, 1.0) * 255.0).astype(np.uint8)
-                    except Exception:
-                        # If OpenCV call fails, fall back to neighborhood rule below.
-                        raise
+        # If OpenCV is available, restrict keying to near-black regions connected
+        # to the border, computed on a downscaled mask for speed.
+        if cv2 is not None:
+            try:
+                # Downscale mask to reduce connected-components cost.
+                scale_div = 4
+                small_w = max(1, int(w) // scale_div)
+                small_h = max(1, int(h) // scale_div)
+                cand8 = (candidates.astype(np.uint8) * 255)
+                cand_small = cv2.resize(cand8, (small_w, small_h), interpolation=cv2.INTER_NEAREST)
+                comp = cv2.connectedComponentsWithStats((cand_small > 0).astype(np.uint8), connectivity=8)
+                labels = comp[1]
+                # Labels touching border are treated as background.
+                border = np.concatenate(
+                    [
+                        labels[0, :],
+                        labels[-1, :],
+                        labels[:, 0],
+                        labels[:, -1],
+                    ]
+                )
+                border_labels = np.unique(border)
+                border_labels = border_labels[border_labels != 0]
+                if border_labels.size > 0:
+                    bg_small = np.isin(labels, border_labels)
+                    bg8 = (bg_small.astype(np.uint8) * 255)
+                    bg_up = cv2.resize(bg8, (int(w), int(h)), interpolation=cv2.INTER_NEAREST)
+                    bg_mask = (bg_up > 0) & candidates
                 else:
-                    # No OpenCV: use a stricter neighborhood rule (8/9 majority)
-                    pad = np.pad(candidates.astype(np.uint8), ((1, 1), (1, 1)), mode="constant")
-                    neigh = (
-                        pad[:-2, :-2]
-                        + pad[:-2, 1:-1]
-                        + pad[:-2, 2:]
-                        + pad[1:-1, :-2]
-                        + pad[1:-1, 1:-1]
-                        + pad[1:-1, 2:]
-                        + pad[2:, :-2]
-                        + pad[2:, 1:-1]
-                        + pad[2:, 2:]
-                    )
-                    bg_mask = (neigh >= 8) & candidates
-                    arr[bg_mask, 3] = 0
+                    bg_mask = candidates
+            except Exception:
+                bg_mask = candidates
+
+        # Apply alpha scaling only for background-ish pixels.
+        if np.any(bg_mask):
+            a[bg_mask] *= scale[bg_mask]
+
+        # Optional tiny blur of the alpha edge to reduce blocky MP4 artifacts.
+        if cv2 is not None:
+            try:
+                if np.any((a > 0.0) & (a < 255.0)):
+                    alpha8 = a.astype(np.uint8)
+                    alpha8 = cv2.GaussianBlur(alpha8, (3, 3), 0)
+                    a = alpha8.astype(np.float32)
+            except Exception:
+                pass
+
+        arr[:, :, 3] = np.clip(a, 0.0, 255.0).astype(np.uint8)
+
+        # Use premultiplied alpha for smoother Qt compositing.
+        try:
+            return rgba.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
         except Exception:
-            # Conservative fallback: only key pixels where the immediate
-            # neighborhood is entirely near-black.
-            pad = np.pad(candidates.astype(np.uint8), ((1, 1), (1, 1)), mode="constant")
-            neigh = (
-                pad[:-2, :-2]
-                + pad[:-2, 1:-1]
-                + pad[:-2, 2:]
-                + pad[1:-1, :-2]
-                + pad[1:-1, 1:-1]
-                + pad[1:-1, 2:]
-                + pad[2:, :-2]
-                + pad[2:, 1:-1]
-                + pad[2:, 2:]
-            )
-            bg_mask = (neigh >= 9) & candidates
-            arr[bg_mask, 3] = 0
-        return rgba
+            return rgba
     except Exception:
         return img
 
 
 def _get_project_root() -> Path:
-    try:
-        return Path(__file__).resolve().parent
-    except Exception:
-        return Path(".")
+    """Return the repository root directory.
+
+    Used for storing/reading per-asset transforms with stable relative keys.
+    """
+    return Path(__file__).resolve().parent
 
 
 def _art_transform_path() -> Path:
@@ -386,28 +368,66 @@ class _LabelVideoPlayer(QObject):
             img = _key_out_near_black(img, threshold=self._key_threshold)
 
         # Transform defaults.
-        zoom = float(self._transform.get("zoom", 1.0) or 1.0)
-        rotation = float(self._transform.get("rotation", 0.0) or 0.0)
-        pos_x = float(self._transform.get("x", (self._canvas_w - img.width()) / 2.0) or 0.0)
-        pos_y = float(self._transform.get("y", (self._canvas_h - img.height()) / 2.0) or 0.0)
+        try:
+            zoom = float(self._transform.get("zoom", 1.0) or 1.0)
+        except Exception:
+            zoom = 1.0
+        try:
+            rotation = float(self._transform.get("rotation", 0.0) or 0.0)
+        except Exception:
+            rotation = 0.0
+        try:
+            pos_x = float(self._transform.get("x", (self._canvas_w - img.width()) / 2.0) or 0.0)
+        except Exception:
+            pos_x = (self._canvas_w - img.width()) / 2.0
+        try:
+            pos_y = float(self._transform.get("y", (self._canvas_h - img.height()) / 2.0) or 0.0)
+        except Exception:
+            pos_y = (self._canvas_h - img.height()) / 2.0
 
-        canvas = QImage(self._canvas_w, self._canvas_h, QImage.Format.Format_ARGB32)
+        # Sanity clamps: bad persisted transforms can push video fully off-screen,
+        # making it appear "invisible".
+        if not (zoom > 0):
+            zoom = 1.0
+        zoom = max(0.05, min(10.0, zoom))
+        try:
+            # keep rotation in a reasonable range
+            rotation = float(rotation) % 360.0
+        except Exception:
+            rotation = 0.0
+
+        canvas = QImage(self._canvas_w, self._canvas_h, QImage.Format.Format_ARGB32_Premultiplied)
         canvas.fill(Qt.GlobalColor.transparent)
         painter = QPainter(canvas)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-        pm = QPixmap.fromImage(img)
-        if zoom != 1.0:
-            target_w = max(1, int(pm.width() * zoom))
-            target_h = max(1, int(pm.height() * zoom))
-            pm = pm.scaled(target_w, target_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        # Draw rotated & scaled about its center. Use painter transforms instead
+        # of allocating/scaling a QPixmap each frame (less CPU + less GC churn).
+        try:
+            img2 = img.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+        except Exception:
+            img2 = img
+        w = float(img2.width())
+        h = float(img2.height())
 
-        # Draw rotated about its center.
+        # If the transformed image is completely outside the canvas, recenter.
+        try:
+            tw = w * zoom
+            th = h * zoom
+            off = (pos_x + tw < 1) or (pos_x > self._canvas_w - 1) or (pos_y + th < 1) or (pos_y > self._canvas_h - 1)
+            if off:
+                pos_x = (self._canvas_w - w) / 2.0
+                pos_y = (self._canvas_h - h) / 2.0
+        except Exception:
+            pass
+
         painter.save()
-        painter.translate(pos_x + pm.width() / 2.0, pos_y + pm.height() / 2.0)
+        painter.translate(pos_x + (w * zoom) / 2.0, pos_y + (h * zoom) / 2.0)
         painter.rotate(rotation)
-        painter.translate(-pm.width() / 2.0, -pm.height() / 2.0)
-        painter.drawPixmap(0, 0, pm)
+        if zoom != 1.0:
+            painter.scale(zoom, zoom)
+        painter.translate(-w / 2.0, -h / 2.0)
+        painter.drawImage(0, 0, img2)
         painter.restore()
         painter.end()
 
@@ -456,7 +476,16 @@ def set_label_art_from_path(label: QLabel, path: str) -> None:
     # pixels as transparent during playback.
     base, _ext = os.path.splitext(os.path.abspath(path))
     sidecar = base + ".zzc.json"
-    key_black = os.path.exists(sidecar)
+    key_black = False
+    if os.path.exists(sidecar):
+        # Only enable keying if the sidecar looks like it was produced as the
+        # project for *this* output video.
+        try:
+            raw = json.loads(Path(sidecar).read_text(encoding="utf-8"))
+            if isinstance(raw, dict) and str(raw.get("output") or "") == os.path.basename(path):
+                key_black = True
+        except Exception:
+            key_black = False
 
     player = _LabelVideoPlayer(
         label,
