@@ -11,6 +11,7 @@ from utils import mirror_vertical, mirror_horizontal, get_art_list, set_label_ar
 
 # Global reference to the label
 _label_ref = None
+_overlay_controller_ref = None
 _hotkeys_paused = False
 
 
@@ -23,6 +24,9 @@ def load_hotkey_config():
         "mirror_vertical": ["f3"],
         "mirror_horizontal": ["f4"],
         "switch_image": ["f2"],
+        # Optional: if set, this key must be held while dragging an element.
+        # Dragging itself is implemented by the Art Manager / overlay layer.
+        "hold_to_drag": [],
     }
 
     def _normalize(value):
@@ -126,6 +130,12 @@ def reload_hotkeys():
             _label_ref.hide()
         else:
             _label_ref.show()
+
+        try:
+            if _overlay_controller_ref is not None:
+                _overlay_controller_ref.set_all_visible(bool(_label_ref.isVisible()))
+        except Exception:
+            pass
     
     _register_many(config.get('toggle_visibility', ['f1']), toggle_visibility)
     
@@ -146,10 +156,62 @@ def reload_hotkeys():
     
     def switch():
         arts = get_art_list()
-        if not arts:
+
+        # Read combos from app_settings.json.
+        combos = []
+        try:
+            with open("app_settings.json", "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+                raw = data.get("art_combos") if isinstance(data, dict) else None
+                if isinstance(raw, list):
+                    for c in raw:
+                        if not isinstance(c, dict):
+                            continue
+                        name = str(c.get("name") or "").strip()
+                        keys = c.get("keys")
+                        if not name or not isinstance(keys, list) or not keys:
+                            continue
+                        combos.append({"type": "combo", "name": name, "keys": [str(k) for k in keys if str(k).strip()]})
+        except Exception:
+            combos = []
+
+        entries = ([{"type": "file", "path": p} for p in arts] + combos)
+        if not entries:
             return
-        index[0] = (index[0] + 1) % len(arts)
-        path = arts[index[0]]
+
+        index[0] = (index[0] + 1) % len(entries)
+        entry = entries[index[0]]
+
+        if entry.get("type") == "combo":
+            keys = entry.get("keys") or []
+            try:
+                if _overlay_controller_ref is not None:
+                    _overlay_controller_ref.set_selection_keys(keys)
+                    if _label_ref.isVisible():
+                        _overlay_controller_ref.render_selected_from_folder("display_images")
+                        _overlay_controller_ref.set_all_visible(True)
+                    # Keep base label transparent.
+                    try:
+                        pm = QPixmap(_label_ref.width(), _label_ref.height())
+                        pm.fill(0)
+                        _label_ref.setPixmap(pm)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            return
+
+        # File: clear selection and set single art.
+        try:
+            if _overlay_controller_ref is not None:
+                _overlay_controller_ref.clear_selection()
+                _overlay_controller_ref.set_all_visible(False)
+        except Exception:
+            pass
+
+        path = str(entry.get("path") or "").strip()
+        if not path:
+            return
         try:
             set_label_art_from_path(_label_ref, path)
         except Exception:
@@ -159,10 +221,12 @@ def reload_hotkeys():
     _register_many(config.get('switch_image', ['f2']), switch)
 
 
-def setup_hotkeys(label):
+def setup_hotkeys(label, *, overlay_controller=None):
     """Initialize all hotkeys."""
     global _label_ref
+    global _overlay_controller_ref
     _label_ref = label
+    _overlay_controller_ref = overlay_controller
     reload_hotkeys()
 
 

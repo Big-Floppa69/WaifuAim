@@ -53,10 +53,11 @@ class DarkControlPanel(QWidget):
 
     APP_SETTINGS_PATH = Path(__file__).resolve().with_name("app_settings.json")
     
-    def __init__(self, image_label, crosshair_label, parent=None):
+    def __init__(self, image_label, crosshair_label, parent=None, *, art_overlay_controller=None):
         super().__init__(parent)
         self.image_label = image_label
         self.crosshair_label = crosshair_label
+        self.art_overlay_controller = art_overlay_controller
         self.is_visible = False
         self.drag_position = None
         self.current_image_index = 0
@@ -1835,10 +1836,57 @@ class DarkControlPanel(QWidget):
 
     def toggle_image_visibility(self):
         """Toggle imported image visibility."""
+        # If there are checked items (selection), Show/Hide controls all of them.
+        selected = []
+        try:
+            if self.art_overlay_controller is not None:
+                selected = self.art_overlay_controller.enabled_keys()
+        except Exception:
+            selected = []
+
         if self.image_label.isVisible():
-            self.image_label.hide()
+            # Hide everything.
+            try:
+                self.image_label.hide()
+            except Exception:
+                pass
+            try:
+                if self.art_overlay_controller is not None:
+                    self.art_overlay_controller.set_all_visible(False)
+            except Exception:
+                pass
         else:
-            self.image_label.show()
+            # Show selection overlays if any; otherwise show single art as before.
+            try:
+                self.image_label.show()
+            except Exception:
+                pass
+
+            if selected:
+                try:
+                    if self.art_overlay_controller is not None:
+                        self.art_overlay_controller.render_selected_from_folder("display_images")
+                        self.art_overlay_controller.set_all_visible(True)
+                    # Keep the base label transparent in multi-art mode.
+                    try:
+                        pm = QPixmap(self.image_label.width(), self.image_label.height())
+                        pm.fill(Qt.GlobalColor.transparent)
+                        self.image_label.setPixmap(pm)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            else:
+                # Single-art mode: if nothing loaded yet, load first.
+                try:
+                    arts = get_art_list()
+                    if arts:
+                        if self.current_image_index < 0 or self.current_image_index >= len(arts):
+                            self.current_image_index = 0
+                        set_label_art_from_path(self.image_label, arts[self.current_image_index])
+                except Exception:
+                    pass
+
         self._update_image_toggle_text()
         self._sync_action_bar_state()
     
@@ -1861,6 +1909,11 @@ class DarkControlPanel(QWidget):
         opacity = value / 100.0
         transparent(self.image_label, opacity)
         transparent(self.crosshair_label, opacity)
+        try:
+            if self.art_overlay_controller is not None:
+                self.art_overlay_controller.set_global_opacity(opacity)
+        except Exception:
+            pass
         self.opacity_value.setText(f"{value}%")
         
         # Update check marks in tray menu
@@ -1874,22 +1927,69 @@ class DarkControlPanel(QWidget):
     
     def switch_image(self):
         """Switch to the next crosshair image."""
-        # Refresh image list in case new images were added
-        self.image_list = get_art_list()
-        if not self.image_list:
+        # Build cycle list: files + saved combos.
+        files = get_art_list()
+        data = self._read_app_settings()
+        combos = data.get("art_combos")
+        combo_entries = []
+        if isinstance(combos, list):
+            for c in combos:
+                if not isinstance(c, dict):
+                    continue
+                name = str(c.get("name") or "").strip()
+                keys = c.get("keys")
+                if not name or not isinstance(keys, list) or not keys:
+                    continue
+                combo_entries.append({"type": "combo", "name": name, "keys": [str(k) for k in keys if str(k).strip()]})
+
+        entries = ([{"type": "file", "path": p} for p in files] + combo_entries)
+        if not entries:
             return
-        self.current_image_index = (self.current_image_index + 1) % len(self.image_list)
-        path = self.image_list[self.current_image_index]
+
+        # Find next entry.
+        self.current_image_index = (self.current_image_index + 1) % len(entries)
+        entry = entries[self.current_image_index]
+
+        if entry.get("type") == "combo":
+            keys = entry.get("keys") or []
+            try:
+                if self.art_overlay_controller is not None:
+                    self.art_overlay_controller.set_selection_keys(keys)
+                    if self.image_label.isVisible():
+                        self.art_overlay_controller.render_selected_from_folder("display_images")
+                        self.art_overlay_controller.set_all_visible(True)
+                    # Keep base label transparent.
+                    pm = QPixmap(self.image_label.width(), self.image_label.height())
+                    pm.fill(Qt.GlobalColor.transparent)
+                    self.image_label.setPixmap(pm)
+            except Exception:
+                pass
+            return
+
+        # File entry: clear selection (no checkmarks) and behave as usual.
+        try:
+            if self.art_overlay_controller is not None:
+                self.art_overlay_controller.clear_selection()
+                self.art_overlay_controller.set_all_visible(False)
+        except Exception:
+            pass
+
+        path = str(entry.get("path") or "").strip()
+        if not path:
+            return
         try:
             set_label_art_from_path(self.image_label, path)
         except Exception:
-            pix = QPixmap(path)
-            self.image_label.setPixmap(pix)
+            try:
+                pix = QPixmap(path)
+                self.image_label.setPixmap(pix)
+            except Exception:
+                pass
     
     def open_image_manager(self):
         """Open the image manager dialog."""
         if self.image_manager is None:
-            self.image_manager = ImageManagerDialog(self)
+            self.image_manager = ImageManagerDialog(self, overlay_controller=self.art_overlay_controller)
         self.image_manager.show()
         self.image_manager.raise_()
         self.image_manager.activateWindow()

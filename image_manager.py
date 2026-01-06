@@ -7,23 +7,37 @@ from pathlib import Path
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QListWidget, QListWidgetItem, QFileDialog, 
                              QLabel, QFrame, QGraphicsDropShadowEffect, 
-                             QMessageBox, QApplication)
+                             QMessageBox, QApplication, QInputDialog)
 from PyQt6.QtGui import QPixmap, QColor, QIcon, QPainter, QPen
 from PyQt6.QtCore import Qt, QSize, QUrl, QPoint
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
-from image_editor import ImageEditorDialog
+import json
 from utils import UI_THEME, ART_EXTS, IMAGE_EXTS, is_video_path
+from image_editor import ImageEditorDialog
+
+
+def _read_hotkey_config() -> dict:
+    try:
+        with open("hotkey_config.json", "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+            return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
 
 
 class ImageManagerDialog(QWidget):
     """Dialog for managing crosshair images."""
     
-    def __init__(self, parent=None, images_folder="display_images"):
+    def __init__(self, parent=None, images_folder="display_images", *, overlay_controller=None):
         super().__init__(parent)
         # Use absolute path to ensure we have proper path handling
         self.images_folder = os.path.abspath(images_folder)
         self.drag_position = None
+        self.overlay_controller = overlay_controller
+        self._updating_checks = False
+        # Compositions / layer editor removed; this dialog manages assets only.
         self.image_editor = None
+        self._edit_btn = None
         self._thumb_player = None
         self._thumb_sink = None
         self._thumb_audio = None
@@ -32,6 +46,30 @@ class ImageManagerDialog(QWidget):
         self._thumb_timer = None
         self.init_ui()
         self.load_images()
+
+    def showEvent(self, event):  # type: ignore[override]
+        super().showEvent(event)
+        # Enable drag context while the Art Manager is open.
+        try:
+            if self.overlay_controller is not None:
+                cfg = _read_hotkey_config()
+                hold = cfg.get("hold_to_drag", [])
+                self.overlay_controller.set_hold_to_drag(hold)
+                self.overlay_controller.set_drag_context(True, selected_key=self._current_selected_key())
+        except Exception:
+            pass
+
+    def closeEvent(self, event):  # type: ignore[override]
+        try:
+            if self.overlay_controller is not None:
+                self.overlay_controller.set_drag_context(False, selected_key=None)
+        except Exception:
+            pass
+        try:
+            self._stop_thumbnailer()
+        except Exception:
+            pass
+        return super().closeEvent(event)
     
     def init_ui(self):
         """Initialize the user interface."""
@@ -180,20 +218,40 @@ class ImageManagerDialog(QWidget):
             + "; }"
         )
         self.image_list.setIconSize(QSize(48, 48))
+        self.image_list.itemChanged.connect(self._on_item_check_changed)
+        self.image_list.currentItemChanged.connect(self._on_selection_changed)
         content_layout.addWidget(self.image_list)
         
         # Button container
         button_layout = QHBoxLayout()
         button_layout.setSpacing(10)
-        add_btn = self._create_button("➕ Add Art", role="neutral")
+        add_btn = self._create_button("➕", role="neutral")
+        add_btn.setToolTip("Add Art")
         add_btn.clicked.connect(self.add_image)
         button_layout.addWidget(add_btn)
-        edit_btn = self._create_button("✏️ Edit", role="neutral")
-        edit_btn.clicked.connect(self.edit_image)
-        button_layout.addWidget(edit_btn)
-        remove_btn = self._create_button("🗑️ Remove", role="danger")
+        remove_btn = self._create_button("🗑️", role="danger")
+        remove_btn.setToolTip("Remove")
         remove_btn.clicked.connect(self.remove_image)
         button_layout.addWidget(remove_btn)
+
+        edit_btn = self._create_button("✏️", role="neutral")
+        edit_btn.setToolTip("Edit selected")
+        edit_btn.setEnabled(False)
+        edit_btn.clicked.connect(self.edit_selected)
+        self._edit_btn = edit_btn
+        button_layout.addWidget(edit_btn)
+
+        show_btn = self._create_button("👁", role="primary")
+        show_btn.setCheckable(True)
+        show_btn.setChecked(False)
+        show_btn.setToolTip("Show/Hide marked")
+        show_btn.clicked.connect(lambda: self._toggle_show_marked(show_btn.isChecked()))
+        button_layout.addWidget(show_btn)
+
+        combo_btn = self._create_button("💾", role="neutral")
+        combo_btn.setToolTip("Save marked as combo")
+        combo_btn.clicked.connect(self.save_marked_as_combo)
+        button_layout.addWidget(combo_btn)
         content_layout.addLayout(button_layout)
         
         # Refresh button
@@ -269,6 +327,7 @@ class ImageManagerDialog(QWidget):
     
     def load_images(self):
         """Load and display art from the display_images folder."""
+        self._updating_checks = True
         self.image_list.clear()
         
         # Ensure folder exists
@@ -312,11 +371,31 @@ class ImageManagerDialog(QWidget):
         self._thumb_queue = []
         self._thumb_current = None
 
+        def _key_for_path(p: str) -> str:
+            try:
+                root = os.path.dirname(os.path.abspath(__file__))
+                return os.path.relpath(os.path.abspath(p), root).replace("\\", "/")
+            except Exception:
+                return os.path.abspath(p).replace("\\", "/")
+
         for filename in sorted(os.listdir(self.images_folder)):
             if not filename.lower().endswith(ART_EXTS):
                 continue
             file_path = os.path.join(self.images_folder, filename)
+            key = _key_for_path(file_path)
             item = QListWidgetItem(filename)
+
+            # Checkbox enables/disables this file as a separate overlay element.
+            try:
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+                item.setData(Qt.ItemDataRole.UserRole, key)
+                item.setData(Qt.ItemDataRole.UserRole + 1, os.path.abspath(file_path))
+                enabled = False
+                if self.overlay_controller is not None:
+                    enabled = bool(self.overlay_controller.is_enabled(key))
+                item.setCheckState(Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked)
+            except Exception:
+                pass
 
             try:
                 if filename.lower().endswith(IMAGE_EXTS):
@@ -338,8 +417,24 @@ class ImageManagerDialog(QWidget):
 
             self.image_list.addItem(item)
 
+            # Do not render overlays here; checkmarks are selection only.
+
         # Kick off thumbnail generation after list is populated.
         self._start_thumbnailer()
+
+        self._updating_checks = False
+
+        # Keep selection consistent and update drag target.
+        try:
+            if self.image_list.count() > 0 and self.image_list.currentRow() < 0:
+                self.image_list.setCurrentRow(0)
+        except Exception:
+            pass
+        try:
+            if self.overlay_controller is not None:
+                self.overlay_controller.set_selected_key(self._current_selected_key())
+        except Exception:
+            pass
 
     def _start_thumbnailer(self) -> None:
         if not self._thumb_queue:
@@ -517,116 +612,9 @@ class ImageManagerDialog(QWidget):
             # Refresh list
             self.load_images()
             
-            # Ask if user wants to edit the first added image
-            if files:
-                reply = QMessageBox.question(
-                    self,
-                    'Edit Art',
-                    'Would you like to edit the added item(s)?',
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-                )
-                
-                if reply == QMessageBox.StandardButton.Yes:
-                    # Edit the first added item
-                    first_file = files[0]
-                    filename = os.path.basename(first_file)
-                    dest_path = os.path.join(self.images_folder, filename)
-                    
-                    if self.image_editor is None:
-                        self.image_editor = ImageEditorDialog(dest_path)
-                        self.image_editor.image_saved.connect(self.on_image_saved)
-                        try:
-                            self.image_editor.asset_renamed.connect(self.on_asset_renamed)
-                        except Exception:
-                            pass
-                        try:
-                            self.image_editor.asset_deleted.connect(self.on_asset_deleted)
-                        except Exception:
-                            pass
-                    else:
-                        try:
-                            self.image_editor.close()
-                        except Exception:
-                            pass
-                        self.image_editor = ImageEditorDialog(dest_path)
-                        self.image_editor.image_saved.connect(self.on_image_saved)
-                        try:
-                            self.image_editor.asset_renamed.connect(self.on_asset_renamed)
-                        except Exception:
-                            pass
-                        try:
-                            self.image_editor.asset_deleted.connect(self.on_asset_deleted)
-                        except Exception:
-                            pass
-                    
-                    self.image_editor.show()
-                    self.image_editor.raise_()
-                    self.image_editor.activateWindow()
+            # No editor prompt; assets are immediately available in the folder.
     
-    def edit_image(self):
-        """Open the image editor for the selected image."""
-        current_item = self.image_list.currentItem()
-        if not current_item:
-            QMessageBox.information(
-                self,
-                'No Selection',
-                'Please select an item to edit.'
-            )
-            return
-        
-        filename = current_item.text()
-        file_path = os.path.join(self.images_folder, filename)
-        
-        # Create or show image editor. The editor will auto-load a matching
-        # sidecar project (e.g., X.zzc.json) if it exists, so reopening a saved
-        # composite stays editable (layers), not a fused MP4.
-        if self.image_editor is None:
-            self.image_editor = ImageEditorDialog(file_path)
-            self.image_editor.image_saved.connect(self.on_image_saved)
-            try:
-                self.image_editor.asset_renamed.connect(self.on_asset_renamed)
-            except Exception:
-                pass
-            try:
-                self.image_editor.asset_deleted.connect(self.on_asset_deleted)
-            except Exception:
-                pass
-        else:
-            try:
-                self.image_editor.close()
-            except Exception:
-                pass
-            self.image_editor = ImageEditorDialog(file_path)
-            self.image_editor.image_saved.connect(self.on_image_saved)
-            try:
-                self.image_editor.asset_renamed.connect(self.on_asset_renamed)
-            except Exception:
-                pass
-            try:
-                self.image_editor.asset_deleted.connect(self.on_asset_deleted)
-            except Exception:
-                pass
-        
-        self.image_editor.show()
-        self.image_editor.raise_()
-        self.image_editor.activateWindow()
-    
-    def on_image_saved(self, file_path):
-        """Handle image saved signal from editor."""
-        self.load_images()
-
-    def on_asset_renamed(self, old_path: str, new_path: str) -> None:
-        self.load_images()
-        try:
-            new_name = os.path.basename(new_path)
-            matches = self.image_list.findItems(new_name, Qt.MatchFlag.MatchExactly)
-            if matches:
-                self.image_list.setCurrentItem(matches[0])
-        except Exception:
-            pass
-
-    def on_asset_deleted(self, deleted_path: str) -> None:
-        self.load_images()
+    # Composition editor removed.
     
     def remove_image(self):
         """Remove the selected image."""
@@ -652,6 +640,14 @@ class ImageManagerDialog(QWidget):
         if reply == QMessageBox.StandardButton.Yes:
             try:
                 file_path = os.path.join(self.images_folder, filename)
+                # Disable overlay before deleting the file.
+                try:
+                    if self.overlay_controller is not None:
+                        root = os.path.dirname(os.path.abspath(__file__))
+                        key = os.path.relpath(os.path.abspath(file_path), root).replace("\\", "/")
+                        self.overlay_controller.enable(key, path=os.path.abspath(file_path), enabled=False)
+                except Exception:
+                    pass
                 os.remove(file_path)
                 self.load_images()
             except Exception as e:
@@ -661,12 +657,156 @@ class ImageManagerDialog(QWidget):
                     f'Failed to delete {filename}: {str(e)}'
                 )
 
-    def closeEvent(self, event):  # type: ignore[override]
+    def _current_selected_key(self):
         try:
-            self._stop_thumbnailer()
+            it = self.image_list.currentItem()
+            if it is None:
+                return None
+            key = it.data(Qt.ItemDataRole.UserRole)
+            return str(key) if key else None
+        except Exception:
+            return None
+
+    def _on_selection_changed(self, current, _prev):
+        try:
+            if self.overlay_controller is not None:
+                self.overlay_controller.set_selected_key(self._current_selected_key())
         except Exception:
             pass
-        return super().closeEvent(event)
+        try:
+            if self._edit_btn is not None:
+                self._edit_btn.setEnabled(current is not None)
+        except Exception:
+            pass
+
+    def edit_selected(self) -> None:
+        it = self.image_list.currentItem()
+        if it is None:
+            return
+        key = str(it.data(Qt.ItemDataRole.UserRole) or "").strip()
+        path = str(it.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
+        if not path:
+            return
+        if not os.path.exists(path):
+            QMessageBox.warning(self, "Edit", "Selected file no longer exists.")
+            try:
+                self.load_images()
+            except Exception:
+                pass
+            return
+
+        try:
+            if self.image_editor is not None:
+                try:
+                    self.image_editor.close()
+                except Exception:
+                    pass
+                self.image_editor = None
+        except Exception:
+            pass
+
+        try:
+            self.image_editor = ImageEditorDialog(
+                image_path=path,
+                parent=None,
+                overlay_controller=self.overlay_controller,
+                asset_key=key or None,
+            )
+            self.image_editor.image_saved.connect(lambda _p: self.load_images())
+            self.image_editor.asset_renamed.connect(lambda _o, _n: self.load_images())
+            self.image_editor.asset_deleted.connect(lambda _p: self.load_images())
+            self.image_editor.show()
+        except Exception as e:
+            QMessageBox.warning(self, "Edit", f"Failed to open editor: {e}")
+
+    def _on_item_check_changed(self, item: QListWidgetItem):
+        if self._updating_checks:
+            return
+        if self.overlay_controller is None:
+            return
+        try:
+            key = str(item.data(Qt.ItemDataRole.UserRole) or "")
+            path = str(item.data(Qt.ItemDataRole.UserRole + 1) or "")
+            if not key or not path:
+                return
+            enabled = (item.checkState() == Qt.CheckState.Checked)
+            self.overlay_controller.enable(key, path=path, enabled=enabled)
+        except Exception:
+            pass
+
+    def _toggle_show_marked(self, show: bool) -> None:
+        if self.overlay_controller is None:
+            return
+        try:
+            if show:
+                self.overlay_controller.render_selected_from_folder("display_images")
+                self.overlay_controller.set_all_visible(True)
+            else:
+                self.overlay_controller.set_all_visible(False)
+        except Exception:
+            pass
+
+    def _read_app_settings(self) -> dict:
+        try:
+            here = Path(__file__).resolve().with_name("app_settings.json")
+            if here.exists():
+                raw = json.loads(here.read_text(encoding="utf-8"))
+                return raw if isinstance(raw, dict) else {}
+        except Exception:
+            return {}
+        return {}
+
+    def _write_app_settings(self, data: dict) -> None:
+        try:
+            if not isinstance(data, dict):
+                return
+            here = Path(__file__).resolve().with_name("app_settings.json")
+            here.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+    def save_marked_as_combo(self) -> None:
+        # Gather checked keys.
+        keys: list[str] = []
+        try:
+            for i in range(self.image_list.count()):
+                it = self.image_list.item(i)
+                if it is None:
+                    continue
+                if it.checkState() != Qt.CheckState.Checked:
+                    continue
+                k = str(it.data(Qt.ItemDataRole.UserRole) or "").strip()
+                if k:
+                    keys.append(k)
+        except Exception:
+            keys = []
+
+        if not keys:
+            QMessageBox.information(self, "Save Combo", "No marked items to save.")
+            return
+
+        name, ok = QInputDialog.getText(self, "Save Combo", "Combo name:", text="Combo")
+        if not ok:
+            return
+        name = str(name or "").strip() or "Combo"
+
+        data = self._read_app_settings()
+        combos = data.get("art_combos")
+        if not isinstance(combos, list):
+            combos = []
+
+        existing = {str(c.get("name")) for c in combos if isinstance(c, dict) and c.get("name")}
+        base = name
+        if base in existing:
+            n = 2
+            while f"{base} ({n})" in existing:
+                n += 1
+            name = f"{base} ({n})"
+
+        combos.append({"name": name, "keys": keys})
+        data["art_combos"] = combos
+        self._write_app_settings(data)
+        QMessageBox.information(self, "Save Combo", f"Saved combo: {name}")
     
     def mousePressEvent(self, event):
         """Handle mouse press events for dragging."""

@@ -4,6 +4,7 @@ Image Editor Dialog with positioning tools.
 from __future__ import annotations
 
 import os
+from typing import Any
 from dataclasses import dataclass
 from typing import Optional
 
@@ -19,6 +20,18 @@ from utils import (
     ART_EXTS,
     is_video_path,
 )
+
+
+def _screen_size() -> tuple[int, int]:
+    try:
+        geo = QApplication.primaryScreen().geometry()
+        w = int(geo.width())
+        h = int(geo.height())
+        if w > 0 and h > 0:
+            return w, h
+    except Exception:
+        pass
+    return 1920, 1080
 
 try:
     import cv2  # type: ignore
@@ -182,12 +195,17 @@ class ImageEditorDialog(QWidget):
     asset_renamed = pyqtSignal(str, str)  # old_path, new_path (source file)
     asset_deleted = pyqtSignal(str)  # selected element removed (source path)
     
-    def __init__(self, image_path=None, parent=None):
+    def __init__(self, image_path=None, parent=None, *, overlay_controller: Any = None, asset_key: Optional[str] = None):
         super().__init__(parent)
         self.image_path = None
         self.drag_position = None
         self._layers: list[_Layer] = []
         self._updating_controls = False
+
+        # Optional: when opened from Art Manager, save only transform/opacity
+        # to app_settings.json instead of exporting a new PNG/MP4.
+        self._overlay_controller = overlay_controller
+        self._asset_key = str(asset_key) if asset_key else None
         
         self.init_ui()
         
@@ -199,6 +217,13 @@ class ImageEditorDialog(QWidget):
                 self._load_project(project_path)
             else:
                 self.add_art(image_path)
+
+            # If this editor is opened for a single overlay element, apply its
+            # saved transform/opacity for preview.
+            try:
+                self._apply_overlay_state_to_single_layer()
+            except Exception:
+                pass
     
     def init_ui(self):
         """Initialize the user interface."""
@@ -321,6 +346,15 @@ class ImageEditorDialog(QWidget):
         
         # Canvas
         self.canvas = ImageCanvas()
+        # The overlay system uses screen coordinates; keep preview mapping consistent.
+        try:
+            sw, sh = _screen_size()
+            self.canvas.canvas_width = int(sw)
+            self.canvas.canvas_height = int(sh)
+            self.canvas.setSceneRect(0, 0, self.canvas.canvas_width, self.canvas.canvas_height)
+            self.canvas._fit_scene()
+        except Exception:
+            pass
         try:
             self.canvas.scene.selectionChanged.connect(self._sync_controls_from_selection)
         except Exception:
@@ -664,6 +698,41 @@ class ImageEditorDialog(QWidget):
             QMessageBox.information(self, "No Content", "Add images/videos first.")
             return
 
+        # Single element editing mode (from Art Manager): persist transform instead
+        # of exporting, to avoid black background MP4 canvases.
+        if self._overlay_controller is not None and self._asset_key and len(self._layers) == 1:
+            try:
+                layer = self._layers[0]
+                it = layer.item
+                pos = it.pos()
+                zoom = float(it.scale() or 1.0)
+                rot = float(it.rotation() or 0.0)
+                op = float(it.opacity() if it.opacity() is not None else 1.0)
+
+                # Coordinates are already in screen space because we set the
+                # editor canvas to the primary screen size.
+                x = float(pos.x())
+                y = float(pos.y())
+
+                try:
+                    self._overlay_controller.set_transform(self._asset_key, {"x": x, "y": y, "zoom": zoom, "rotation": rot})
+                except Exception:
+                    pass
+                try:
+                    self._overlay_controller.set_opacity(self._asset_key, op)
+                except Exception:
+                    pass
+
+                QMessageBox.information(self, "Saved", "Saved position for this element.")
+                try:
+                    self.close()
+                except Exception:
+                    pass
+                return
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Failed to save position: {e}")
+                return
+
         has_video = any(l.is_video for l in self._layers)
         if has_video and (cv2 is None or np is None):
             QMessageBox.warning(
@@ -715,6 +784,68 @@ class ImageEditorDialog(QWidget):
                     pass
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to save: {str(e)}")
+
+    def _apply_overlay_state_to_single_layer(self) -> None:
+        if self._overlay_controller is None or not self._asset_key:
+            return
+        if len(self._layers) != 1:
+            return
+        it = self._layers[0].item
+
+        try:
+            t = self._overlay_controller.get_transform(self._asset_key)
+        except Exception:
+            t = {}
+
+        try:
+            x = float(t.get("x", it.pos().x()) or 0.0)
+        except Exception:
+            x = float(it.pos().x())
+        try:
+            y = float(t.get("y", it.pos().y()) or 0.0)
+        except Exception:
+            y = float(it.pos().y())
+        try:
+            zoom = float(t.get("zoom", it.scale()) or 1.0)
+        except Exception:
+            zoom = float(it.scale() or 1.0)
+        try:
+            rot = float(t.get("rotation", it.rotation()) or 0.0)
+        except Exception:
+            rot = float(it.rotation() or 0.0)
+
+        # Opacity is stored separately in overlay settings.
+        try:
+            st = getattr(self._overlay_controller, "_get_state", None)
+            if callable(st):
+                op = float(st(self._asset_key).opacity)
+            else:
+                op = 1.0
+        except Exception:
+            op = 1.0
+
+        try:
+            it.setPos(float(x), float(y))
+        except Exception:
+            pass
+        try:
+            if zoom > 0:
+                it.setScale(float(zoom))
+        except Exception:
+            pass
+        try:
+            it.setRotation(float(rot))
+        except Exception:
+            pass
+        try:
+            it.setOpacity(max(0.0, min(1.0, float(op))))
+        except Exception:
+            pass
+
+        try:
+            self._sync_controls_from_selection()
+        except Exception:
+            pass
 
     def _start_export_mp4(self, output_path: str) -> None:
         # Use OpenCV to step frames for each source video; render the Qt scene

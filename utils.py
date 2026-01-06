@@ -368,10 +368,24 @@ class _LabelVideoPlayer(QObject):
             img = _key_out_near_black(img, threshold=self._key_threshold)
 
         # Transform defaults.
+        # If zoom is not specified, fit the frame into the canvas.
         try:
-            zoom = float(self._transform.get("zoom", 1.0) or 1.0)
+            zoom_raw = self._transform.get("zoom", None)
         except Exception:
-            zoom = 1.0
+            zoom_raw = None
+
+        if zoom_raw is None:
+            try:
+                zw = float(self._canvas_w) / float(max(1, img.width()))
+                zh = float(self._canvas_h) / float(max(1, img.height()))
+                zoom = min(zw, zh)
+            except Exception:
+                zoom = 1.0
+        else:
+            try:
+                zoom = float(zoom_raw or 1.0)
+            except Exception:
+                zoom = 1.0
         try:
             rotation = float(self._transform.get("rotation", 0.0) or 0.0)
         except Exception:
@@ -448,17 +462,127 @@ def _stop_label_video_if_any(label: QLabel) -> None:
     _set_attr(label, "_zzz_video_player", None)
 
 
-def set_label_art_from_path(label: QLabel, path: str) -> None:
-    """Set the overlay label content from either an image or a video path."""
+def set_label_art_from_path(
+    label: QLabel,
+    path: str,
+    *,
+    canvas_size: Optional[tuple[int, int]] = None,
+    transform: Optional[dict] = None,
+) -> None:
+    """Set the overlay label content from either an image or a video path.
+
+    Backwards compatible behavior (existing calls):
+    - images render directly via `set_label_image_from_path` (supports mirroring + CVD).
+    - videos render via a QVideoSink player into the label.
+
+    New behavior (used by "media elements"):
+    - optional `canvas_size` and `transform` allow rendering the asset into a
+      full-screen transparent canvas (x/y/zoom/rotation), so multiple elements
+      can be layered as independent overlay labels.
+    """
     path = str(path or "").strip()
     if not path:
         return
 
     _stop_label_video_if_any(label)
 
+    # Determine canvas size (for sprite-style rendering).
+    if canvas_size is None:
+        try:
+            w = int(label.width())
+            h = int(label.height())
+            if w > 0 and h > 0:
+                canvas_size = (w, h)
+        except Exception:
+            canvas_size = None
+
     if not is_video_path(path):
-        set_label_image_from_path(label, path)
+        # Default (legacy) behavior: image fills label pixmap directly.
+        if transform is None and canvas_size is None:
+            set_label_image_from_path(label, path)
+            return
+
+        # Sprite-style image rendering onto a transparent canvas.
+        try:
+            img = QImage(path)
+            if img.isNull():
+                return
+        except Exception:
+            return
+
+        cw, ch = (1920, 1080)
+        try:
+            if canvas_size is not None:
+                cw, ch = int(canvas_size[0]), int(canvas_size[1])
+        except Exception:
+            cw, ch = (1920, 1080)
+
+        t = dict(transform or {})
+        try:
+            zoom = float(t.get("zoom", 1.0) or 1.0)
+        except Exception:
+            zoom = 1.0
+        try:
+            rotation = float(t.get("rotation", 0.0) or 0.0)
+        except Exception:
+            rotation = 0.0
+        try:
+            pos_x = float(t.get("x", (cw - img.width()) / 2.0) or 0.0)
+        except Exception:
+            pos_x = (cw - img.width()) / 2.0
+        try:
+            pos_y = float(t.get("y", (ch - img.height()) / 2.0) or 0.0)
+        except Exception:
+            pos_y = (ch - img.height()) / 2.0
+
+        if not (zoom > 0):
+            zoom = 1.0
+        zoom = max(0.05, min(10.0, zoom))
+        try:
+            rotation = float(rotation) % 360.0
+        except Exception:
+            rotation = 0.0
+
+        canvas = QImage(cw, ch, QImage.Format.Format_ARGB32_Premultiplied)
+        canvas.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(canvas)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+        try:
+            img2 = img.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+        except Exception:
+            img2 = img
+        w = float(img2.width())
+        h = float(img2.height())
+
+        painter.save()
+        painter.translate(pos_x + (w * zoom) / 2.0, pos_y + (h * zoom) / 2.0)
+        painter.rotate(rotation)
+        if zoom != 1.0:
+            painter.scale(zoom, zoom)
+        painter.translate(-w / 2.0, -h / 2.0)
+        painter.drawImage(0, 0, img2)
+        painter.restore()
+        painter.end()
+
+        try:
+            label.setPixmap(QPixmap.fromImage(canvas))
+        except Exception:
+            pass
         return
+
+    # If this label is already playing the same video, just update transform.
+    try:
+        existing_src = _get_attr(label, "_zzz_video_source", None)
+        existing_player = _get_attr(label, "_zzz_video_player", None)
+        if isinstance(existing_src, str) and os.path.abspath(existing_src) == os.path.abspath(path) and existing_player is not None:
+            try:
+                existing_player.set_transform(dict(transform or {}))
+                return
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     # Clear any stored image source so image-only operations don't interfere.
     try:
@@ -467,34 +591,25 @@ def set_label_art_from_path(label: QLabel, path: str) -> None:
     except Exception:
         pass
 
-    # Videos: render frames into label pixmap (looping) and apply saved transform.
-    transforms = load_art_transforms()
-    key = _normalize_art_key(path)
-    transform = transforms.get(key) if isinstance(transforms, dict) else None
+    # Videos: render frames into label pixmap (looping) and apply transform.
+    t = dict(transform or {})
 
-    # If this video is a saved composite (has a sidecar project), treat near-black
-    # pixels as transparent during playback.
-    base, _ext = os.path.splitext(os.path.abspath(path))
-    sidecar = base + ".zzc.json"
-    key_black = False
-    if os.path.exists(sidecar):
-        # Only enable keying if the sidecar looks like it was produced as the
-        # project for *this* output video.
-        try:
-            raw = json.loads(Path(sidecar).read_text(encoding="utf-8"))
-            if isinstance(raw, dict) and str(raw.get("output") or "") == os.path.basename(path):
-                key_black = True
-        except Exception:
-            key_black = False
+    cw, ch = (1920, 1080)
+    try:
+        if canvas_size is not None:
+            cw, ch = int(canvas_size[0]), int(canvas_size[1])
+    except Exception:
+        cw, ch = (1920, 1080)
 
     player = _LabelVideoPlayer(
         label,
         path,
-        canvas_size=(1920, 1080),
-        transform=transform,
-        key_black=key_black,
+        canvas_size=(cw, ch),
+        transform=t,
+        key_black=False,
         key_threshold=12,
     )
+    _set_attr(label, "_zzz_video_source", path)
     _set_attr(label, "_zzz_video_player", player)
     player.start()
 

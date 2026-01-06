@@ -68,11 +68,21 @@ def _create_tray_menu(label, control_panel, controller, app, tray_icon):
             label.hide()
             if hasattr(control_panel, "crosshair_label"):
                 control_panel.crosshair_label.hide()
+            try:
+                if hasattr(control_panel, "art_overlay_controller") and control_panel.art_overlay_controller is not None:
+                    control_panel.art_overlay_controller.set_all_visible(False)
+            except Exception:
+                pass
             control_panel.hide()
         else:
             label.show()
             if hasattr(control_panel, "crosshair_label"):
                 control_panel.crosshair_label.show()
+            try:
+                if hasattr(control_panel, "art_overlay_controller") and control_panel.art_overlay_controller is not None:
+                    control_panel.art_overlay_controller.set_all_visible(True)
+            except Exception:
+                pass
 
         # Keep control panel toggle buttons in sync with actual visibility.
         try:
@@ -150,11 +160,21 @@ def _create_tray_menu(label, control_panel, controller, app, tray_icon):
             label.hide()
             if hasattr(control_panel, "crosshair_label"):
                 control_panel.crosshair_label.hide()
+            try:
+                if hasattr(control_panel, "art_overlay_controller") and control_panel.art_overlay_controller is not None:
+                    control_panel.art_overlay_controller.set_all_visible(False)
+            except Exception:
+                pass
             control_panel.hide()
         else:
             label.show()
             if hasattr(control_panel, "crosshair_label"):
                 control_panel.crosshair_label.show()
+            try:
+                if hasattr(control_panel, "art_overlay_controller") and control_panel.art_overlay_controller is not None:
+                    control_panel.art_overlay_controller.set_all_visible(True)
+            except Exception:
+                pass
             control_panel.show()
         update_hide_ui_text()
 

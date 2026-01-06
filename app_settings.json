@@ -2,5 +2,72 @@
   "window_opacity": 100,
   "colorblind_mode": "default",
   "autostart_enabled": true,
-  "hotkeys_enabled": true
+  "hotkeys_enabled": true,
+  "media_elements": [
+    {
+      "id": "el_1767710577140",
+      "path": "C:/Users/matve/Downloads/jane_doe2.png",
+      "visible": true,
+      "opacity": 1.0,
+      "transform": {
+        "x": 149,
+        "y": 0,
+        "zoom": 0.21,
+        "rotation": 0
+      }
+    },
+    {
+      "id": "el_1767710603999",
+      "path": "C:/Users/matve/Downloads/miyabi-hoshimi-miyabi.mp4",
+      "visible": true,
+      "opacity": 1.0,
+      "transform": {
+        "x": -32,
+        "y": -317,
+        "zoom": 0.32,
+        "rotation": 0
+      }
+    }
+  ],
+  "art_overlays": {
+    "display_images/miyabi-hoshimi-miyabi.mp4": {
+      "enabled": true,
+      "opacity": 1.0,
+      "transform": {
+        "x": -124.45454545454538,
+        "y": 648.4545454545454,
+        "zoom": 0.65,
+        "rotation": 0.0
+      }
+    },
+    "display_images/astolfo1.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {}
+    },
+    "display_images/nagatoro.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {}
+    },
+    "display_images/astolfo2.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {}
+    },
+    "display_images/astra_yao.png": {
+      "enabled": true,
+      "opacity": 1.0,
+      "transform": {}
+    }
+  },
+  "art_combos": [
+    {
+      "name": "AstraYao+Miaby",
+      "keys": [
+        "display_images/astra_yao.png",
+        "display_images/miyabi-hoshimi-miyabi.mp4"
+      ]
+    }
+  ]
 }
