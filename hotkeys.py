@@ -212,11 +212,96 @@ def reload_hotkeys():
         path = str(entry.get("path") or "").strip()
         if not path:
             return
+
+            def _key_for_path(p: str) -> str:
+                try:
+                    root = os.path.dirname(os.path.abspath(__file__))
+                    return os.path.relpath(os.path.abspath(p), root).replace("\\", "/")
+                except Exception:
+                    return os.path.abspath(p).replace("\\", "/")
+
+            # Prefer overlay pipeline so single-file display is editable like combos.
+            try:
+                if _overlay_controller_ref is not None:
+                    key = _key_for_path(path)
+                    try:
+                        _overlay_controller_ref.clear_selection()
+                    except Exception:
+                        pass
+                    try:
+                        _overlay_controller_ref.set_selection_keys([key])
+                        if _label_ref.isVisible():
+                            _overlay_controller_ref.render_selected_from_folder("display_images")
+                            _overlay_controller_ref.set_all_visible(True)
+                        # Make base label transparent to avoid duplicate rendering.
+                        try:
+                            pm = QPixmap(_label_ref.width(), _label_ref.height())
+                            pm.fill(0)
+                            _label_ref.setPixmap(pm)
+                        except Exception:
+                            pass
+                        return
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Fallback to legacy rendering into the base label.
+            try:
+                set_label_art_from_path(_label_ref, path)
+            except Exception:
+                try:
+                    pix = QPixmap(path)
+                    _label_ref.setPixmap(pix)
+                except Exception:
+                    pass
+
+        def _key_for_path(p: str) -> str:
+            try:
+                root = os.path.dirname(os.path.abspath(__file__))
+                return os.path.relpath(os.path.abspath(p), root).replace("\\", "/")
+            except Exception:
+                return os.path.abspath(p).replace("\\", "/")
+
+        # If an overlay controller is present, prefer rendering the single
+        # file as an overlay element (same pipeline as combos). This makes
+        # the asset editable/movable via the Art Manager and avoids having
+        # two different rendering paths for the same file.
+        try:
+            if _overlay_controller_ref is not None:
+                key = _key_for_path(path)
+                try:
+                    _overlay_controller_ref.clear_selection()
+                except Exception:
+                    pass
+                try:
+                    _overlay_controller_ref.set_selection_keys([key])
+                    if _label_ref.isVisible():
+                        _overlay_controller_ref.render_selected_from_folder("display_images")
+                        _overlay_controller_ref.set_all_visible(True)
+                    # Make base label transparent to avoid duplicate rendering.
+                    try:
+                        pm = QPixmap(_label_ref.width(), _label_ref.height())
+                        pm.fill(0)
+                        _label_ref.setPixmap(pm)
+                    except Exception:
+                        pass
+                    return
+                except Exception:
+                    # Fall-through to legacy behavior on error.
+                    pass
+        except Exception:
+            pass
+
+        # Legacy fallback: render directly into the base label.
         try:
             set_label_art_from_path(_label_ref, path)
         except Exception:
-            pix = QPixmap(path)
-            _label_ref.setPixmap(pix)
+            try:
+                pix = QPixmap(path)
+                _label_ref.setPixmap(pix)
+            except Exception:
+                pass
     
     _register_many(config.get('switch_image', ['f2']), switch)
 

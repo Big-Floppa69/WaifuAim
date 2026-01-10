@@ -436,6 +436,36 @@ class ImageManagerDialog(QWidget):
         except Exception:
             pass
 
+        # Append saved combos (from app_settings.json) into the list so users
+        # can see and delete combos from the Art Manager.
+        try:
+            data = self._read_app_settings()
+            combos = data.get("art_combos")
+            if isinstance(combos, list) and combos:
+                for c in combos:
+                    try:
+                        if not isinstance(c, dict):
+                            continue
+                        name = str(c.get("name") or "").strip()
+                        keys = c.get("keys")
+                        if not name or not isinstance(keys, list):
+                            continue
+                        display_text = f"Combo: {name}"
+                        item = QListWidgetItem(display_text)
+                        # mark as combo type
+                        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+                        item.setData(Qt.ItemDataRole.UserRole, {"type": "combo", "name": name, "keys": [str(k) for k in keys]})
+                        # Use same icon as video for visibility (simple choice)
+                        try:
+                            item.setIcon(vid_icon)
+                        except Exception:
+                            pass
+                        self.image_list.addItem(item)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     def _start_thumbnailer(self) -> None:
         if not self._thumb_queue:
             return
@@ -627,6 +657,9 @@ class ImageManagerDialog(QWidget):
             )
             return
         
+        # Determine whether this is a regular asset or a combo entry.
+        item_meta = current_item.data(Qt.ItemDataRole.UserRole)
+        is_combo = isinstance(item_meta, dict) and item_meta.get("type") == "combo"
         filename = current_item.text()
         
         # Confirm deletion
@@ -638,6 +671,20 @@ class ImageManagerDialog(QWidget):
         )
         
         if reply == QMessageBox.StandardButton.Yes:
+            if is_combo:
+                # Remove combo from app_settings.json
+                try:
+                    data = self._read_app_settings()
+                    combos = data.get("art_combos")
+                    if isinstance(combos, list):
+                        new_combos = [c for c in combos if not (isinstance(c, dict) and str(c.get("name") or "") == item_meta.get("name"))]
+                        data["art_combos"] = new_combos
+                        self._write_app_settings(data)
+                    self.load_images()
+                except Exception as e:
+                    QMessageBox.warning(self, 'Error', f'Failed to delete combo {filename}: {e}')
+                return
+
             try:
                 file_path = os.path.join(self.images_folder, filename)
                 # Disable overlay before deleting the file.
@@ -675,7 +722,17 @@ class ImageManagerDialog(QWidget):
             pass
         try:
             if self._edit_btn is not None:
-                self._edit_btn.setEnabled(current is not None)
+                # Disable edit for combo items (they are not file assets).
+                editable = False
+                if current is not None:
+                    meta = current.data(Qt.ItemDataRole.UserRole)
+                    if isinstance(meta, dict) and meta.get("type") == "combo":
+                        editable = False
+                    else:
+                        # Require a backing path for editing.
+                        p = current.data(Qt.ItemDataRole.UserRole + 1)
+                        editable = bool(p)
+                self._edit_btn.setEnabled(editable)
         except Exception:
             pass
 

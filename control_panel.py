@@ -1877,13 +1877,54 @@ class DarkControlPanel(QWidget):
                 except Exception:
                     pass
             else:
-                # Single-art mode: if nothing loaded yet, load first.
+                # Single-art mode: if nothing loaded yet, load first. Prefer
+                # rendering via the ArtOverlayController so the element is
+                # editable (same pipeline as combos). Fall back to legacy
+                # label rendering when controller is not available.
                 try:
                     arts = get_art_list()
                     if arts:
                         if self.current_image_index < 0 or self.current_image_index >= len(arts):
                             self.current_image_index = 0
-                        set_label_art_from_path(self.image_label, arts[self.current_image_index])
+                        path = arts[self.current_image_index]
+
+                        def _key_for_path(p: str) -> str:
+                            try:
+                                root = os.path.dirname(os.path.abspath(__file__))
+                                return os.path.relpath(os.path.abspath(p), root).replace("\\", "/")
+                            except Exception:
+                                return os.path.abspath(p).replace("\\", "/")
+
+                        if self.art_overlay_controller is not None:
+                            try:
+                                key = _key_for_path(path)
+                                self.art_overlay_controller.clear_selection()
+                                self.art_overlay_controller.set_selection_keys([key])
+                                if self.image_label.isVisible():
+                                    self.art_overlay_controller.render_selected_from_folder("display_images")
+                                    self.art_overlay_controller.set_all_visible(True)
+                                pm = QPixmap(self.image_label.width(), self.image_label.height())
+                                pm.fill(Qt.GlobalColor.transparent)
+                                self.image_label.setPixmap(pm)
+                            except Exception:
+                                # Fall back to legacy rendering below
+                                try:
+                                    set_label_art_from_path(self.image_label, path)
+                                except Exception:
+                                    try:
+                                        pix = QPixmap(path)
+                                        self.image_label.setPixmap(pix)
+                                    except Exception:
+                                        pass
+                        else:
+                            try:
+                                set_label_art_from_path(self.image_label, path)
+                            except Exception:
+                                try:
+                                    pix = QPixmap(path)
+                                    self.image_label.setPixmap(pix)
+                                except Exception:
+                                    pass
                 except Exception:
                     pass
 
@@ -1977,6 +2018,36 @@ class DarkControlPanel(QWidget):
         path = str(entry.get("path") or "").strip()
         if not path:
             return
+        def _key_for_path(p: str) -> str:
+            try:
+                root = os.path.dirname(os.path.abspath(__file__))
+                return os.path.relpath(os.path.abspath(p), root).replace("\\", "/")
+            except Exception:
+                return os.path.abspath(p).replace("\\", "/")
+
+        # Prefer overlay pipeline so single-file display is editable like combos.
+        try:
+            if self.art_overlay_controller is not None:
+                key = _key_for_path(path)
+                try:
+                    self.art_overlay_controller.clear_selection()
+                except Exception:
+                    pass
+                try:
+                    self.art_overlay_controller.set_selection_keys([key])
+                    if self.image_label.isVisible():
+                        self.art_overlay_controller.render_selected_from_folder("display_images")
+                        self.art_overlay_controller.set_all_visible(True)
+                    pm = QPixmap(self.image_label.width(), self.image_label.height())
+                    pm.fill(Qt.GlobalColor.transparent)
+                    self.image_label.setPixmap(pm)
+                    return
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Fallback to legacy rendering into the base label.
         try:
             set_label_art_from_path(self.image_label, path)
         except Exception:
