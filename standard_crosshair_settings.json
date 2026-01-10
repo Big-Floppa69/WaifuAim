@@ -8,7 +8,7 @@
   "green": 255,
   "blue": 120,
   "alpha": 255,
-  "visible": true,
+  "visible": false,
   "dot_shape": "circle",
   "dot_size": 6,
   "show_left": true,
@@ -24,64 +24,7 @@
   "fan_enabled": false,
   "fan_speed": 60,
   "line_profiles": {},
-  "line_components": {
-    "left": [
-      {
-        "type": "segment",
-        "offset": 10.0,
-        "perp_offset": 0.0,
-        "length": 28.0,
-        "thickness": 4.0,
-        "angle_offset": 0.0,
-        "tip_offset": 0.0,
-        "draggable": true,
-        "_standard_base": true,
-        "_standard_linked": true
-      }
-    ],
-    "right": [
-      {
-        "type": "segment",
-        "offset": 10.0,
-        "perp_offset": 0.0,
-        "length": 28.0,
-        "thickness": 4.0,
-        "angle_offset": 0.0,
-        "tip_offset": 0.0,
-        "draggable": true,
-        "_standard_base": true,
-        "_standard_linked": true
-      }
-    ],
-    "top": [
-      {
-        "type": "segment",
-        "offset": 10.0,
-        "perp_offset": 0.0,
-        "length": 28.0,
-        "thickness": 4.0,
-        "angle_offset": 0.0,
-        "tip_offset": 0.0,
-        "draggable": true,
-        "_standard_base": true,
-        "_standard_linked": true
-      }
-    ],
-    "bottom": [
-      {
-        "type": "segment",
-        "offset": 10.0,
-        "perp_offset": 0.0,
-        "length": 28.0,
-        "thickness": 4.0,
-        "angle_offset": 0.0,
-        "tip_offset": 0.0,
-        "draggable": true,
-        "_standard_base": true,
-        "_standard_linked": true
-      }
-    ]
-  },
+  "line_components": {},
   "line_layers": [],
   "draggable_mode": false,
   "grid_snap_size": 5,

@@ -796,8 +796,7 @@ class ImageManagerDialog(QWidget):
             return
         try:
             if show:
-                self.overlay_controller.render_selected_from_folder("display_images")
-                self.overlay_controller.set_all_visible(True)
+                self.overlay_controller.request_render_selected_atomic("display_images", visible=True)
             else:
                 self.overlay_controller.set_all_visible(False)
         except Exception:

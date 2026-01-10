@@ -31,7 +31,7 @@
   ],
   "art_overlays": {
     "display_images/miyabi-hoshimi-miyabi.mp4": {
-      "enabled": true,
+      "enabled": false,
       "opacity": 1.0,
       "transform": {
         "x": 1164.1818181818178,
@@ -51,7 +51,7 @@
       "transform": {}
     },
     "display_images/astolfo2.png": {
-      "enabled": false,
+      "enabled": true,
       "opacity": 1.0,
       "transform": {}
     },

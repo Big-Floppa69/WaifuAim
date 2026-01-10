@@ -30,6 +30,7 @@ from utils import (
     mirror_horizontal,
     get_art_list,
     set_label_art_from_path,
+    clear_label_art,
     refresh_label_pixmap_for_colorblind_mode,
     transparent,
     UI_THEME,
@@ -1865,15 +1866,12 @@ class DarkControlPanel(QWidget):
             if selected:
                 try:
                     if self.art_overlay_controller is not None:
-                        self.art_overlay_controller.render_selected_from_folder("display_images")
-                        self.art_overlay_controller.set_all_visible(True)
-                    # Keep the base label transparent in multi-art mode.
-                    try:
-                        pm = QPixmap(self.image_label.width(), self.image_label.height())
-                        pm.fill(Qt.GlobalColor.transparent)
-                        self.image_label.setPixmap(pm)
-                    except Exception:
-                        pass
+                        # Clear base label BEFORE any overlay render/show.
+                        clear_label_art(self.image_label)
+                        self.art_overlay_controller.request_render_selected_atomic(
+                            "display_images",
+                            visible=True,
+                        )
                 except Exception:
                     pass
             else:
@@ -1898,14 +1896,29 @@ class DarkControlPanel(QWidget):
                         if self.art_overlay_controller is not None:
                             try:
                                 key = _key_for_path(path)
-                                self.art_overlay_controller.clear_selection()
                                 self.art_overlay_controller.set_selection_keys([key])
-                                if self.image_label.isVisible():
-                                    self.art_overlay_controller.render_selected_from_folder("display_images")
-                                    self.art_overlay_controller.set_all_visible(True)
-                                pm = QPixmap(self.image_label.width(), self.image_label.height())
-                                pm.fill(Qt.GlobalColor.transparent)
-                                self.image_label.setPixmap(pm)
+                                clear_label_art(self.image_label)
+
+                                def _fallback(_e=None):
+                                    try:
+                                        self.art_overlay_controller.clear_selection()
+                                        self.art_overlay_controller.set_all_visible(False)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        set_label_art_from_path(self.image_label, path)
+                                    except Exception:
+                                        try:
+                                            pix = QPixmap(path)
+                                            self.image_label.setPixmap(pix)
+                                        except Exception:
+                                            pass
+
+                                self.art_overlay_controller.request_render_selected_atomic(
+                                    "display_images",
+                                    visible=True,
+                                    on_error=_fallback,
+                                )
                             except Exception:
                                 # Fall back to legacy rendering below
                                 try:
@@ -1995,25 +2008,16 @@ class DarkControlPanel(QWidget):
             keys = entry.get("keys") or []
             try:
                 if self.art_overlay_controller is not None:
+                    # Clear base label BEFORE any overlay render/show.
+                    clear_label_art(self.image_label)
                     self.art_overlay_controller.set_selection_keys(keys)
-                    if self.image_label.isVisible():
-                        self.art_overlay_controller.render_selected_from_folder("display_images")
-                        self.art_overlay_controller.set_all_visible(True)
-                    # Keep base label transparent.
-                    pm = QPixmap(self.image_label.width(), self.image_label.height())
-                    pm.fill(Qt.GlobalColor.transparent)
-                    self.image_label.setPixmap(pm)
+                    self.art_overlay_controller.request_render_selected_atomic(
+                        "display_images",
+                        visible=bool(self.image_label.isVisible()),
+                    )
             except Exception:
                 pass
             return
-
-        # File entry: clear selection (no checkmarks) and behave as usual.
-        try:
-            if self.art_overlay_controller is not None:
-                self.art_overlay_controller.clear_selection()
-                self.art_overlay_controller.set_all_visible(False)
-        except Exception:
-            pass
 
         path = str(entry.get("path") or "").strip()
         if not path:
@@ -2026,29 +2030,46 @@ class DarkControlPanel(QWidget):
                 return os.path.abspath(p).replace("\\", "/")
 
         # Prefer overlay pipeline so single-file display is editable like combos.
-        try:
-            if self.art_overlay_controller is not None:
-                key = _key_for_path(path)
-                try:
-                    self.art_overlay_controller.clear_selection()
-                except Exception:
-                    pass
-                try:
-                    self.art_overlay_controller.set_selection_keys([key])
-                    if self.image_label.isVisible():
-                        self.art_overlay_controller.render_selected_from_folder("display_images")
-                        self.art_overlay_controller.set_all_visible(True)
-                    pm = QPixmap(self.image_label.width(), self.image_label.height())
-                    pm.fill(Qt.GlobalColor.transparent)
-                    self.image_label.setPixmap(pm)
-                    return
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        if self.art_overlay_controller is not None:
+            key = _key_for_path(path)
+            try:
+                clear_label_art(self.image_label)
+                self.art_overlay_controller.set_selection_keys([key])
+
+                def _fallback(_e=None):
+                    try:
+                        self.art_overlay_controller.clear_selection()
+                        self.art_overlay_controller.set_all_visible(False)
+                    except Exception:
+                        pass
+                    try:
+                        set_label_art_from_path(self.image_label, path)
+                    except Exception:
+                        try:
+                            pix = QPixmap(path)
+                            self.image_label.setPixmap(pix)
+                        except Exception:
+                            pass
+
+                self.art_overlay_controller.request_render_selected_atomic(
+                    "display_images",
+                    visible=bool(self.image_label.isVisible()),
+                    on_error=_fallback,
+                )
+                return
+            except Exception:
+                # Fall through to legacy rendering.
+                pass
 
         # Fallback to legacy rendering into the base label.
         try:
+            # Ensure overlay selection doesn't remain visible over the base label.
+            if self.art_overlay_controller is not None:
+                try:
+                    self.art_overlay_controller.clear_selection()
+                    self.art_overlay_controller.set_all_visible(False)
+                except Exception:
+                    pass
             set_label_art_from_path(self.image_label, path)
         except Exception:
             try:

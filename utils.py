@@ -462,6 +462,30 @@ def _stop_label_video_if_any(label: QLabel) -> None:
     _set_attr(label, "_zzz_video_player", None)
 
 
+def clear_label_art(label: QLabel) -> None:
+    """Stop any label video and clear to a fully transparent pixmap."""
+    try:
+        _stop_label_video_if_any(label)
+    except Exception:
+        pass
+
+    try:
+        w = max(1, int(label.width()))
+        h = max(1, int(label.height()))
+        pm = QPixmap(w, h)
+        pm.fill(Qt.GlobalColor.transparent)
+        label.setPixmap(pm)
+    except Exception:
+        pass
+
+    # Clear image-related caches/state so later transforms/mirroring don't reuse old content.
+    try:
+        _set_attr(label, _LABEL_SOURCE_IMAGE_PROP, None)
+        _set_attr(label, "_zzz_cvd_cache", {})
+    except Exception:
+        pass
+
+
 def set_label_art_from_path(
     label: QLabel,
     path: str,

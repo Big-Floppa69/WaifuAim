@@ -14,7 +14,7 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QApplication, QLabel
 
@@ -83,6 +83,9 @@ class ArtOverlayController:
 
         self._labels: dict[str, MovableOverlayLabel] = {}
         self._global_opacity = 1.0
+
+        # Monotonic counter to cancel stale deferred renders.
+        self._render_generation = 0
 
         # Drag context is enabled while the Art Manager is open.
         self._drag_context_enabled = False
@@ -178,6 +181,75 @@ class ArtOverlayController:
                 continue
             self._ensure_label(key)
             self._apply_label(key, p)
+
+    def request_render_selected_atomic(
+        self,
+        folder: str = "display_images",
+        *,
+        visible: bool,
+        on_error=None,
+    ) -> None:
+        """Render selection without transient overlap.
+
+        Steps:
+        - Hide all existing overlay labels immediately.
+        - Defer actual rendering to the next Qt tick.
+        - Only show overlays (via set_all_visible) after a successful render.
+
+        This avoids one-frame stacking when selection changes and also prevents
+        the legacy fallback from double-rendering on partial overlay failures.
+        """
+        self._render_generation += 1
+        gen = self._render_generation
+
+        # Hide everything first (old selection may still be enabled in settings).
+        for _k, lbl in list(self._labels.items()):
+            try:
+                lbl.hide()
+            except Exception:
+                pass
+
+        def _do_render() -> None:
+            if gen != self._render_generation:
+                return
+            try:
+                self._render_selected_from_folder_hidden(folder)
+            except Exception as e:
+                # Keep overlays hidden on failure.
+                if on_error is not None:
+                    try:
+                        on_error(e)
+                    except Exception:
+                        pass
+                return
+            self.set_all_visible(bool(visible))
+
+        QTimer.singleShot(0, _do_render)
+
+    def _render_selected_from_folder_hidden(self, folder: str = "display_images") -> None:
+        """Like render_selected_from_folder(), but keeps overlays hidden until caller shows them."""
+        folder = str(folder or "").strip() or "display_images"
+        abs_folder = os.path.abspath(folder)
+        if not os.path.exists(abs_folder):
+            return
+
+        def _key_for_path(p: str) -> str:
+            try:
+                root = os.path.dirname(os.path.abspath(__file__))
+                return os.path.relpath(os.path.abspath(p), root).replace("\\", "/")
+            except Exception:
+                return os.path.abspath(p).replace("\\", "/")
+
+        enabled = set(self.enabled_keys())
+        for name in sorted(os.listdir(abs_folder)):
+            p = os.path.join(abs_folder, name)
+            if not os.path.isfile(p):
+                continue
+            key = _key_for_path(p)
+            if key not in enabled:
+                continue
+            self._ensure_label(key)
+            self._apply_label(key, p, visible_override=False)
 
     # --- persistence -----------------------------------------------------------------
 
@@ -395,8 +467,9 @@ class ArtOverlayController:
         lbl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         lbl.setScaledContents(False)
 
+        # Keep hidden until explicitly shown (prevents transient stacking).
         try:
-            lbl.show()
+            lbl.hide()
         except Exception:
             pass
 
@@ -413,7 +486,7 @@ class ArtOverlayController:
         self._labels[key] = lbl
         return lbl
 
-    def _apply_label(self, key: str, path: str) -> None:
+    def _apply_label(self, key: str, path: str, *, visible_override: Optional[bool] = None) -> None:
         lbl = self._labels.get(key)
         if lbl is None:
             return
@@ -436,7 +509,8 @@ class ArtOverlayController:
         set_label_art_from_path(lbl, path, canvas_size=self._canvas_size, transform=dict(st.transform or {}))
 
         try:
-            lbl.setVisible(bool(st.enabled))
+            target_visible = bool(st.enabled) if visible_override is None else bool(visible_override)
+            lbl.setVisible(target_visible)
         except Exception:
             pass
         try:
@@ -462,6 +536,10 @@ class ArtOverlayController:
     def _set_label_interactive(self, lbl: QLabel, interactive: bool) -> None:
         interactive = bool(interactive)
         flags = lbl.windowFlags()
+        try:
+            was_visible = bool(lbl.isVisible())
+        except Exception:
+            was_visible = False
         if interactive:
             if flags & Qt.WindowType.WindowTransparentForInput:
                 flags = flags & ~Qt.WindowType.WindowTransparentForInput
@@ -471,8 +549,11 @@ class ArtOverlayController:
 
         try:
             lbl.setWindowFlags(flags)
-            lbl.show()
-            lbl.raise_()
-            self._crosshair_overlay.raise_()
+            if was_visible:
+                lbl.show()
+                lbl.raise_()
+                self._crosshair_overlay.raise_()
+            else:
+                lbl.hide()
         except Exception:
             pass
