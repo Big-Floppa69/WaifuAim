@@ -4,16 +4,16 @@
     "width": 1920,
     "height": 1080
   },
-  "output": "astolfo3.png",
+  "output": "jane_doe2.png",
   "layers": [
     {
-      "path": "astolfo3.png",
+      "path": "jane_doe2.png",
       "is_video": false,
       "center": [
-        960.0,
-        540.0
+        1126.909090909091,
+        370.63636363636374
       ],
-      "scale": 1.0,
+      "scale": 0.38,
       "rotation": 0.0,
       "opacity": 1.0,
       "z": 0.0
