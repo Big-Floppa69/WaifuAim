@@ -31,11 +31,11 @@
   ],
   "art_overlays": {
     "display_images/miyabi-hoshimi-miyabi.mp4": {
-      "enabled": true,
+      "enabled": false,
       "opacity": 1.0,
       "transform": {
-        "x": 1371.727272727272,
-        "y": 65.09090909090912,
+        "x": 137.99999999999932,
+        "y": 75.63636363636365,
         "zoom": 0.65,
         "rotation": 0.0
       }
@@ -46,9 +46,12 @@
       "transform": {}
     },
     "display_images/nagatoro.png": {
-      "enabled": false,
+      "enabled": true,
       "opacity": 1.0,
-      "transform": {}
+      "transform": {
+        "x": -50.0,
+        "y": 39.0
+      }
     },
     "display_images/astolfo2.png": {
       "enabled": false,
@@ -98,13 +101,60 @@
         "display_images/astra_yao.png",
         "display_images/miyabi-hoshimi-miyabi.mp4"
       ]
+    }
+  ],
+  "art_cycle_sequence": [
+    {
+      "type": "file",
+      "key": "display_images/astolfo1.png"
     },
     {
-      "name": "Combo",
-      "keys": [
-        "display_images/astolfo2.png",
-        "display_images/miyabi-hoshimi-miyabi.mp4"
-      ]
+      "type": "file",
+      "key": "display_images/astolfo2.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/astolfo3.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/astolfo4.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/astra_yao.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/ellen_joe.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/frickmeme.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/jane_doe.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/jane_doe2.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/miyabi-hoshimi-miyabi.mp4"
+    },
+    {
+      "type": "file",
+      "key": "display_images/nagatoro.png"
+    },
+    {
+      "type": "combo",
+      "name": "AstraYao+Miaby"
+    },
+    {
+      "type": "combo",
+      "name": "Combo"
     }
   ]
 }

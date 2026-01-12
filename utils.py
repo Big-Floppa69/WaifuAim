@@ -103,6 +103,86 @@ def get_art_list(folder="display_images"):
     return files
 
 
+def _art_key_for_path(path: str) -> str:
+    """Return stable key for an art asset.
+
+    Uses project-root-relative paths (same scheme as ArtOverlayController).
+    """
+    try:
+        root = os.path.dirname(os.path.abspath(__file__))
+        return os.path.relpath(os.path.abspath(path), root).replace("\\", "/")
+    except Exception:
+        return os.path.abspath(path).replace("\\", "/")
+
+
+def get_art_cycle_entries(folder: str = "display_images") -> list[dict]:
+    """Return the art switching sequence (files + combos) in user-defined order.
+
+    Reads app_settings.json keys:
+    - art_cycle_sequence: list[dict] of {type: file/combo, key/name, enabled}
+    - art_combos: list[dict] of {name, keys}
+
+    Falls back to legacy ordering if no saved sequence exists.
+    """
+    folder = str(folder or "").strip() or "display_images"
+
+    # Build file lookup by stable key.
+    file_paths = [p for p in get_art_list(folder) if str(p).strip()]
+    key_to_path: dict[str, str] = {}
+    for p in file_paths:
+        key = _art_key_for_path(p)
+        if key:
+            key_to_path[key] = p
+
+    data = read_app_settings()
+
+    # Build combo lookup by name.
+    combos_raw = data.get("art_combos")
+    combo_name_to_keys: dict[str, list[str]] = {}
+    if isinstance(combos_raw, list):
+        for c in combos_raw:
+            if not isinstance(c, dict):
+                continue
+            name = str(c.get("name") or "").strip()
+            keys = c.get("keys")
+            if not name or not isinstance(keys, list) or not keys:
+                continue
+            combo_name_to_keys[name] = [str(k) for k in keys if str(k).strip()]
+
+    def _default_entries() -> list[dict]:
+        out: list[dict] = []
+        for p in sorted(file_paths, key=lambda s: os.path.basename(str(s)).lower()):
+            out.append({"type": "file", "path": p})
+        for name, keys in sorted(combo_name_to_keys.items(), key=lambda kv: kv[0].lower()):
+            out.append({"type": "combo", "name": name, "keys": keys})
+        return out
+
+    seq = data.get("art_cycle_sequence")
+    if not isinstance(seq, list) or not seq:
+        return _default_entries()
+
+    out: list[dict] = []
+    for entry in seq:
+        if not isinstance(entry, dict):
+            continue
+        if not bool(entry.get("enabled", True)):
+            continue
+        t = str(entry.get("type") or "").strip().lower()
+        if t == "file":
+            key = str(entry.get("key") or "").strip()
+            path = key_to_path.get(key)
+            if path:
+                out.append({"type": "file", "path": path})
+        elif t == "combo":
+            name = str(entry.get("name") or "").strip()
+            keys = combo_name_to_keys.get(name)
+            if name and keys:
+                out.append({"type": "combo", "name": name, "keys": keys})
+
+    # If everything got filtered out (e.g., deleted files), fall back.
+    return out if out else _default_entries()
+
+
 # --- Art file types -----------------------------------------------------------------
 
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")

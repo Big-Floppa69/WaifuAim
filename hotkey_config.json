@@ -10,5 +10,8 @@
     ],
     "switch_image": [
         "f2"
+    ],
+    "hold_to_drag": [
+        "`"
     ]
 }

@@ -317,6 +317,8 @@ class StandardCrosshairSettings:
     thickness: int = 4
     gap: int = 10
     outline: int = 1
+    # Overall scale in percent. 100 = normal size, 200 = 2x, 0 = hidden.
+    global_scale: int = 100
     red: int = 0
     green: int = 255
     blue: int = 120
@@ -740,6 +742,12 @@ def generate_crosshair_pixmap(
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
+    try:
+        scale_factor = float(getattr(settings, "global_scale", 100) or 0) / 100.0
+    except Exception:
+        scale_factor = 1.0
+    scale_factor = max(0.0, min(100.0, scale_factor))
+
     center_x = width / 2 + settings.offset_x
     center_y = height / 2 + settings.offset_y
     default_gap = float(max(0, settings.gap))
@@ -767,6 +775,8 @@ def generate_crosshair_pixmap(
 
         painter.save()
         painter.translate(center_x, center_y)
+        if scale_factor != 1.0:
+            painter.scale(scale_factor, scale_factor)
         painter.rotate(total_angle + total_rotation)
         painter.translate(0.0, perp_offset)
         # Apply component rotation around its own center (at start position)
@@ -798,6 +808,8 @@ def generate_crosshair_pixmap(
         radius = max(0.1, radius)
         painter.save()
         painter.translate(center_x, center_y)
+        if scale_factor != 1.0:
+            painter.scale(scale_factor, scale_factor)
         painter.rotate(total_angle + total_rotation)
         painter.translate(offset, perp_offset)
         # Circles don't need rotation, but parameter kept for consistency
@@ -822,6 +834,8 @@ def generate_crosshair_pixmap(
         sides = int(max(3, min(12, sides)))
         painter.save()
         painter.translate(center_x, center_y)
+        if scale_factor != 1.0:
+            painter.scale(scale_factor, scale_factor)
         painter.rotate(total_angle + total_rotation)
         painter.translate(offset, perp_offset)
         if abs(component_rotation) > 0.01:
@@ -857,6 +871,8 @@ def generate_crosshair_pixmap(
         half = size / 2.0
         painter.save()
         painter.translate(center_x, center_y)
+        if scale_factor != 1.0:
+            painter.scale(scale_factor, scale_factor)
         painter.rotate(total_angle + total_rotation)
         painter.translate(offset, perp_offset)
         if abs(component_rotation) > 0.01:
@@ -886,6 +902,8 @@ def generate_crosshair_pixmap(
         thickness = max(0.1, float(thickness))
         painter.save()
         painter.translate(center_x, center_y)
+        if scale_factor != 1.0:
+            painter.scale(scale_factor, scale_factor)
         painter.rotate(total_angle + total_rotation)
         painter.translate(offset, perp_offset)
         if abs(component_rotation) > 0.01:
@@ -1715,6 +1733,16 @@ class StandardCrosshairDialog(QWidget):
         layout.setContentsMargins(0 if not carded else 8, 0 if not carded else 8, 0 if not carded else 8, 0 if not carded else 8)
         layout.setSpacing(8)
 
+        self.global_scale_slider = self._add_slider(
+            layout,
+            "Size",
+            0,
+            10000,
+            int(getattr(self.settings, "global_scale", 100) or 100),
+            self._on_global_scale,
+            suffix="%",
+            step=1,
+        )
         self.length_slider = self._add_slider(layout, "Length", 5, 80, self.settings.length, self._on_length)
         self.thickness_slider = self._add_slider(layout, "Thickness", 1, 15, self.settings.thickness, self._on_thickness)
         self.gap_slider = self._add_slider(layout, "Gap", 0, 40, self.settings.gap, self._on_gap)
@@ -2248,6 +2276,7 @@ class StandardCrosshairDialog(QWidget):
             self.center_dot_check.blockSignals(False)
 
         for slider, value in (
+            (getattr(self, "global_scale_slider", None), int(getattr(self.settings, "global_scale", 100) or 100)),
             (getattr(self, "length_slider", None), self.settings.length),
             (getattr(self, "thickness_slider", None), self.settings.thickness),
             (getattr(self, "gap_slider", None), self.settings.gap),
@@ -2451,6 +2480,10 @@ class StandardCrosshairDialog(QWidget):
 
     def _on_length(self, value: int) -> None:
         self.settings.length = value
+        self._persist_and_render()
+
+    def _on_global_scale(self, value: int) -> None:
+        self.settings.global_scale = max(0, min(10000, int(value)))
         self._persist_and_render()
 
     def _on_thickness(self, value: int) -> None:

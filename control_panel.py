@@ -34,6 +34,7 @@ from utils import (
     refresh_label_pixmap_for_colorblind_mode,
     transparent,
     UI_THEME,
+    get_art_cycle_entries,
 )
 from image_manager import ImageManagerDialog
 from hotkey_manager import HotkeyManagerDialog
@@ -1940,22 +1941,8 @@ class DarkControlPanel(QWidget):
     
     def switch_image(self):
         """Switch to the next crosshair image."""
-        # Build cycle list: files + saved combos.
-        files = get_art_list()
-        data = self._read_app_settings()
-        combos = data.get("art_combos")
-        combo_entries = []
-        if isinstance(combos, list):
-            for c in combos:
-                if not isinstance(c, dict):
-                    continue
-                name = str(c.get("name") or "").strip()
-                keys = c.get("keys")
-                if not name or not isinstance(keys, list) or not keys:
-                    continue
-                combo_entries.append({"type": "combo", "name": name, "keys": [str(k) for k in keys if str(k).strip()]})
-
-        entries = ([{"type": "file", "path": p} for p in files] + combo_entries)
+        # Build cycle list: user-defined order (Art Manager), including combos.
+        entries = get_art_cycle_entries("display_images")
         if not entries:
             return
 

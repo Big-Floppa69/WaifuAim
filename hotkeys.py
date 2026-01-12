@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import QApplication
 from utils import (
     clear_label_art,
     get_art_list,
+    get_art_cycle_entries,
     mirror_horizontal,
     mirror_vertical,
     set_label_art_from_path,
@@ -131,6 +132,13 @@ def reload_hotkeys() -> None:
 
     config = load_hotkey_config()
 
+    # Keep overlay controller in sync with hold-to-drag chord.
+    try:
+        if _overlay_controller_ref is not None:
+            _overlay_controller_ref.set_hold_to_drag(config.get("hold_to_drag", []))
+    except Exception:
+        pass
+
     def _register(hotkey: str, callback) -> None:
         hotkey = str(hotkey or "").strip().lower()
         if not hotkey:
@@ -216,30 +224,7 @@ def reload_hotkeys() -> None:
             if _label_ref is None:
                 return
 
-            arts = get_art_list()
-
-            combos = []
-            try:
-                with open("app_settings.json", "r", encoding="utf-8") as fh:
-                    data = json.load(fh)
-                    raw = data.get("art_combos") if isinstance(data, dict) else None
-                    if isinstance(raw, list):
-                        for c in raw:
-                            if not isinstance(c, dict):
-                                continue
-                            name = str(c.get("name") or "").strip()
-                            keys = c.get("keys")
-                            if not name or not isinstance(keys, list) or not keys:
-                                continue
-                            combos.append({
-                                "type": "combo",
-                                "name": name,
-                                "keys": [str(k) for k in keys if str(k).strip()],
-                            })
-            except Exception:
-                combos = []
-
-            entries = ([{"type": "file", "path": p} for p in arts] + combos)
+            entries = get_art_cycle_entries("display_images")
             if not entries:
                 return
 

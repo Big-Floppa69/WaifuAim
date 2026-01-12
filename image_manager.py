@@ -7,13 +7,120 @@ from pathlib import Path
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QListWidget, QListWidgetItem, QFileDialog, 
                              QLabel, QFrame, QGraphicsDropShadowEffect, 
-                             QMessageBox, QApplication, QInputDialog)
+                             QMessageBox, QApplication, QInputDialog, QAbstractItemView, QStyledItemDelegate,
+                             QDialog, QLineEdit)
 from PyQt6.QtGui import QPixmap, QColor, QIcon, QPainter, QPen
-from PyQt6.QtCore import Qt, QSize, QUrl, QPoint
+from PyQt6.QtCore import Qt, QSize, QUrl, QPoint, pyqtSignal
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 import json
 from utils import UI_THEME, ART_EXTS, IMAGE_EXTS, is_video_path
 from image_editor import ImageEditorDialog
+
+
+class _ArtListWidget(QListWidget):
+    orderChanged = pyqtSignal()
+    comboArrowClicked = pyqtSignal(str)
+
+    # Right-side affordances layout (must match delegate painting).
+    _RIGHT_PAD = 6
+    _HANDLE_W = 12
+    _ARROW_W = 18
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        try:
+            self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+            self.setDefaultDropAction(Qt.DropAction.MoveAction)
+            self.setDragEnabled(True)
+            self.setAcceptDrops(True)
+            self.setDropIndicatorShown(True)
+            self.setDragDropOverwriteMode(False)
+        except Exception:
+            pass
+
+    def dropEvent(self, event):  # type: ignore[override]
+        super().dropEvent(event)
+        try:
+            self.orderChanged.emit()
+        except Exception:
+            pass
+
+    def mousePressEvent(self, event):  # type: ignore[override]
+        try:
+            if event.button() == Qt.MouseButton.LeftButton:
+                pos = event.position().toPoint()
+                it = self.itemAt(pos)
+                if it is not None:
+                    meta = it.data(Qt.ItemDataRole.UserRole)
+                    if isinstance(meta, dict) and meta.get("type") == "combo":
+                        r = self.visualItemRect(it)
+                        arrow_right = r.right() - self._RIGHT_PAD - self._HANDLE_W - 4
+                        arrow_left = arrow_right - self._ARROW_W
+                        if arrow_left <= pos.x() <= arrow_right:
+                            name = str(meta.get("name") or "").strip()
+                            if name:
+                                self.comboArrowClicked.emit(name)
+                                event.accept()
+                                return
+        except Exception:
+            pass
+
+        return super().mousePressEvent(event)
+
+
+class _DragHandleDelegate(QStyledItemDelegate):
+    """Paints a small 3-line drag handle on the right side of each row."""
+
+    def paint(self, painter: QPainter, option, index) -> None:  # type: ignore[override]
+        super().paint(painter, option, index)
+
+        try:
+            r = option.rect
+            x = r.right() - 12
+            y_mid = r.center().y()
+            color = QColor(UI_THEME.get("accent", "#7C5CFF"))
+            try:
+                h, s, v, a = color.getHsv()
+                v = max(0, min(255, int(v * 0.65)))
+                s = max(0, min(255, int(s * 0.85)))
+                color.setHsv(h, s, v, a)
+            except Exception:
+                pass
+            color.setAlpha(150)
+            pen = QPen(color, 2)
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(pen)
+            for dy in (-4, 0, 4):
+                painter.drawLine(x, y_mid + dy, x + 8, y_mid + dy)
+
+            # Draw combo expand arrow (clickable region handled in _ArtListWidget).
+            try:
+                meta = index.data(Qt.ItemDataRole.UserRole)
+                if isinstance(meta, dict) and meta.get("type") == "combo":
+                    expanded = bool(index.data(Qt.ItemDataRole.UserRole + 2))
+                    arrow = "▼" if expanded else "▶"
+                    arrow_color = QColor(UI_THEME.get("text", "#EDE7FF"))
+                    arrow_color.setAlpha(220)
+                    painter.setPen(QPen(arrow_color))
+                    arrow_right = r.right() - _ArtListWidget._RIGHT_PAD - _ArtListWidget._HANDLE_W - 4
+                    arrow_left = arrow_right - _ArtListWidget._ARROW_W
+                    painter.drawText(
+                        arrow_left,
+                        r.top(),
+                        _ArtListWidget._ARROW_W,
+                        r.height(),
+                        Qt.AlignmentFlag.AlignCenter,
+                        arrow,
+                    )
+            except Exception:
+                pass
+            painter.restore()
+        except Exception:
+            try:
+                painter.restore()
+            except Exception:
+                pass
 
 
 def _read_hotkey_config() -> dict:
@@ -44,25 +151,27 @@ class ImageManagerDialog(QWidget):
         self._thumb_queue = []  # list[tuple[QListWidgetItem,str]]
         self._thumb_current = None
         self._thumb_timer = None
+        self._combo_expanded: set[str] = set()
         self.init_ui()
         self.load_images()
 
     def showEvent(self, event):  # type: ignore[override]
         super().showEvent(event)
-        # Enable drag context while the Art Manager is open.
+        # Refresh hold-to-drag chord while the Art Manager is open.
         try:
             if self.overlay_controller is not None:
                 cfg = _read_hotkey_config()
                 hold = cfg.get("hold_to_drag", [])
                 self.overlay_controller.set_hold_to_drag(hold)
-                self.overlay_controller.set_drag_context(True, selected_key=self._current_selected_key())
+                self.overlay_controller.set_selected_key(self._current_selected_key())
         except Exception:
             pass
 
     def closeEvent(self, event):  # type: ignore[override]
         try:
             if self.overlay_controller is not None:
-                self.overlay_controller.set_drag_context(False, selected_key=None)
+                # Do not disable dragging globally; just clear selection hint.
+                self.overlay_controller.set_selected_key(None)
         except Exception:
             pass
         try:
@@ -198,7 +307,7 @@ class ImageManagerDialog(QWidget):
         content_layout.addWidget(info_label)
         
         # Image list
-        self.image_list = QListWidget()
+        self.image_list = _ArtListWidget()
         self.image_list.setStyleSheet(
             "QListWidget { background-color: "
             + UI_THEME["surface"]
@@ -206,20 +315,43 @@ class ImageManagerDialog(QWidget):
             + UI_THEME["border"]
             + "; border-radius: 10px; color: "
             + UI_THEME["text"]
-            + "; padding: 6px; font-size: 13px; }"
+            + "; padding: 6px; font-size: 13px; outline: none; }"
             "QListWidget::item { padding: 8px; border-radius: 8px; margin: 2px; }"
             "QListWidget::item:selected { background-color: "
             + UI_THEME["accent"]
             + "; color: "
             + UI_THEME["bg"]
-            + "; }"
+            + "; outline: none; }"
+            "QListWidget::item:focus { outline: none; }"
             "QListWidget::item:hover { background-color: "
             + UI_THEME["surface2"]
             + "; }"
         )
         self.image_list.setIconSize(QSize(48, 48))
+        try:
+            self.image_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        except Exception:
+            pass
+        try:
+            self.image_list.setItemDelegate(_DragHandleDelegate(self.image_list))
+        except Exception:
+            pass
+
         self.image_list.itemChanged.connect(self._on_item_check_changed)
         self.image_list.currentItemChanged.connect(self._on_selection_changed)
+        try:
+            self.image_list.itemDoubleClicked.connect(self._on_item_double_clicked)
+        except Exception:
+            pass
+        try:
+            self.image_list.comboArrowClicked.connect(self._toggle_combo_expanded)
+        except Exception:
+            pass
+        try:
+            # Persist sequence after drag reorder.
+            self.image_list.orderChanged.connect(self._save_cycle_from_list)
+        except Exception:
+            pass
         content_layout.addWidget(self.image_list)
         
         # Button container
@@ -328,143 +460,276 @@ class ImageManagerDialog(QWidget):
     def load_images(self):
         """Load and display art from the display_images folder."""
         self._updating_checks = True
-        self.image_list.clear()
-        
-        # Ensure folder exists
-        abs_folder_path = os.path.abspath(self.images_folder)
-        if not os.path.exists(abs_folder_path):
-            os.makedirs(abs_folder_path)
-            return
-        
-        def _video_icon() -> QIcon:
-            pm = QPixmap(48, 48)
-            pm.fill(Qt.GlobalColor.transparent)
-            p = QPainter(pm)
-            p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            p.setPen(QPen(QColor(UI_THEME["border_strong"]), 2))
-            p.drawRoundedRect(4, 8, 40, 30, 6, 6)
-            p.setBrush(QColor(UI_THEME["accent"]))
-            pts = [
-                (20, 16),
-                (20, 32),
-                (34, 24),
-            ]
-            try:
-                from PyQt6.QtCore import QPoint
-                from PyQt6.QtGui import QPolygon
-                poly = QPolygon([QPoint(x, y) for x, y in pts])
-                p.drawPolygon(poly)
-            except Exception:
-                # Fallback triangle.
-                p.drawPolygon(
-                    QPoint(20, 16),
-                    QPoint(20, 32),
-                    QPoint(34, 24),
-                )
-            p.end()
-            return QIcon(pm)
-
-        vid_icon = _video_icon()
-
-        # Stop any in-flight thumbnail generation.
-        self._stop_thumbnailer()
-        self._thumb_queue = []
-        self._thumb_current = None
-
-        def _key_for_path(p: str) -> str:
-            try:
-                root = os.path.dirname(os.path.abspath(__file__))
-                return os.path.relpath(os.path.abspath(p), root).replace("\\", "/")
-            except Exception:
-                return os.path.abspath(p).replace("\\", "/")
-
-        for filename in sorted(os.listdir(self.images_folder)):
-            if not filename.lower().endswith(ART_EXTS):
-                continue
-            file_path = os.path.join(self.images_folder, filename)
-            key = _key_for_path(file_path)
-            item = QListWidgetItem(filename)
-
-            # Checkbox enables/disables this file as a separate overlay element.
-            try:
-                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
-                item.setData(Qt.ItemDataRole.UserRole, key)
-                item.setData(Qt.ItemDataRole.UserRole + 1, os.path.abspath(file_path))
-                enabled = False
-                if self.overlay_controller is not None:
-                    enabled = bool(self.overlay_controller.is_enabled(key))
-                item.setCheckState(Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked)
-            except Exception:
-                pass
-
-            try:
-                if filename.lower().endswith(IMAGE_EXTS):
-                    pixmap = QPixmap(file_path)
-                    if not pixmap.isNull():
-                        scaled_pixmap = pixmap.scaled(
-                            48,
-                            48,
-                            Qt.AspectRatioMode.KeepAspectRatio,
-                            Qt.TransformationMode.SmoothTransformation,
-                        )
-                        item.setIcon(QIcon(scaled_pixmap))
-                else:
-                    item.setIcon(vid_icon)
-                    # Queue for async first-frame thumbnail extraction.
-                    self._thumb_queue.append((item, file_path))
-            except Exception:
-                pass
-
-            self.image_list.addItem(item)
-
-            # Do not render overlays here; checkmarks are selection only.
-
-        # Kick off thumbnail generation after list is populated.
-        self._start_thumbnailer()
-
-        self._updating_checks = False
-
-        # Keep selection consistent and update drag target.
         try:
-            if self.image_list.count() > 0 and self.image_list.currentRow() < 0:
-                self.image_list.setCurrentRow(0)
-        except Exception:
-            pass
-        try:
-            if self.overlay_controller is not None:
-                self.overlay_controller.set_selected_key(self._current_selected_key())
-        except Exception:
-            pass
+            self.image_list.clear()
 
-        # Append saved combos (from app_settings.json) into the list so users
-        # can see and delete combos from the Art Manager.
-        try:
-            data = self._read_app_settings()
-            combos = data.get("art_combos")
-            if isinstance(combos, list) and combos:
-                for c in combos:
-                    try:
+            # Ensure folder exists
+            abs_folder_path = os.path.abspath(self.images_folder)
+            if not os.path.exists(abs_folder_path):
+                os.makedirs(abs_folder_path)
+                return
+
+            def _video_icon() -> QIcon:
+                pm = QPixmap(48, 48)
+                pm.fill(Qt.GlobalColor.transparent)
+                p = QPainter(pm)
+                p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                p.setPen(QPen(QColor(UI_THEME["border_strong"]), 2))
+                p.drawRoundedRect(4, 8, 40, 30, 6, 6)
+                p.setBrush(QColor(UI_THEME["accent"]))
+                pts = [
+                    (20, 16),
+                    (20, 32),
+                    (34, 24),
+                ]
+                try:
+                    from PyQt6.QtGui import QPolygon
+
+                    poly = QPolygon([QPoint(x, y) for x, y in pts])
+                    p.drawPolygon(poly)
+                except Exception:
+                    p.drawPolygon(
+                        QPoint(20, 16),
+                        QPoint(20, 32),
+                        QPoint(34, 24),
+                    )
+                p.end()
+                return QIcon(pm)
+
+            vid_icon = _video_icon()
+
+            # Stop any in-flight thumbnail generation.
+            self._stop_thumbnailer()
+            self._thumb_queue = []
+            self._thumb_current = None
+
+            def _key_for_path(p: str) -> str:
+                try:
+                    root = os.path.dirname(os.path.abspath(__file__))
+                    return os.path.relpath(os.path.abspath(p), root).replace("\\", "/")
+                except Exception:
+                    return os.path.abspath(p).replace("\\", "/")
+
+            # Collect current assets.
+            assets: dict[str, dict] = {}
+            try:
+                for filename in os.listdir(self.images_folder):
+                    if not filename.lower().endswith(ART_EXTS):
+                        continue
+                    file_path = os.path.join(self.images_folder, filename)
+                    key = _key_for_path(file_path)
+                    if not key:
+                        continue
+                    cid = f"file:{key}"
+                    assets[cid] = {
+                        "filename": filename,
+                        "path": os.path.abspath(file_path),
+                        "key": key,
+                    }
+            except Exception:
+                assets = {}
+
+            # Collect combos.
+            combos_by_id: dict[str, dict] = {}
+            try:
+                data = self._read_app_settings()
+                combos = data.get("art_combos")
+                if isinstance(combos, list) and combos:
+                    for c in combos:
                         if not isinstance(c, dict):
                             continue
                         name = str(c.get("name") or "").strip()
                         keys = c.get("keys")
-                        if not name or not isinstance(keys, list):
+                        if not name or not isinstance(keys, list) or not keys:
                             continue
-                        display_text = f"Combo: {name}"
-                        item = QListWidgetItem(display_text)
-                        # mark as combo type
-                        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
-                        item.setData(Qt.ItemDataRole.UserRole, {"type": "combo", "name": name, "keys": [str(k) for k in keys]})
-                        # Use same icon as video for visibility (simple choice)
-                        try:
-                            item.setIcon(vid_icon)
-                        except Exception:
-                            pass
-                        self.image_list.addItem(item)
+                        cid = f"combo:{name}"
+                        combos_by_id[cid] = {
+                            "name": name,
+                            "keys": [str(k) for k in keys if str(k).strip()],
+                        }
+            except Exception:
+                combos_by_id = {}
+
+            # Load saved sequence (order for switching).
+            ordered_ids: list[str] = []
+            try:
+                data = self._read_app_settings()
+                seq = data.get("art_cycle_sequence")
+                if isinstance(seq, list):
+                    for e in seq:
+                        if not isinstance(e, dict):
+                            continue
+                        t = str(e.get("type") or "").strip().lower()
+                        if t == "file":
+                            k = str(e.get("key") or "").strip()
+                            cid = f"file:{k}" if k else ""
+                        elif t == "combo":
+                            n = str(e.get("name") or "").strip()
+                            cid = f"combo:{n}" if n else ""
+                        else:
+                            cid = ""
+                        if not cid:
+                            continue
+                        if cid in assets or cid in combos_by_id:
+                            ordered_ids.append(cid)
+            except Exception:
+                ordered_ids = []
+
+            # Append any newly discovered entries.
+            seen = set(ordered_ids)
+            for cid, meta in sorted(assets.items(), key=lambda kv: str(kv[1].get("filename") or "").lower()):
+                if cid not in seen:
+                    ordered_ids.append(cid)
+                    seen.add(cid)
+            for cid, meta in sorted(combos_by_id.items(), key=lambda kv: str(kv[1].get("name") or "").lower()):
+                if cid not in seen:
+                    ordered_ids.append(cid)
+                    seen.add(cid)
+
+            # Populate list in the selected order.
+            any_combo_expanded = False
+            for cid in ordered_ids:
+                if cid.startswith("file:"):
+                    meta = assets.get(cid)
+                    if not meta:
+                        continue
+                    filename = str(meta.get("filename") or "")
+                    file_path = str(meta.get("path") or "")
+                    key = str(meta.get("key") or "")
+                    if not filename or not file_path or not key:
+                        continue
+
+                    item = QListWidgetItem(filename)
+                    try:
+                        item.setFlags(
+                            item.flags()
+                            | Qt.ItemFlag.ItemIsUserCheckable
+                            | Qt.ItemFlag.ItemIsSelectable
+                            | Qt.ItemFlag.ItemIsEnabled
+                            | Qt.ItemFlag.ItemIsDragEnabled
+                        )
+                        item.setData(Qt.ItemDataRole.UserRole, key)
+                        item.setData(Qt.ItemDataRole.UserRole + 1, os.path.abspath(file_path))
+                        enabled = False
+                        if self.overlay_controller is not None:
+                            enabled = bool(self.overlay_controller.is_enabled(key))
+                        item.setCheckState(Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked)
                     except Exception:
                         pass
-        except Exception:
-            pass
+
+                    try:
+                        if filename.lower().endswith(IMAGE_EXTS):
+                            pixmap = QPixmap(file_path)
+                            if not pixmap.isNull():
+                                scaled_pixmap = pixmap.scaled(
+                                    48,
+                                    48,
+                                    Qt.AspectRatioMode.KeepAspectRatio,
+                                    Qt.TransformationMode.SmoothTransformation,
+                                )
+                                item.setIcon(QIcon(scaled_pixmap))
+                        else:
+                            item.setIcon(vid_icon)
+                            self._thumb_queue.append((item, file_path))
+                    except Exception:
+                        pass
+
+                    self.image_list.addItem(item)
+                    continue
+
+                if cid.startswith("combo:"):
+                    meta = combos_by_id.get(cid)
+                    if not meta:
+                        continue
+                    name = str(meta.get("name") or "").strip()
+                    keys = meta.get("keys")
+                    if not name or not isinstance(keys, list) or not keys:
+                        continue
+                    expanded = name in self._combo_expanded
+                    any_combo_expanded = any_combo_expanded or expanded
+                    item = QListWidgetItem(f"Combo: {name}")
+                    try:
+                        item.setFlags(
+                            item.flags()
+                            | Qt.ItemFlag.ItemIsSelectable
+                            | Qt.ItemFlag.ItemIsEnabled
+                            | Qt.ItemFlag.ItemIsDragEnabled
+                        )
+                        item.setData(
+                            Qt.ItemDataRole.UserRole,
+                            {"type": "combo", "name": name, "keys": [str(k) for k in keys]},
+                        )
+                        item.setData(Qt.ItemDataRole.UserRole + 2, bool(expanded))
+                        item.setIcon(vid_icon)
+                    except Exception:
+                        pass
+                    self.image_list.addItem(item)
+
+                    if expanded:
+                        for k in [str(v) for v in keys if str(v).strip()]:
+                            child = QListWidgetItem(f"    {os.path.basename(k)}")
+                            try:
+                                child.setFlags(
+                                    child.flags()
+                                    | Qt.ItemFlag.ItemIsUserCheckable
+                                    | Qt.ItemFlag.ItemIsSelectable
+                                    | Qt.ItemFlag.ItemIsEnabled
+                                )
+                                child.setData(Qt.ItemDataRole.UserRole, k)
+                                p = ""
+                                try:
+                                    meta_file = assets.get(f"file:{k}")
+                                    if isinstance(meta_file, dict):
+                                        p = str(meta_file.get("path") or "")
+                                except Exception:
+                                    p = ""
+                                if p:
+                                    child.setData(Qt.ItemDataRole.UserRole + 1, os.path.abspath(p))
+                                enabled = False
+                                if self.overlay_controller is not None:
+                                    enabled = bool(self.overlay_controller.is_enabled(k))
+                                child.setCheckState(Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked)
+                                child.setData(
+                                    Qt.ItemDataRole.UserRole + 3,
+                                    {"type": "combo_child", "name": name, "key": k},
+                                )
+                                child.setSizeHint(QSize(0, 28))
+                            except Exception:
+                                pass
+                            self.image_list.addItem(child)
+
+                    continue
+
+            # Disable drag reorder while any combo accordions are open.
+            try:
+                self.image_list.setDragEnabled(not any_combo_expanded)
+            except Exception:
+                pass
+
+            self._start_thumbnailer()
+
+            # Keep selection consistent and update drag target.
+            try:
+                if self.image_list.count() > 0 and self.image_list.currentRow() < 0:
+                    self.image_list.setCurrentRow(0)
+            except Exception:
+                pass
+            try:
+                if self.overlay_controller is not None:
+                    self.overlay_controller.set_selected_key(self._current_selected_key())
+            except Exception:
+                pass
+
+            # Persist a canonical sequence if none existed (keeps switch order stable).
+            try:
+                data = self._read_app_settings()
+                seq = data.get("art_cycle_sequence")
+                if not isinstance(seq, list) or not seq:
+                    self._save_cycle_from_list()
+            except Exception:
+                pass
+        finally:
+            self._updating_checks = False
 
     def _start_thumbnailer(self) -> None:
         if not self._thumb_queue:
@@ -672,15 +937,8 @@ class ImageManagerDialog(QWidget):
         
         if reply == QMessageBox.StandardButton.Yes:
             if is_combo:
-                # Remove combo from app_settings.json
                 try:
-                    data = self._read_app_settings()
-                    combos = data.get("art_combos")
-                    if isinstance(combos, list):
-                        new_combos = [c for c in combos if not (isinstance(c, dict) and str(c.get("name") or "") == item_meta.get("name"))]
-                        data["art_combos"] = new_combos
-                        self._write_app_settings(data)
-                    self.load_images()
+                    self._delete_combo(str(item_meta.get("name") or "").strip())
                 except Exception as e:
                     QMessageBox.warning(self, 'Error', f'Failed to delete combo {filename}: {e}')
                 return
@@ -709,10 +967,266 @@ class ImageManagerDialog(QWidget):
             it = self.image_list.currentItem()
             if it is None:
                 return None
-            key = it.data(Qt.ItemDataRole.UserRole)
-            return str(key) if key else None
+            meta = it.data(Qt.ItemDataRole.UserRole)
+            # Combos are not draggable overlay elements.
+            if isinstance(meta, dict) and meta.get("type") == "combo":
+                return None
+            key = str(meta) if meta else ""
+            return key if key.strip() else None
         except Exception:
             return None
+
+    def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
+        """Double-click toggles the checkmark (overlay enabled/disabled)."""
+        try:
+            if item is None:
+                return
+            if not (item.flags() & Qt.ItemFlag.ItemIsUserCheckable):
+                return
+            item.setCheckState(
+                Qt.CheckState.Unchecked if item.checkState() == Qt.CheckState.Checked else Qt.CheckState.Checked
+            )
+        except Exception:
+            pass
+
+    def _toggle_combo_expanded(self, name: str) -> None:
+        name = str(name or "").strip()
+        if not name:
+            return
+
+        try:
+            sb = self.image_list.verticalScrollBar()
+            scroll_val = sb.value() if sb is not None else 0
+        except Exception:
+            scroll_val = 0
+
+        if name in self._combo_expanded:
+            self._combo_expanded.discard(name)
+        else:
+            self._combo_expanded.add(name)
+
+        self.load_images()
+
+        try:
+            for i in range(self.image_list.count()):
+                it = self.image_list.item(i)
+                if it is None:
+                    continue
+                meta = it.data(Qt.ItemDataRole.UserRole)
+                if isinstance(meta, dict) and meta.get("type") == "combo" and str(meta.get("name") or "") == name:
+                    self.image_list.setCurrentItem(it)
+                    break
+        except Exception:
+            pass
+
+        try:
+            sb = self.image_list.verticalScrollBar()
+            if sb is not None:
+                sb.setValue(scroll_val)
+        except Exception:
+            pass
+
+    def _save_cycle_from_list(self) -> None:
+        if self._updating_checks:
+            return
+        seq: list[dict] = []
+        try:
+            for i in range(self.image_list.count()):
+                it = self.image_list.item(i)
+                if it is None:
+                    continue
+                meta = it.data(Qt.ItemDataRole.UserRole)
+                if isinstance(meta, dict) and meta.get("type") == "combo":
+                    name = str(meta.get("name") or "").strip()
+                    if name:
+                        seq.append({"type": "combo", "name": name})
+                    continue
+                if isinstance(meta, dict) and str(meta.get("type") or "").startswith("combo_"):
+                    continue
+                # File entry: stored as stable key in UserRole.
+                key = str(meta or "").strip()
+                if key:
+                    seq.append({"type": "file", "key": key})
+        except Exception:
+            return
+
+        try:
+            data = self._read_app_settings()
+            data["art_cycle_sequence"] = seq
+            self._write_app_settings(data)
+        except Exception:
+            pass
+
+    def _delete_combo(self, name: str) -> None:
+        name = str(name or "").strip()
+        if not name:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Delete Combo",
+            f"Delete combo '{name}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        data = self._read_app_settings()
+        combos = data.get("art_combos")
+        if isinstance(combos, list):
+            combos = [c for c in combos if not (isinstance(c, dict) and str(c.get("name") or "") == name)]
+        else:
+            combos = []
+        data["art_combos"] = combos
+
+        seq = data.get("art_cycle_sequence")
+        if isinstance(seq, list):
+            data["art_cycle_sequence"] = [
+                e
+                for e in seq
+                if not (
+                    isinstance(e, dict)
+                    and str(e.get("type") or "").strip().lower() == "combo"
+                    and str(e.get("name") or "") == name
+                )
+            ]
+
+        self._write_app_settings(data)
+        self._combo_expanded.discard(name)
+        self.load_images()
+
+    def _edit_combo(self, name: str) -> None:
+        name = str(name or "").strip()
+        if not name:
+            return
+
+        data = self._read_app_settings()
+        combos = data.get("art_combos")
+        if not isinstance(combos, list):
+            combos = []
+
+        combo = None
+        for c in combos:
+            if isinstance(c, dict) and str(c.get("name") or "") == name:
+                combo = c
+                break
+        if not isinstance(combo, dict):
+            QMessageBox.warning(self, "Edit Combo", "Combo not found.")
+            return
+
+        # Available file keys from current list items.
+        avail: list[tuple[str, str]] = []
+        try:
+            for i in range(self.image_list.count()):
+                it = self.image_list.item(i)
+                if it is None:
+                    continue
+                meta = it.data(Qt.ItemDataRole.UserRole)
+                if isinstance(meta, dict):
+                    continue
+                key = str(meta or "").strip()
+                path = str(it.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
+                if key and path:
+                    avail.append((os.path.basename(path), key))
+        except Exception:
+            avail = []
+        avail.sort(key=lambda t: t[0].lower())
+
+        current_keys = combo.get("keys")
+        if not isinstance(current_keys, list):
+            current_keys = []
+        current_set = {str(k) for k in current_keys if str(k).strip()}
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Edit Combo")
+        dlg.setModal(True)
+        dlg.setStyleSheet(f"QDialog {{ background-color: {UI_THEME['bg']}; color: {UI_THEME['text']}; }}")
+        outer = QVBoxLayout(dlg)
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(10)
+
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("Name:"))
+        name_edit = QLineEdit(name)
+        name_edit.setStyleSheet(
+            f"QLineEdit {{ background-color: {UI_THEME['surface']}; border: 1px solid {UI_THEME['border']}; border-radius: 8px; padding: 6px; color: {UI_THEME['text']}; }}"
+        )
+        name_row.addWidget(name_edit, 1)
+        outer.addLayout(name_row)
+
+        listw = QListWidget()
+        listw.setStyleSheet(
+            f"QListWidget {{ background-color: {UI_THEME['surface']}; border: 1px solid {UI_THEME['border']}; border-radius: 10px; }}"
+        )
+        for disp, key in avail:
+            it = QListWidgetItem(disp)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            it.setData(Qt.ItemDataRole.UserRole, key)
+            it.setCheckState(Qt.CheckState.Checked if key in current_set else Qt.CheckState.Unchecked)
+            listw.addItem(it)
+        outer.addWidget(listw, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel = QPushButton("Cancel")
+        ok = QPushButton("Save")
+        for b in (cancel, ok):
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet(
+                f"QPushButton {{ background-color: {UI_THEME['surface2']}; border: 1px solid {UI_THEME['border']}; border-radius: 10px; padding: 8px 14px; color: {UI_THEME['text']}; font-weight: 700; }}"
+            )
+        ok.setStyleSheet(
+            f"QPushButton {{ background-color: {UI_THEME['accent']}; border: 1px solid {UI_THEME['accent']}; border-radius: 10px; padding: 8px 14px; color: {UI_THEME['bg']}; font-weight: 800; }}"
+        )
+        cancel.clicked.connect(dlg.reject)
+        ok.clicked.connect(dlg.accept)
+        btn_row.addWidget(cancel)
+        btn_row.addWidget(ok)
+        outer.addLayout(btn_row)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        new_name = str(name_edit.text() or "").strip() or name
+        new_keys: list[str] = []
+        for i in range(listw.count()):
+            it = listw.item(i)
+            if it is None:
+                continue
+            if it.checkState() != Qt.CheckState.Checked:
+                continue
+            k = str(it.data(Qt.ItemDataRole.UserRole) or "").strip()
+            if k:
+                new_keys.append(k)
+        if not new_keys:
+            QMessageBox.warning(self, "Edit Combo", "Combo must include at least one item.")
+            return
+
+        existing = {str(c.get("name") or "") for c in combos if isinstance(c, dict) and c.get("name")}
+        if new_name != name and new_name in existing:
+            n = 2
+            base = new_name
+            while f"{base} ({n})" in existing:
+                n += 1
+            new_name = f"{base} ({n})"
+
+        combo["name"] = new_name
+        combo["keys"] = new_keys
+        data["art_combos"] = combos
+
+        if new_name != name:
+            seq = data.get("art_cycle_sequence")
+            if isinstance(seq, list):
+                for e in seq:
+                    if not isinstance(e, dict):
+                        continue
+                    if str(e.get("type") or "").strip().lower() == "combo" and str(e.get("name") or "") == name:
+                        e["name"] = new_name
+            self._combo_expanded.discard(name)
+            self._combo_expanded.add(new_name)
+
+        self._write_app_settings(data)
+        self.load_images()
 
     def _on_selection_changed(self, current, _prev):
         try:
@@ -722,12 +1236,11 @@ class ImageManagerDialog(QWidget):
             pass
         try:
             if self._edit_btn is not None:
-                # Disable edit for combo items (they are not file assets).
                 editable = False
                 if current is not None:
                     meta = current.data(Qt.ItemDataRole.UserRole)
                     if isinstance(meta, dict) and meta.get("type") == "combo":
-                        editable = False
+                        editable = True
                     else:
                         # Require a backing path for editing.
                         p = current.data(Qt.ItemDataRole.UserRole + 1)
@@ -740,7 +1253,14 @@ class ImageManagerDialog(QWidget):
         it = self.image_list.currentItem()
         if it is None:
             return
-        key = str(it.data(Qt.ItemDataRole.UserRole) or "").strip()
+        meta = it.data(Qt.ItemDataRole.UserRole)
+        if isinstance(meta, dict) and meta.get("type") == "combo":
+            name = str(meta.get("name") or "").strip()
+            if name:
+                self._edit_combo(name)
+            return
+
+        key = str(meta or "").strip()
         path = str(it.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
         if not path:
             return

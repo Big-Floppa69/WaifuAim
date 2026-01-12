@@ -69,6 +69,10 @@ class MovableOverlayLabel(QLabel):
             self._drag_active = False
             self._drag_start_global = None
             self._drag_start_xy = None
+            try:
+                self._controller.flush_transform(self._key)
+            except Exception:
+                pass
             event.accept()
 
 
@@ -87,15 +91,30 @@ class ArtOverlayController:
         # Monotonic counter to cancel stale deferred renders.
         self._render_generation = 0
 
-        # Drag context is enabled while the Art Manager is open.
-        self._drag_context_enabled = False
+        # Drag context: overlays become interactive only while a configured
+        # hold-to-drag chord is held. Default empty chord disables dragging.
+        self._drag_context_enabled = True
         self._selected_key: Optional[str] = None
         # Optional hold chord, e.g. "alt" or "ctrl+shift". Empty => no hold.
         self._hold_to_drag: list[str] = []
+        self._drag_hold_active = False
+
+        # Poll hold-to-drag state so dragging can work globally.
+        self._hold_poll = QTimer(self._app)
+        self._hold_poll.setInterval(30)
+        self._hold_poll.timeout.connect(self._update_hold_state)
+        self._hold_poll.start()
 
         # Whether the UI currently expects art overlays to be visible.
         # Used so checkbox toggles can render immediately when "Show Art" is on.
         self._visible_requested = False
+
+        # Coalesce repeated drag updates for smoother movement.
+        self._pending_reapply: set[str] = set()
+        self._reapply_timer = QTimer(self._app)
+        self._reapply_timer.setSingleShot(True)
+        self._reapply_timer.setInterval(16)
+        self._reapply_timer.timeout.connect(self._process_pending_reapply)
 
     def enabled_keys(self) -> list[str]:
         data = self._read_settings()
@@ -321,6 +340,7 @@ class ArtOverlayController:
             if s:
                 out.append(s)
         self._hold_to_drag = out
+        self._update_hold_state()
 
     def set_drag_context(self, enabled: bool, *, selected_key: Optional[str] = None) -> None:
         self._drag_context_enabled = bool(enabled)
@@ -391,9 +411,47 @@ class ArtOverlayController:
         lbl = self._labels.get(key)
         if lbl is None:
             return
+        # Defer re-apply to avoid re-rendering on every mousemove.
+        try:
+            self._pending_reapply.add(key)
+            if not self._reapply_timer.isActive():
+                self._reapply_timer.start()
+        except Exception:
+            path = getattr(lbl, "_zzz_source_path", None)
+            if isinstance(path, str) and path:
+                self._apply_label(key, path)
+
+    def flush_transform(self, key: str) -> None:
+        """Force-apply any pending transform for `key` immediately."""
+        key = str(key or "").strip()
+        if not key:
+            return
+        try:
+            if key in self._pending_reapply:
+                self._pending_reapply.discard(key)
+        except Exception:
+            pass
+        lbl = self._labels.get(key)
+        if lbl is None:
+            return
         path = getattr(lbl, "_zzz_source_path", None)
         if isinstance(path, str) and path:
             self._apply_label(key, path)
+
+    def _process_pending_reapply(self) -> None:
+        keys = []
+        try:
+            keys = list(self._pending_reapply)
+            self._pending_reapply.clear()
+        except Exception:
+            keys = []
+        for key in keys:
+            lbl = self._labels.get(key)
+            if lbl is None:
+                continue
+            path = getattr(lbl, "_zzz_source_path", None)
+            if isinstance(path, str) and path:
+                self._apply_label(key, path)
 
     def set_opacity(self, key: str, opacity: float) -> None:
         st = self._get_state(key)
@@ -421,30 +479,37 @@ class ArtOverlayController:
     def can_drag(self, key: str) -> bool:
         if not self._drag_context_enabled:
             return False
-        if not self._selected_key or self._selected_key != key:
+        if not self._drag_hold_active:
             return False
+        return bool(self.is_enabled(key))
 
-        # If a hold chord is configured, require it.
+    def _update_hold_state(self) -> None:
+        """Update whether the hold-to-drag chord is currently active."""
+        active = False
+
+        # Empty by default => dragging disabled.
         if self._hold_to_drag:
             try:
                 import keyboard as kb  # type: ignore
             except Exception:
-                return False
+                kb = None
 
-            # Accept if ANY configured chord is held.
-            for chord in self._hold_to_drag:
-                parts = [p.strip() for p in str(chord).split("+") if p.strip()]
-                if not parts:
-                    continue
-                try:
-                    if all(kb.is_pressed(p) for p in parts):
-                        return True
-                except Exception:
-                    continue
-            return False
+            if kb is not None:
+                for chord in self._hold_to_drag:
+                    parts = [p.strip() for p in str(chord).split("+") if p.strip()]
+                    if not parts:
+                        continue
+                    try:
+                        if all(kb.is_pressed(p) for p in parts):
+                            active = True
+                            break
+                    except Exception:
+                        continue
 
-        # Default: no key required while Art Manager is open.
-        return True
+        if active == self._drag_hold_active:
+            return
+        self._drag_hold_active = active
+        self._sync_interactivity()
 
     # --- internals -------------------------------------------------------------------
 
@@ -536,7 +601,7 @@ class ArtOverlayController:
 
     def _sync_interactivity(self) -> None:
         for key, lbl in list(self._labels.items()):
-            desired_interactive = bool(self._drag_context_enabled and self._selected_key == key)
+            desired_interactive = bool(self._drag_context_enabled and self._drag_hold_active and self.is_enabled(key))
             self._set_label_interactive(lbl, desired_interactive)
 
     def _set_label_interactive(self, lbl: QLabel, interactive: bool) -> None:
