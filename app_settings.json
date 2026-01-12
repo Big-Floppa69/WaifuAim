@@ -31,11 +31,11 @@
   ],
   "art_overlays": {
     "display_images/miyabi-hoshimi-miyabi.mp4": {
-      "enabled": false,
+      "enabled": true,
       "opacity": 1.0,
       "transform": {
-        "x": 1164.1818181818178,
-        "y": 71.63636363636374,
+        "x": 1371.727272727272,
+        "y": 65.09090909090912,
         "zoom": 0.65,
         "rotation": 0.0
       }
@@ -51,7 +51,7 @@
       "transform": {}
     },
     "display_images/astolfo2.png": {
-      "enabled": true,
+      "enabled": false,
       "opacity": 1.0,
       "transform": {}
     },
@@ -96,6 +96,13 @@
       "name": "AstraYao+Miaby",
       "keys": [
         "display_images/astra_yao.png",
+        "display_images/miyabi-hoshimi-miyabi.mp4"
+      ]
+    },
+    {
+      "name": "Combo",
+      "keys": [
+        "display_images/astolfo2.png",
         "display_images/miyabi-hoshimi-miyabi.mp4"
       ]
     }

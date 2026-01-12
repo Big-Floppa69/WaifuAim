@@ -93,6 +93,10 @@ class ArtOverlayController:
         # Optional hold chord, e.g. "alt" or "ctrl+shift". Empty => no hold.
         self._hold_to_drag: list[str] = []
 
+        # Whether the UI currently expects art overlays to be visible.
+        # Used so checkbox toggles can render immediately when "Show Art" is on.
+        self._visible_requested = False
+
     def enabled_keys(self) -> list[str]:
         data = self._read_settings()
         raw = data.get("art_overlays")
@@ -199,6 +203,7 @@ class ArtOverlayController:
         This avoids one-frame stacking when selection changes and also prevents
         the legacy fallback from double-rendering on partial overlay failures.
         """
+        self._visible_requested = bool(visible)
         self._render_generation += 1
         gen = self._render_generation
 
@@ -341,10 +346,10 @@ class ArtOverlayController:
                 except Exception:
                     pass
         else:
-            # Checkbox selects the element but does not show it immediately.
-            # Rendering happens when the user toggles "Show Art".
             try:
                 self._ensure_label(key)
+                if self._visible_requested:
+                    self._apply_label(key, path, visible_override=True)
             except Exception:
                 pass
         self._sync_interactivity()
@@ -364,6 +369,7 @@ class ArtOverlayController:
 
     def set_all_visible(self, visible: bool) -> None:
         visible = bool(visible)
+        self._visible_requested = visible
         for key, lbl in list(self._labels.items()):
             st = self._get_state(key)
             try:

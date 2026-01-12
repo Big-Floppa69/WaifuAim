@@ -1857,79 +1857,38 @@ class DarkControlPanel(QWidget):
             except Exception:
                 pass
         else:
-            # Show selection overlays if any; otherwise show single art as before.
+            # Show selection overlays if any. If nothing is selected, keep the
+            # base label transparent (do NOT auto-select a file), otherwise the
+            # user's unchecked state gets overridden when toggling visibility.
             try:
                 self.image_label.show()
             except Exception:
                 pass
 
-            if selected:
+            # Always clear base label when using the overlay pipeline.
+            try:
+                clear_label_art(self.image_label)
+            except Exception:
+                pass
+
+            if self.art_overlay_controller is not None:
+                # Render whatever is currently checked (may be empty).
                 try:
-                    if self.art_overlay_controller is not None:
-                        # Clear base label BEFORE any overlay render/show.
-                        clear_label_art(self.image_label)
-                        self.art_overlay_controller.request_render_selected_atomic(
-                            "display_images",
-                            visible=True,
-                        )
+                    self.art_overlay_controller.request_render_selected_atomic(
+                        "display_images",
+                        visible=True,
+                    )
                 except Exception:
                     pass
             else:
-                # Single-art mode: if nothing loaded yet, load first. Prefer
-                # rendering via the ArtOverlayController so the element is
-                # editable (same pipeline as combos). Fall back to legacy
-                # label rendering when controller is not available.
-                try:
-                    arts = get_art_list()
-                    if arts:
-                        if self.current_image_index < 0 or self.current_image_index >= len(arts):
-                            self.current_image_index = 0
-                        path = arts[self.current_image_index]
-
-                        def _key_for_path(p: str) -> str:
-                            try:
-                                root = os.path.dirname(os.path.abspath(__file__))
-                                return os.path.relpath(os.path.abspath(p), root).replace("\\", "/")
-                            except Exception:
-                                return os.path.abspath(p).replace("\\", "/")
-
-                        if self.art_overlay_controller is not None:
-                            try:
-                                key = _key_for_path(path)
-                                self.art_overlay_controller.set_selection_keys([key])
-                                clear_label_art(self.image_label)
-
-                                def _fallback(_e=None):
-                                    try:
-                                        self.art_overlay_controller.clear_selection()
-                                        self.art_overlay_controller.set_all_visible(False)
-                                    except Exception:
-                                        pass
-                                    try:
-                                        set_label_art_from_path(self.image_label, path)
-                                    except Exception:
-                                        try:
-                                            pix = QPixmap(path)
-                                            self.image_label.setPixmap(pix)
-                                        except Exception:
-                                            pass
-
-                                self.art_overlay_controller.request_render_selected_atomic(
-                                    "display_images",
-                                    visible=True,
-                                    on_error=_fallback,
-                                )
-                            except Exception:
-                                # Fall back to legacy rendering below
-                                try:
-                                    set_label_art_from_path(self.image_label, path)
-                                except Exception:
-                                    try:
-                                        pix = QPixmap(path)
-                                        self.image_label.setPixmap(pix)
-                                    except Exception:
-                                        pass
-                        else:
+                # Legacy mode (no overlay controller): keep the old behavior.
+                if not selected:
+                    try:
+                        arts = get_art_list()
+                        if arts:
+                            if self.current_image_index < 0 or self.current_image_index >= len(arts):
+                                self.current_image_index = 0
+                            path = arts[self.current_image_index]
                             try:
                                 set_label_art_from_path(self.image_label, path)
                             except Exception:
@@ -1938,8 +1897,8 @@ class DarkControlPanel(QWidget):
                                     self.image_label.setPixmap(pix)
                                 except Exception:
                                     pass
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
 
         self._update_image_toggle_text()
         self._sync_action_bar_state()
