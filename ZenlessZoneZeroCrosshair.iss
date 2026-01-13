@@ -28,6 +28,7 @@ SetupIconFile=astra_yao_tray.ico
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
+ShowLanguageDialog=yes
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64

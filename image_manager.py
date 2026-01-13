@@ -13,7 +13,7 @@ from PyQt6.QtGui import QPixmap, QColor, QIcon, QPainter, QPen
 from PyQt6.QtCore import Qt, QSize, QUrl, QPoint, pyqtSignal
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 import json
-from utils import UI_THEME, ART_EXTS, IMAGE_EXTS, is_video_path
+from utils import UI_THEME, ART_EXTS, IMAGE_EXTS, is_video_path, tr_lit
 from image_editor import ImageEditorDialog
 
 
@@ -250,7 +250,7 @@ class ImageManagerDialog(QWidget):
         title_bar_layout.setSpacing(5)
         
         # Title
-        title = QLabel("🎨 Art Manager")
+        title = QLabel(tr_lit("🎨 Art Manager"))
         title.setStyleSheet(
             "QLabel { color: "
             + UI_THEME["text"]
@@ -298,7 +298,7 @@ class ImageManagerDialog(QWidget):
         content_layout.setContentsMargins(20, 15, 20, 20)
         
         # Info label
-        info_label = QLabel("Manage your crosshair art (images + videos)")
+        info_label = QLabel(tr_lit("Manage your crosshair art (images + videos)"))
         info_label.setStyleSheet(
             "QLabel { color: "
             + UI_THEME["muted"]
@@ -358,16 +358,16 @@ class ImageManagerDialog(QWidget):
         button_layout = QHBoxLayout()
         button_layout.setSpacing(10)
         add_btn = self._create_button("➕", role="neutral")
-        add_btn.setToolTip("Add Art")
+        add_btn.setToolTip(tr_lit("Add Art"))
         add_btn.clicked.connect(self.add_image)
         button_layout.addWidget(add_btn)
         remove_btn = self._create_button("🗑️", role="danger")
-        remove_btn.setToolTip("Remove")
+        remove_btn.setToolTip(tr_lit("Remove"))
         remove_btn.clicked.connect(self.remove_image)
         button_layout.addWidget(remove_btn)
 
         edit_btn = self._create_button("✏️", role="neutral")
-        edit_btn.setToolTip("Edit selected")
+        edit_btn.setToolTip(tr_lit("Edit selected"))
         edit_btn.setEnabled(False)
         edit_btn.clicked.connect(self.edit_selected)
         self._edit_btn = edit_btn
@@ -376,23 +376,23 @@ class ImageManagerDialog(QWidget):
         show_btn = self._create_button("👁", role="primary")
         show_btn.setCheckable(True)
         show_btn.setChecked(False)
-        show_btn.setToolTip("Show/Hide marked")
+        show_btn.setToolTip(tr_lit("Show/Hide marked"))
         show_btn.clicked.connect(lambda: self._toggle_show_marked(show_btn.isChecked()))
         button_layout.addWidget(show_btn)
 
         combo_btn = self._create_button("💾", role="neutral")
-        combo_btn.setToolTip("Save marked as combo")
+        combo_btn.setToolTip(tr_lit("Save marked as combo"))
         combo_btn.clicked.connect(self.save_marked_as_combo)
         button_layout.addWidget(combo_btn)
         content_layout.addLayout(button_layout)
         
         # Refresh button
-        refresh_btn = self._create_button("🔄 Refresh List", role="primary")
+        refresh_btn = self._create_button(tr_lit("🔄 Refresh List"), role="primary")
         refresh_btn.clicked.connect(self.load_images)
         content_layout.addWidget(refresh_btn)
         
         # Info text
-        info_text = QLabel("Supported formats: PNG, JPG, JPEG, WEBP, GIF, BMP, MP4, AVI, MOV, WEBM, MKV, M4V")
+        info_text = QLabel(tr_lit("Supported formats: PNG, JPG, JPEG, WEBP, GIF, BMP, MP4, AVI, MOV, WEBM, MKV, M4V"))
         info_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
         info_text.setStyleSheet("""
             QLabel {
@@ -1111,7 +1111,7 @@ class ImageManagerDialog(QWidget):
                 combo = c
                 break
         if not isinstance(combo, dict):
-            QMessageBox.warning(self, "Edit Combo", "Combo not found.")
+            QMessageBox.warning(self, tr_lit("Edit Combo"), tr_lit("Combo not found."))
             return
 
         # Available file keys from current list items.
@@ -1138,7 +1138,7 @@ class ImageManagerDialog(QWidget):
         current_set = {str(k) for k in current_keys if str(k).strip()}
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("Edit Combo")
+        dlg.setWindowTitle(tr_lit("Edit Combo"))
         dlg.setModal(True)
         dlg.setStyleSheet(f"QDialog {{ background-color: {UI_THEME['bg']}; color: {UI_THEME['text']}; }}")
         outer = QVBoxLayout(dlg)
@@ -1146,7 +1146,7 @@ class ImageManagerDialog(QWidget):
         outer.setSpacing(10)
 
         name_row = QHBoxLayout()
-        name_row.addWidget(QLabel("Name:"))
+        name_row.addWidget(QLabel(tr_lit("Name:")))
         name_edit = QLineEdit(name)
         name_edit.setStyleSheet(
             f"QLineEdit {{ background-color: {UI_THEME['surface']}; border: 1px solid {UI_THEME['border']}; border-radius: 8px; padding: 6px; color: {UI_THEME['text']}; }}"
@@ -1168,8 +1168,8 @@ class ImageManagerDialog(QWidget):
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        cancel = QPushButton("Cancel")
-        ok = QPushButton("Save")
+        cancel = QPushButton(tr_lit("Cancel"))
+        ok = QPushButton(tr_lit("Save"))
         for b in (cancel, ok):
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setStyleSheet(
@@ -1199,7 +1199,7 @@ class ImageManagerDialog(QWidget):
             if k:
                 new_keys.append(k)
         if not new_keys:
-            QMessageBox.warning(self, "Edit Combo", "Combo must include at least one item.")
+            QMessageBox.warning(self, tr_lit("Edit Combo"), tr_lit("Combo must include at least one item."))
             return
 
         existing = {str(c.get("name") or "") for c in combos if isinstance(c, dict) and c.get("name")}
@@ -1265,7 +1265,7 @@ class ImageManagerDialog(QWidget):
         if not path:
             return
         if not os.path.exists(path):
-            QMessageBox.warning(self, "Edit", "Selected file no longer exists.")
+            QMessageBox.warning(self, tr_lit("Edit"), tr_lit("Selected file no longer exists."))
             try:
                 self.load_images()
             except Exception:
@@ -1294,7 +1294,7 @@ class ImageManagerDialog(QWidget):
             self.image_editor.asset_deleted.connect(lambda _p: self.load_images())
             self.image_editor.show()
         except Exception as e:
-            QMessageBox.warning(self, "Edit", f"Failed to open editor: {e}")
+            QMessageBox.warning(self, tr_lit("Edit"), f"{tr_lit('Failed to open editor:')} {e}")
 
     def _on_item_check_changed(self, item: QListWidgetItem):
         if self._updating_checks:
@@ -1358,13 +1358,13 @@ class ImageManagerDialog(QWidget):
             keys = []
 
         if not keys:
-            QMessageBox.information(self, "Save Combo", "No marked items to save.")
+            QMessageBox.information(self, tr_lit("Save Combo"), tr_lit("No marked items to save."))
             return
 
-        name, ok = QInputDialog.getText(self, "Save Combo", "Combo name:", text="Combo")
+        name, ok = QInputDialog.getText(self, tr_lit("Save Combo"), tr_lit("Combo name:"), text=tr_lit("Combo"))
         if not ok:
             return
-        name = str(name or "").strip() or "Combo"
+        name = str(name or "").strip() or tr_lit("Combo")
 
         data = self._read_app_settings()
         combos = data.get("art_combos")
@@ -1382,7 +1382,7 @@ class ImageManagerDialog(QWidget):
         combos.append({"name": name, "keys": keys})
         data["art_combos"] = combos
         self._write_app_settings(data)
-        QMessageBox.information(self, "Save Combo", f"Saved combo: {name}")
+        QMessageBox.information(self, tr_lit("Save Combo"), f"{tr_lit('Saved combo:')} {name}")
     
     def mousePressEvent(self, event):
         """Handle mouse press events for dragging."""

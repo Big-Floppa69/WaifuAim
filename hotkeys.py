@@ -93,12 +93,24 @@ def load_hotkey_config() -> dict:
         "hold_to_drag": [],
     }
 
+    def _normalize_key_name(s: str) -> str:
+        s = str(s or "").strip().lower()
+        if not s:
+            return ""
+        # keyboard library tends to prefer key names like "grave".
+        return {"`": "grave", "~": "grave"}.get(s, s)
+
     def _normalize(value):
         if value is None:
             return []
         if isinstance(value, list):
-            return [str(v).strip().lower() for v in value if str(v).strip()]
-        s = str(value).strip().lower()
+            out = []
+            for v in value:
+                s = _normalize_key_name(v)
+                if s:
+                    out.append(s)
+            return out
+        s = _normalize_key_name(value)
         return [s] if s else []
 
     if os.path.exists(config_file):

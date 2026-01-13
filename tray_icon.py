@@ -10,13 +10,15 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QIcon, QAction
 
+from utils import tr_lit
+
 
 def create_tray_icon(app, label, control_panel, controller=None, icon_path="astra_yao_tray.png"):
     # КРИТИЧНО: приложение не должно закрываться при закрытии всех окон
     QApplication.setQuitOnLastWindowClosed(False)
 
     tray_icon = QSystemTrayIcon(QIcon(icon_path), parent=app)
-    tray_icon.setToolTip("Crosshair App")
+    tray_icon.setToolTip(tr_lit("Crosshair App"))
 
     # Левый / двойной клик по иконке
     def on_tray_activated(reason):
@@ -121,7 +123,7 @@ def _create_tray_menu(label, control_panel, controller, app, tray_icon):
 
     # ---------- Hotkeys ----------
 
-    hotkeys_action = QAction("Enable Hotkeys", tray_menu)
+    hotkeys_action = QAction(tr_lit("Enable Hotkeys"), tray_menu)
     hotkeys_action.setCheckable(True)
     hotkeys_action.setChecked(settings.get("hotkeys_enabled", True))
 
@@ -153,7 +155,7 @@ def _create_tray_menu(label, control_panel, controller, app, tray_icon):
         )
 
     def update_hide_ui_text():
-        hide_ui_action.setText("Hide UI" if is_ui_visible() else "Show UI")
+        hide_ui_action.setText(tr_lit("Hide UI") if is_ui_visible() else tr_lit("Show UI"))
 
     def toggle_ui():
         if is_ui_visible():
@@ -189,7 +191,7 @@ def _create_tray_menu(label, control_panel, controller, app, tray_icon):
 
         def update_quick_toggle_text():
             enabled = getattr(controller, "app_enabled", True)
-            quick_toggle_action.setText("Disable App" if enabled else "Enable App")
+            quick_toggle_action.setText(tr_lit("Disable App") if enabled else tr_lit("Enable App"))
 
         def quick_toggle():
             controller.toggle_app_enabled()
@@ -204,7 +206,7 @@ def _create_tray_menu(label, control_panel, controller, app, tray_icon):
     # ---------- Restart ----------
 
     if controller is not None and hasattr(controller, "restart_app"):
-        restart_action = QAction("Restart App", tray_menu)
+        restart_action = QAction(tr_lit("Restart App"), tray_menu)
         restart_action.triggered.connect(controller.restart_app)
         tray_menu.addAction(restart_action)
 
@@ -218,8 +220,8 @@ def _create_tray_menu(label, control_panel, controller, app, tray_icon):
         if busy:
             reply = QMessageBox.question(
                 None,
-                "Exit App",
-                "The app is currently active. Exit anyway?",
+                tr_lit("Exit App"),
+                tr_lit("The app is currently active. Exit anyway?"),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if reply != QMessageBox.StandardButton.Yes:
@@ -227,7 +229,7 @@ def _create_tray_menu(label, control_panel, controller, app, tray_icon):
 
         app.quit()
 
-    exit_action = QAction("Exit App", tray_menu)
+    exit_action = QAction(tr_lit("Exit App"), tray_menu)
     exit_action.triggered.connect(exit_app)
     tray_menu.addAction(exit_action)
 

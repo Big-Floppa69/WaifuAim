@@ -770,6 +770,304 @@ def read_app_settings() -> dict:
     return {}
 
 
+def write_app_settings(data: dict) -> None:
+    try:
+        if not isinstance(data, dict):
+            return
+        APP_SETTINGS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+SUPPORTED_LANGUAGES: dict[str, str] = {
+    "en": "English",
+    "ru": "Русский",
+}
+
+
+_TRANSLATIONS: dict[str, dict[str, str]] = {
+    "en": {
+        "opacity_language_title": "Opacity, Language",
+        "crosshair_opacity": "Crosshair Opacity",
+        "window_opacity": "Window Opacity",
+        "colorblind_mode": "Colorblind Mode",
+        "language": "Language",
+        "english": "English",
+        "russian": "Russian",
+        "colorblind_prefix": "Colorblind",
+    },
+    "ru": {
+        "opacity_language_title": "Прозрачность, Язык",
+        "crosshair_opacity": "Прозрачность прицела",
+        "window_opacity": "Прозрачность окна",
+        "colorblind_mode": "Режим дальтонизма",
+        "language": "Язык",
+        "english": "Английский",
+        "russian": "Русский",
+        "colorblind_prefix": "Дальтонизм",
+    },
+}
+
+
+def get_app_language_from_disk(default: str = "en") -> str:
+    default = str(default or "en").strip().lower() or "en"
+    if default not in SUPPORTED_LANGUAGES:
+        default = "en"
+    data = read_app_settings()
+    lang = str(data.get("language", default) or default).strip().lower()
+    return lang if lang in SUPPORTED_LANGUAGES else default
+
+
+def set_app_language_on_disk(lang: str) -> str:
+    lang = str(lang or "en").strip().lower() or "en"
+    if lang not in SUPPORTED_LANGUAGES:
+        lang = "en"
+    data = read_app_settings()
+    data["language"] = lang
+    write_app_settings(data)
+    return lang
+
+
+def tr(key: str, *, lang: str | None = None, default: str | None = None) -> str:
+    key = str(key or "").strip()
+    if not key:
+        return default or ""
+    if lang is None:
+        lang = get_app_language_from_disk("en")
+    lang = str(lang or "en").strip().lower() or "en"
+    table = _TRANSLATIONS.get(lang) or _TRANSLATIONS.get("en", {})
+    if key in table:
+        return str(table[key])
+    fallback = _TRANSLATIONS.get("en", {})
+    if key in fallback:
+        return str(fallback[key])
+    return default or key
+
+
+_LIT_TRANSLATIONS: dict[str, dict[str, str]] = {
+    "ru": {
+        "Crosshair Control": "Управление прицелом",
+        "Standard Crosshair": "Стандартный прицел",
+        "\N{BULLSEYE} Standard Crosshair": "\N{BULLSEYE} Стандартный прицел",
+        "Choose or edit a preset for generated crosshairs.": "Выберите или отредактируйте пресет для сгенерированного прицела.",
+        "Preset": "Пресет",
+        "Save": "Сохранить",
+        "Save As": "Сохранить как",
+        "Delete": "Удалить",
+        "Reset": "Сбросить",
+        "Apply": "Применить",
+        "Cancel": "Отмена",
+        "Edit": "Редактировать",
+        "Error": "Ошибка",
+        "Open Line Builder": "Открыть конструктор линий",
+        "Hide Crosshair": "Скрыть прицел",
+        "Show Crosshair": "Показать прицел",
+        "Hide Image": "Скрыть изображение",
+        "Show Image": "Показать изображение",
+        "Show/Hide Image": "Показать/скрыть изображение",
+        "Hide UI": "Скрыть интерфейс",
+        "Show UI": "Показать интерфейс",
+            "Show/Hide Crosshair": "Показать/скрыть прицел",
+            "🖼️ Hide Image": "🖼️ Скрыть изображение",
+            "🖼️ Show Image": "🖼️ Показать изображение",
+            "🎯 Hide Crosshair": "🎯 Скрыть прицел",
+            "🎯 Show Crosshair": "🎯 Показать прицел",
+            "👁️ Hide Crosshair": "👁️ Скрыть прицел",
+            "↺ Reset": "↺ Сбросить",
+        "Disable App": "Отключить приложение",
+        "Enable App": "Включить приложение",
+        "Crosshair App": "Приложение прицела",
+        "Enable Hotkeys": "Включить хоткеи",
+        "Restart App": "Перезапустить приложение",
+        "Exit App": "Выйти",
+        "The app is currently active. Exit anyway?": "Приложение сейчас активно. Всё равно выйти?",
+        "\N{ARTIST PALETTE} Palette": "\N{ARTIST PALETTE} Палитра",
+        "Pick Crosshair Color": "Выбор цвета прицела",
+        "Advanced Line Builder": "Расширенный конструктор линий",
+        "\N{LEFTWARDS ARROW} Back": "\N{LEFTWARDS ARROW} Назад",
+        "Shape stacked lines, drag their order, and preview the result instantly.": "Создавайте составные линии, перетаскивайте их порядок и сразу смотрите результат.",
+        "Standard lines still respect the toggles above; builder layers optional geometry on top.": "Стандартные линии всё ещё зависят от переключателей выше; конструктор добавляет дополнительную геометрию поверх.",
+        "Drag custom lines to reorder draw priority or stack multiple spokes at once.": "Перетаскивайте пользовательские линии, чтобы менять порядок отрисовки или накладывать несколько элементов.",
+        "Select an object to edit it.": "Выберите объект, чтобы редактировать его.",
+        "Grid Size": "Размер сетки",
+        "Basic": "Основное",
+        "Transform": "Трансформация",
+        "Dot": "Точка",
+        "Color": "Цвет",
+        "Size": "Размер",
+        "Length": "Длина",
+        "Thickness": "Толщина",
+        "Gap": "Зазор",
+        "Outline": "Обводка",
+        "Rotation": "Поворот",
+        "Horizontal Offset": "Смещение по горизонтали",
+        "Vertical Offset": "Смещение по вертикали",
+        "Line Corner Radius": "Скругление углов",
+        "Crosshair Style": "Стиль прицела",
+        "Enable Fan Animation": "Включить анимацию вращения",
+        "Fan Speed": "Скорость вращения",
+        "Randomize": "Случайно",
+        "From Presets": "Из пресетов",
+        "Fully Random": "Полностью случайно",
+        "Fade while holding": "Скрывать при удержании",
+        "\N{ARTIST PALETTE} Art Manager": "\N{ARTIST PALETTE} Менеджер арта",
+        "Manage your crosshair art (images + videos)": "Управляйте артом для прицела (изображения + видео)",
+        "Supported formats: PNG, JPG, JPEG, WEBP, GIF, BMP, MP4, AVI, MOV, WEBM, MKV, M4V": "Поддерживаемые форматы: PNG, JPG, JPEG, WEBP, GIF, BMP, MP4, AVI, MOV, WEBM, MKV, M4V",
+        "Add Art": "Добавить арт",
+        "Remove": "Удалить",
+        "Edit selected": "Редактировать выбранное",
+        "Show/Hide marked": "Показать/скрыть отмеченное",
+        "Save marked as combo": "Сохранить отмеченное как комбо",
+        "🔄 Refresh List": "🔄 Обновить список",
+        "Edit Combo": "Редактировать комбо",
+        "Combo not found.": "Комбо не найдено.",
+        "Name:": "Имя:",
+        "Combo must include at least one item.": "Комбо должно содержать хотя бы один элемент.",
+        "Save Combo": "Сохранить комбо",
+        "No marked items to save.": "Нет отмеченных элементов для сохранения.",
+        "Combo name:": "Название комбо:",
+        "Combo": "Комбо",
+        "Saved combo:": "Сохранено комбо:",
+        "\N{KEYBOARD} Hotkey Manager": "\N{KEYBOARD} Менеджер хоткеев",
+        "Press a key or ESC to cancel...": "Нажмите клавишу или ESC для отмены...",
+        "Click on a field and press a key combination to set a hotkey.\nPress ESC to cancel while editing.": "Нажмите на поле и затем комбинацию клавиш, чтобы назначить хоткей.\nНажмите ESC для отмены во время редактирования.",
+        "Opacity": "Прозрачность",
+
+        "Add Center Dot": "Добавить центральную точку",
+        "Visible": "Видимый",
+        "Draggable": "Перетаскиваемый",
+        "⚲ Snap": "⚲ Привязка",
+
+        # Image editor / file dialogs / message boxes
+        "Art Files (*.png *.jpg *.jpeg *.webp *.gif *.bmp *.mp4 *.avi *.mov *.webm *.mkv *.m4v)": "Файлы арта (*.png *.jpg *.jpeg *.webp *.gif *.bmp *.mp4 *.avi *.mov *.webm *.mkv *.m4v)",
+        "No Content": "Нет содержимого",
+        "Add images/videos first.": "Сначала добавьте изображения/видео.",
+        "Saved": "Сохранено",
+        "Saved position for this element.": "Сохранена позиция для этого элемента.",
+        "Saved to:": "Сохранено в:",
+        "Missing Dependency": "Не хватает зависимости",
+        "MP4 export requires opencv-python (and numpy). Install it and restart the app.": "Экспорт MP4 требует opencv-python (и numpy). Установите их и перезапустите приложение.",
+        "Save Video": "Сохранить видео",
+        "Save Image": "Сохранить изображение",
+        "MP4 Video (*.mp4)": "Видео MP4 (*.mp4)",
+        "PNG Image (*.png)": "Изображение PNG (*.png)",
+        "Failed to add image:": "Не удалось добавить изображение:",
+        "Failed to add video:": "Не удалось добавить видео:",
+        "Failed to save position:": "Не удалось сохранить позицию:",
+        "Failed to save:": "Не удалось сохранить:",
+        "Project": "Проект",
+        "Failed to load project:": "Не удалось загрузить проект:",
+        "No Selection": "Нет выбора",
+        "Select an element to rename.": "Выберите элемент, чтобы переименовать.",
+        "Rename": "Переименовать",
+        "New file name:": "Новое имя файла:",
+        "A file with that name already exists.": "Файл с таким именем уже существует.",
+        "Failed to rename:": "Не удалось переименовать:",
+        "Select element(s) to delete.": "Выберите элемент(ы) для удаления.",
+        "Remove Element": "Удалить элемент",
+        "Remove selected element(s) from the editor? (Files will NOT be deleted)": "Удалить выбранный(е) элемент(ы) из редактора? (Файлы НЕ будут удалены)",
+        "File Exists": "Файл уже существует",
+        "already exists in display_images. Overwrite?": "уже существует в display_images. Перезаписать?",
+
+        # Art manager editor
+        "Selected file no longer exists.": "Выбранный файл больше не существует.",
+        "Failed to open editor:": "Не удалось открыть редактор:",
+
+        # Hotkey manager
+        "Duplicate Hotkeys": "Дубликаты хоткеев",
+        "You have assigned the same hotkey to multiple actions. Please use unique hotkeys.": "Вы назначили один и тот же хоткей для нескольких действий. Используйте уникальные хоткеи.",
+        "Hotkeys Saved": "Хоткеи сохранены",
+        "Hotkeys have been saved and applied successfully!": "Хоткеи успешно сохранены и применены!",
+        "Save Error": "Ошибка сохранения",
+        "Failed to save hotkeys:": "Не удалось сохранить хоткеи:",
+    },
+    "en": {},
+}
+
+
+def tr_lit(text: str, *, lang: str | None = None) -> str:
+    """Translate a literal UI string.
+
+    Use when retrofitting i18n across a codebase that already has lots of
+    hard-coded English strings.
+    """
+    s = str(text or "")
+    if lang is None:
+        lang = get_app_language_from_disk("en")
+    lang = str(lang or "en").strip().lower() or "en"
+    mapping = _LIT_TRANSLATIONS.get(lang) or {}
+    return mapping.get(s, s)
+
+
+def apply_language_to_object_tree(root: QObject, *, lang: str | None = None) -> None:
+    """Apply `tr_lit()` to common text-bearing Qt objects under `root`.
+
+    Safe by design: only exact known strings are translated; unknown strings are
+    left untouched.
+    """
+    if root is None:
+        return
+    if lang is None:
+        lang = get_app_language_from_disk("en")
+
+    def _maybe_translate_attr(obj: object, getter: str, setter: str) -> None:
+        try:
+            get_fn = getattr(obj, getter, None)
+            set_fn = getattr(obj, setter, None)
+            if not callable(get_fn) or not callable(set_fn):
+                return
+            old = get_fn()
+            if not isinstance(old, str) or not old:
+                return
+            new = tr_lit(old, lang=lang)
+            if new != old:
+                set_fn(new)
+        except Exception:
+            return
+
+    def _apply(obj: QObject) -> None:
+        _maybe_translate_attr(obj, "text", "setText")
+        _maybe_translate_attr(obj, "windowTitle", "setWindowTitle")
+        _maybe_translate_attr(obj, "toolTip", "setToolTip")
+        _maybe_translate_attr(obj, "statusTip", "setStatusTip")
+        _maybe_translate_attr(obj, "whatsThis", "setWhatsThis")
+        _maybe_translate_attr(obj, "placeholderText", "setPlaceholderText")
+        _maybe_translate_attr(obj, "title", "setTitle")
+
+        try:
+            from PyQt6.QtWidgets import QComboBox
+        except Exception:
+            QComboBox = None
+        if QComboBox is not None and isinstance(obj, QComboBox):
+            try:
+                for i in range(int(obj.count())):
+                    t = obj.itemText(i)
+                    if isinstance(t, str) and t:
+                        obj.setItemText(i, tr_lit(t, lang=lang))
+            except Exception:
+                pass
+
+        try:
+            from PyQt6.QtWidgets import QTabWidget
+        except Exception:
+            QTabWidget = None
+        if QTabWidget is not None and isinstance(obj, QTabWidget):
+            try:
+                for i in range(int(obj.count())):
+                    t = obj.tabText(i)
+                    if isinstance(t, str) and t:
+                        obj.setTabText(i, tr_lit(t, lang=lang))
+            except Exception:
+                pass
+
+    try:
+        _apply(root)
+        for child in root.findChildren(QObject):
+            _apply(child)
+    except Exception:
+        return
+
+
 def get_colorblind_mode_from_disk(default: str = "default") -> str:
     data = read_app_settings()
     mode = str(data.get("colorblind_mode", default) or default).strip().lower()

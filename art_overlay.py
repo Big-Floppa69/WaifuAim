@@ -496,15 +496,30 @@ class ArtOverlayController:
 
             if kb is not None:
                 for chord in self._hold_to_drag:
-                    parts = [p.strip() for p in str(chord).split("+") if p.strip()]
-                    if not parts:
+                    raw = str(chord or "").strip().lower()
+                    if not raw:
                         continue
+
+                    # Common alias normalization.
+                    raw = {"`": "grave", "~": "grave"}.get(raw, raw)
+
                     try:
-                        if all(kb.is_pressed(p) for p in parts):
+                        # keyboard.is_pressed can handle combos like "ctrl+shift" and
+                        # special keys better than manual splitting.
+                        if kb.is_pressed(raw):
                             active = True
                             break
                     except Exception:
-                        continue
+                        # Fallback: try split form.
+                        parts = [p.strip() for p in raw.split("+") if p.strip()]
+                        if not parts:
+                            continue
+                        try:
+                            if all(kb.is_pressed(p) for p in parts):
+                                active = True
+                                break
+                        except Exception:
+                            continue
 
         if active == self._drag_hold_active:
             return

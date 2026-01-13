@@ -29,6 +29,8 @@
   "line_layers": [],
   "draggable_mode": false,
   "grid_snap_size": 5,
+  "hold_fade_enabled": false,
+  "hold_fade_key": "mouse_left",
   "active_preset": "Default",
   "presets": {
     "Default": {
@@ -37,6 +39,7 @@
       "thickness": 4,
       "gap": 10,
       "outline": 1,
+      "global_scale": 100,
       "red": 0,
       "green": 255,
       "blue": 120,
@@ -60,7 +63,9 @@
       "line_components": {},
       "line_layers": [],
       "draggable_mode": false,
-      "grid_snap_size": 5
+      "grid_snap_size": 5,
+      "hold_fade_enabled": false,
+      "hold_fade_key": "mouse_left"
     },
     "Dot": {
       "center_dot": true,
@@ -68,6 +73,7 @@
       "thickness": 0,
       "gap": 0,
       "outline": 0,
+      "global_scale": 100,
       "red": 0,
       "green": 255,
       "blue": 120,
@@ -91,7 +97,9 @@
       "line_components": {},
       "line_layers": [],
       "draggable_mode": false,
-      "grid_snap_size": 5
+      "grid_snap_size": 5,
+      "hold_fade_enabled": false,
+      "hold_fade_key": "mouse_left"
     },
     "Small Plus": {
       "center_dot": false,
@@ -99,6 +107,7 @@
       "thickness": 3,
       "gap": 6,
       "outline": 1,
+      "global_scale": 100,
       "red": 0,
       "green": 255,
       "blue": 120,
@@ -122,7 +131,9 @@
       "line_components": {},
       "line_layers": [],
       "draggable_mode": false,
-      "grid_snap_size": 5
+      "grid_snap_size": 5,
+      "hold_fade_enabled": false,
+      "hold_fade_key": "mouse_left"
     },
     "Circle + Dot": {
       "center_dot": true,
@@ -130,6 +141,7 @@
       "thickness": 3,
       "gap": 8,
       "outline": 1,
+      "global_scale": 100,
       "red": 0,
       "green": 255,
       "blue": 120,
@@ -153,7 +165,9 @@
       "line_components": {},
       "line_layers": [],
       "draggable_mode": false,
-      "grid_snap_size": 5
+      "grid_snap_size": 5,
+      "hold_fade_enabled": false,
+      "hold_fade_key": "mouse_left"
     }
   }
 }

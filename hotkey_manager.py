@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QColor, QKeyEvent
 from PyQt6.QtCore import Qt, pyqtSignal
-from utils import UI_THEME
+from utils import UI_THEME, tr_lit
 
 
 class HotkeyLineEdit(QLineEdit):
@@ -39,7 +39,7 @@ class HotkeyLineEdit(QLineEdit):
         self.original_key = self.current_key
         self._captured_tokens.clear()
         self._held_tokens.clear()
-        self.setText("Press a key or ESC to cancel...")
+        self.setText(tr_lit("Press a key or ESC to cancel..."))
         self.setStyleSheet(self.styleSheet() + "color: rgba(200, 200, 220, 150);")
         
     def focusOutEvent(self, event):
@@ -343,7 +343,7 @@ class HotkeyManagerDialog(QWidget):
         title_bar_layout.setSpacing(5)
         
         # Title
-        title = QLabel("⌨️ Hotkey Manager")
+        title = QLabel(tr_lit("⌨️ Hotkey Manager"))
         title.setStyleSheet(
             "QLabel { color: "
             + UI_THEME["text"]
@@ -392,7 +392,7 @@ class HotkeyManagerDialog(QWidget):
         outer.setSpacing(18)
         
         # Info label
-        info = QLabel("Click on a field and press a key combination to set a hotkey.\nPress ESC to cancel while editing.")
+        info = QLabel(tr_lit("Click on a field and press a key combination to set a hotkey.\nPress ESC to cancel while editing."))
         info.setWordWrap(True)
         info.setStyleSheet(
             "QLabel { color: "
@@ -749,8 +749,8 @@ class HotkeyManagerDialog(QWidget):
         if len(hotkey_values) != len(set(hotkey_values)):
             QMessageBox.warning(
                 self,
-                "Duplicate Hotkeys",
-                "You have assigned the same hotkey to multiple actions. Please use unique hotkeys."
+                tr_lit("Duplicate Hotkeys"),
+                tr_lit("You have assigned the same hotkey to multiple actions. Please use unique hotkeys.")
             )
             return
         
@@ -768,15 +768,15 @@ class HotkeyManagerDialog(QWidget):
             
             QMessageBox.information(
                 self,
-                "Hotkeys Saved",
-                "Hotkeys have been saved and applied successfully!"
+                tr_lit("Hotkeys Saved"),
+                tr_lit("Hotkeys have been saved and applied successfully!")
             )
             self.close()
         except Exception as e:
             QMessageBox.critical(
                 self,
-                "Save Error",
-                f"Failed to save hotkeys: {str(e)}"
+                tr_lit("Save Error"),
+                f"{tr_lit('Failed to save hotkeys:')} {str(e)}"
             )
     
     def load_hotkeys(self):

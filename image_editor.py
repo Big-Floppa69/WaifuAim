@@ -19,6 +19,7 @@ from utils import UI_THEME
 from utils import (
     ART_EXTS,
     is_video_path,
+    tr_lit,
 )
 
 
@@ -563,7 +564,7 @@ class ImageEditorDialog(QWidget):
         file_dialog = QFileDialog(self)
         file_dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)
         file_dialog.setNameFilter(
-            "Art Files (*.png *.jpg *.jpeg *.webp *.gif *.bmp *.mp4 *.avi *.mov *.webm *.mkv *.m4v)"
+            tr_lit("Art Files (*.png *.jpg *.jpeg *.webp *.gif *.bmp *.mp4 *.avi *.mov *.webm *.mkv *.m4v)")
         )
 
         if not file_dialog.exec():
@@ -602,7 +603,7 @@ class ImageEditorDialog(QWidget):
             item = self.canvas.add_layer_pixmap(pm)
             self._layers.append(_Layer(item=item, source_path=file_path, is_video=False))
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to add image: {str(e)}")
+            QMessageBox.warning(self, tr_lit("Error"), f"{tr_lit('Failed to add image:')} {str(e)}")
 
     def _add_video_layer(self, file_path: str) -> None:
         try:
@@ -662,7 +663,7 @@ class ImageEditorDialog(QWidget):
             player.setSource(QUrl.fromLocalFile(os.path.abspath(file_path)))
             player.play()
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to add video: {str(e)}")
+            QMessageBox.warning(self, tr_lit("Error"), f"{tr_lit('Failed to add video:')} {str(e)}")
     
     def reset_image(self):
         """Reset selected layers (or all layers if none selected)."""
@@ -695,7 +696,7 @@ class ImageEditorDialog(QWidget):
         """
 
         if not self._layers:
-            QMessageBox.information(self, "No Content", "Add images/videos first.")
+            QMessageBox.information(self, tr_lit("No Content"), tr_lit("Add images/videos first."))
             return
 
         # Single element editing mode (from Art Manager): persist transform instead
@@ -723,38 +724,38 @@ class ImageEditorDialog(QWidget):
                 except Exception:
                     pass
 
-                QMessageBox.information(self, "Saved", "Saved position for this element.")
+                QMessageBox.information(self, tr_lit("Saved"), tr_lit("Saved position for this element."))
                 try:
                     self.close()
                 except Exception:
                     pass
                 return
             except Exception as e:
-                QMessageBox.warning(self, "Error", f"Failed to save position: {e}")
+                QMessageBox.warning(self, tr_lit("Error"), f"{tr_lit('Failed to save position:')} {e}")
                 return
 
         has_video = any(l.is_video for l in self._layers)
         if has_video and (cv2 is None or np is None):
             QMessageBox.warning(
                 self,
-                "Missing Dependency",
-                "MP4 export requires opencv-python (and numpy). Install it and restart the app."
+                tr_lit("Missing Dependency"),
+                tr_lit("MP4 export requires opencv-python (and numpy). Install it and restart the app.")
             )
             return
 
         if has_video:
             file_path, _ = QFileDialog.getSaveFileName(
                 self,
-                "Save Video",
+                tr_lit("Save Video"),
                 "display_images/edited_composite.mp4",
-                "MP4 Video (*.mp4)",
+                tr_lit("MP4 Video (*.mp4)"),
             )
         else:
             file_path, _ = QFileDialog.getSaveFileName(
                 self,
-                "Save Image",
+                tr_lit("Save Image"),
                 "display_images/edited_composite.png",
-                "PNG Image (*.png)",
+                tr_lit("PNG Image (*.png)"),
             )
 
         if not file_path:
@@ -776,14 +777,14 @@ class ImageEditorDialog(QWidget):
                 pass
 
             if not has_video:
-                QMessageBox.information(self, "Saved", f"Saved to:\n{file_path}")
+                QMessageBox.information(self, tr_lit("Saved"), f"{tr_lit('Saved to:')}\n{file_path}")
                 self.image_saved.emit(file_path)
                 try:
                     self.close()
                 except Exception:
                     pass
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to save: {str(e)}")
+            QMessageBox.warning(self, tr_lit("Error"), f"{tr_lit('Failed to save:')} {str(e)}")
 
     def _apply_overlay_state_to_single_layer(self) -> None:
         if self._overlay_controller is None or not self._asset_key:
@@ -1009,7 +1010,7 @@ class ImageEditorDialog(QWidget):
                     pass
 
                 try:
-                    QMessageBox.information(self, "Saved", f"Saved to:\n{state['output_path']}")
+                    QMessageBox.information(self, tr_lit("Saved"), f"{tr_lit('Saved to:')}\n{state['output_path']}")
                 except Exception:
                     pass
                 try:
@@ -1108,7 +1109,7 @@ class ImageEditorDialog(QWidget):
             with open(project_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception as e:
-            QMessageBox.warning(self, "Project", f"Failed to load project: {str(e)}")
+            QMessageBox.warning(self, tr_lit("Project"), f"{tr_lit('Failed to load project:')} {str(e)}")
             return
 
         layers = data.get("layers") if isinstance(data, dict) else None
@@ -1232,7 +1233,7 @@ class ImageEditorDialog(QWidget):
     def rename_asset(self) -> None:
         layer = self._selected_layer()
         if layer is None or not layer.source_path or not os.path.exists(layer.source_path):
-            QMessageBox.information(self, "No Selection", "Select an element to rename.")
+            QMessageBox.information(self, tr_lit("No Selection"), tr_lit("Select an element to rename."))
             return
 
         # Stop that layer's video playback so Windows doesn't lock the file.
@@ -1253,7 +1254,7 @@ class ImageEditorDialog(QWidget):
 
         # Let the user edit the full filename (without forcing extension), but
         # keep the old extension if they omit one.
-        new_name, ok = QInputDialog.getText(self, "Rename", "New file name:", text=old_name)
+        new_name, ok = QInputDialog.getText(self, tr_lit("Rename"), tr_lit("New file name:"), text=old_name)
         if not ok:
             return
         new_name = str(new_name or "").strip()
@@ -1268,14 +1269,14 @@ class ImageEditorDialog(QWidget):
         if os.path.abspath(new_path) == os.path.abspath(layer.source_path):
             return
         if os.path.exists(new_path):
-            QMessageBox.warning(self, "Rename", "A file with that name already exists.")
+            QMessageBox.warning(self, tr_lit("Rename"), tr_lit("A file with that name already exists."))
             return
 
         old_path = layer.source_path
         try:
             os.rename(old_path, new_path)
         except Exception as e:
-            QMessageBox.warning(self, "Rename", f"Failed to rename: {str(e)}")
+            QMessageBox.warning(self, tr_lit("Rename"), f"{tr_lit('Failed to rename:')} {str(e)}")
             return
 
         layer.source_path = new_path
@@ -1288,13 +1289,13 @@ class ImageEditorDialog(QWidget):
     def delete_asset(self) -> None:
         selected = list(self.canvas.scene.selectedItems())
         if not selected:
-            QMessageBox.information(self, "No Selection", "Select element(s) to delete.")
+            QMessageBox.information(self, tr_lit("No Selection"), tr_lit("Select element(s) to delete."))
             return
 
         reply = QMessageBox.question(
             self,
-            "Remove Element",
-            "Remove selected element(s) from the editor? (Files will NOT be deleted)",
+            tr_lit("Remove Element"),
+            tr_lit("Remove selected element(s) from the editor? (Files will NOT be deleted)"),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
@@ -1356,8 +1357,8 @@ class ImageEditorDialog(QWidget):
                 if os.path.exists(dst):
                     reply = QMessageBox.question(
                         self,
-                        "File Exists",
-                        f"{name} already exists in display_images. Overwrite?",
+                        tr_lit("File Exists"),
+                        f"{name} {tr_lit('already exists in display_images. Overwrite?')}",
                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     )
                     if reply != QMessageBox.StandardButton.Yes:
