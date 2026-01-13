@@ -99,7 +99,6 @@ def get_art_list(folder="display_images"):
     for f in os.listdir(folder):
         if f.lower().endswith(exts):
             files.append(os.path.join(folder, f))
-    
     return files
 
 
@@ -847,8 +846,8 @@ def tr(key: str, *, lang: str | None = None, default: str | None = None) -> str:
 _LIT_TRANSLATIONS: dict[str, dict[str, str]] = {
     "ru": {
         "Crosshair Control": "Управление прицелом",
-        "Standard Crosshair": "Стандартный прицел",
-        "\N{BULLSEYE} Standard Crosshair": "\N{BULLSEYE} Стандартный прицел",
+        "Standard Crosshair": "WaifuAim",
+        "\N{BULLSEYE} Standard Crosshair": "\N{BULLSEYE} WaifuAim",
         "Choose or edit a preset for generated crosshairs.": "Выберите или отредактируйте пресет для сгенерированного прицела.",
         "Preset": "Пресет",
         "Save": "Сохранить",

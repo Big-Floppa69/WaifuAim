@@ -492,9 +492,24 @@ class DarkControlPanel(QWidget):
         self._update_opacity_accordion_texts()
         self._update_opacity_accordion_title()
 
+        # Preserve actual crosshair visibility while we rebuild UI.
+        try:
+            was_visible = bool(self.crosshair_label.isVisible())
+        except Exception:
+            was_visible = None
+
         # Rebuild embedded crosshair settings so its UI strings update.
         try:
             self._rebuild_embedded_crosshair_dialog()
+        except Exception:
+            pass
+
+        # Restore visibility (language switching must not force-show/hide).
+        try:
+            if was_visible is not None:
+                self.crosshair_label.setVisible(bool(was_visible))
+                if self.crosshair_label.isVisible():
+                    self.crosshair_label.raise_()
         except Exception:
             pass
 
@@ -551,8 +566,8 @@ class DarkControlPanel(QWidget):
             cur = str(lbl.text() or "")
             if cur in ("Crosshair Control", tr_lit("Crosshair Control")):
                 lbl.setText(tr_lit("Crosshair Control"))
-            elif cur in ("Standard Crosshair", tr_lit("Standard Crosshair")):
-                lbl.setText(tr_lit("Standard Crosshair"))
+            elif cur in ("Standard Crosshair", tr_lit("Standard Crosshair"), "WaifuAim"):
+                lbl.setText("WaifuAim")
 
         # Tooltips/state labels.
         self._sync_action_bar_state()

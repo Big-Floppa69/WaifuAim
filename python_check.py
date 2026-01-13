@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Python Environment Checker for Zenless Zone Zero Crosshair
+Python Environment Checker for WaifuAim
 This script checks if the required Python dependencies are installed correctly.
 """
 import sys
@@ -63,7 +63,7 @@ def check_dependencies():
 
 def main():
     """Main function to run all checks."""
-    print("=== Zenless Zone Zero Crosshair - Environment Check ===\n")
+    print("=== WaifuAim - Environment Check ===\n")
     
     checks_passed = 0
     total_checks = 3

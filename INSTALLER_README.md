@@ -1,10 +1,10 @@
-# Zenless Zone Zero Crosshair - Inno Setup Installer
+# WaifuAim - Inno Setup Installer
 
-This directory contains the complete Inno Setup installer script and supporting files for the Zenless Zone Zero Crosshair application.
+This directory contains the complete Inno Setup installer script and supporting files for the WaifuAim application.
 
 ## Files Included
 
-- `ZenlessZoneZeroCrosshair.iss` - Main Inno Setup installer script
+- `WaifuAim.iss` - Main Inno Setup installer script
 - `install_dependencies.bat` - Batch script to install Python dependencies
 - `run_app.bat` - Batch script to launch the application with dependency checks
 - `python_check.py` - Python script to verify environment setup
@@ -15,7 +15,7 @@ This directory contains the complete Inno Setup installer script and supporting 
 
 1. **Inno Setup 6.x** - Download from: https://jrsoftware.org/isinfo.php
 2. **Python 3.8+** - Required for running the application
-3. **All source files** from the Zenless Zone Zero Crosshair project
+3. **All source files** from the WaifuAim project
 
 ## How to Build the Installer
 
@@ -27,7 +27,7 @@ This directory contains the complete Inno Setup installer script and supporting 
    - `display_images/` directory
    - `readme.media/` directory
    - Any other project files
-3. **Open** `ZenlessZoneZeroCrosshair.iss` in Inno Setup
+3. **Open** `WaifuAim.iss` in Inno Setup
 4. **Build** the installer:
    - Press `Ctrl+F9` or use Build → Compile
    - The installer will be created in the `Output/` directory
@@ -117,10 +117,10 @@ Name: "yourtask"; Description: "Your custom task description"; Flags: unchecked
 ### Silent Installation
 ```batch
 # Create silent installer
-"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /S /silent ZenlessZoneZeroCrosshair.iss
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /S /silent WaifuAim.iss
 
 # Silent install with options
-"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /S /silent /tasks="desktopicon,startup" ZenlessZoneZeroCrosshair.iss
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /S /silent /tasks="desktopicon,startup" WaifuAim.iss
 ```
 
 ### Custom Installer Icon
@@ -128,7 +128,7 @@ Replace `astra_yao_tray.ico` with your own icon file and update the script.
 
 ### Different Installation Directory
 Users can change the installation path during setup. The default is:
-`C:\Program Files\Zenless Zone Zero Crosshair`
+`C:\Program Files\WaifuAim`
 
 ## Support
 

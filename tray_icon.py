@@ -18,7 +18,7 @@ def create_tray_icon(app, label, control_panel, controller=None, icon_path="astr
     QApplication.setQuitOnLastWindowClosed(False)
 
     tray_icon = QSystemTrayIcon(QIcon(icon_path), parent=app)
-    tray_icon.setToolTip(tr_lit("Crosshair App"))
+    tray_icon.setToolTip("WaifuAim")
 
     # Левый / двойной клик по иконке
     def on_tray_activated(reason):

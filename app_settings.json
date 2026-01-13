@@ -99,11 +99,11 @@
       "transform": {}
     },
     "display_images/jane_doe2.png": {
-      "enabled": false,
+      "enabled": true,
       "opacity": 1.0,
       "transform": {
-        "x": 791.7272727272727,
-        "y": -25.272727272727252,
+        "x": 1294.272727272727,
+        "y": 37.454545454545155,
         "zoom": 0.38,
         "rotation": 0.0
       }

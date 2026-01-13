@@ -654,6 +654,7 @@ class ImageManagerDialog(QWidget):
                             | Qt.ItemFlag.ItemIsSelectable
                             | Qt.ItemFlag.ItemIsEnabled
                             | Qt.ItemFlag.ItemIsDragEnabled
+                            | Qt.ItemFlag.ItemIsUserCheckable
                         )
                         item.setData(
                             Qt.ItemDataRole.UserRole,
@@ -661,6 +662,21 @@ class ImageManagerDialog(QWidget):
                         )
                         item.setData(Qt.ItemDataRole.UserRole + 2, bool(expanded))
                         item.setIcon(vid_icon)
+
+                        # Tri-state: checked if all children enabled, unchecked if none.
+                        enabled_states: list[bool] = []
+                        if self.overlay_controller is not None:
+                            for k in [str(v) for v in keys if str(v).strip()]:
+                                enabled_states.append(bool(self.overlay_controller.is_enabled(k)))
+                        if enabled_states:
+                            if all(enabled_states):
+                                item.setCheckState(Qt.CheckState.Checked)
+                            elif not any(enabled_states):
+                                item.setCheckState(Qt.CheckState.Unchecked)
+                            else:
+                                item.setCheckState(Qt.CheckState.PartiallyChecked)
+                        else:
+                            item.setCheckState(Qt.CheckState.Unchecked)
                     except Exception:
                         pass
                     self.image_list.addItem(item)
@@ -1302,12 +1318,86 @@ class ImageManagerDialog(QWidget):
         if self.overlay_controller is None:
             return
         try:
-            key = str(item.data(Qt.ItemDataRole.UserRole) or "")
+            meta = item.data(Qt.ItemDataRole.UserRole)
+
+            # Combo parent toggles all children.
+            if isinstance(meta, dict) and meta.get("type") == "combo":
+                name = str(meta.get("name") or "").strip()
+                keys = meta.get("keys")
+                if not name or not isinstance(keys, list) or not keys:
+                    return
+
+                enabled = item.checkState() != Qt.CheckState.Unchecked
+                for k in [str(v) for v in keys if str(v).strip()]:
+                    p = os.path.abspath(k) if os.path.isabs(k) else os.path.abspath(os.path.join(self.images_folder, k))
+                    self.overlay_controller.enable(k, path=p, enabled=enabled)
+
+                # Sync any visible child rows in the list.
+                self._updating_checks = True
+                try:
+                    for i in range(self.image_list.count()):
+                        it = self.image_list.item(i)
+                        if it is None:
+                            continue
+                        child_meta = it.data(Qt.ItemDataRole.UserRole + 3)
+                        if not isinstance(child_meta, dict) or child_meta.get("type") != "combo_child":
+                            continue
+                        if str(child_meta.get("name") or "") != name:
+                            continue
+                        it.setCheckState(Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked)
+                finally:
+                    self._updating_checks = False
+                return
+
+            key = str(meta or "")
             path = str(item.data(Qt.ItemDataRole.UserRole + 1) or "")
             if not key or not path:
                 return
             enabled = (item.checkState() == Qt.CheckState.Checked)
             self.overlay_controller.enable(key, path=path, enabled=enabled)
+
+            # If this is a combo child, update the parent tri-state.
+            child_meta = item.data(Qt.ItemDataRole.UserRole + 3)
+            if isinstance(child_meta, dict) and child_meta.get("type") == "combo_child":
+                name = str(child_meta.get("name") or "").strip()
+                if name:
+                    self._refresh_combo_parent_checkstate(name)
+        except Exception:
+            pass
+
+    def _refresh_combo_parent_checkstate(self, name: str) -> None:
+        if self.overlay_controller is None:
+            return
+        name = str(name or "").strip()
+        if not name:
+            return
+        try:
+            for i in range(self.image_list.count()):
+                it = self.image_list.item(i)
+                if it is None:
+                    continue
+                meta = it.data(Qt.ItemDataRole.UserRole)
+                if not isinstance(meta, dict) or meta.get("type") != "combo":
+                    continue
+                if str(meta.get("name") or "").strip() != name:
+                    continue
+                keys = meta.get("keys")
+                if not isinstance(keys, list) or not keys:
+                    return
+                enabled_states = [bool(self.overlay_controller.is_enabled(str(k))) for k in keys if str(k).strip()]
+                if not enabled_states:
+                    return
+                self._updating_checks = True
+                try:
+                    if all(enabled_states):
+                        it.setCheckState(Qt.CheckState.Checked)
+                    elif not any(enabled_states):
+                        it.setCheckState(Qt.CheckState.Unchecked)
+                    else:
+                        it.setCheckState(Qt.CheckState.PartiallyChecked)
+                finally:
+                    self._updating_checks = False
+                return
         except Exception:
             pass
 
@@ -1351,7 +1441,10 @@ class ImageManagerDialog(QWidget):
                     continue
                 if it.checkState() != Qt.CheckState.Checked:
                     continue
-                k = str(it.data(Qt.ItemDataRole.UserRole) or "").strip()
+                meta = it.data(Qt.ItemDataRole.UserRole)
+                if isinstance(meta, dict):
+                    continue
+                k = str(meta or "").strip()
                 if k:
                     keys.append(k)
         except Exception:

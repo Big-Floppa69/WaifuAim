@@ -1,5 +1,5 @@
 @echo off
-echo Installing Zenless Zone Zero Crosshair dependencies...
+echo Installing WaifuAim dependencies...
 echo.
 
 REM Check if Python is installed

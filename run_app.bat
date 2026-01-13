@@ -1,6 +1,6 @@
 @echo off
-title Zenless Zone Zero Crosshair
-echo Starting Zenless Zone Zero Crosshair...
+title WaifuAim
+echo Starting WaifuAim...
 echo.
 
 REM Change to the directory where this batch file is located

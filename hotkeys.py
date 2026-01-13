@@ -25,9 +25,12 @@ from utils import (
     set_label_art_from_path,
 )
 
+from standard_crosshair import randomize_standard_crosshair
+
 
 _label_ref = None
 _overlay_controller_ref = None
+_crosshair_label_ref = None
 _hotkeys_paused = False
 
 
@@ -90,6 +93,8 @@ def load_hotkey_config() -> dict:
         "mirror_vertical": ["f3"],
         "mirror_horizontal": ["f4"],
         "switch_image": ["f2"],
+        # Randomize generated crosshair (optional).
+        "randomize_crosshair": [],
         "hold_to_drag": [],
     }
 
@@ -310,18 +315,32 @@ def reload_hotkeys() -> None:
 
         _on_ui_thread(_do)
 
+    def randomize_crosshair() -> None:
+        def _do():
+            if _crosshair_label_ref is None:
+                return
+            try:
+                randomize_standard_crosshair(_crosshair_label_ref)
+            except Exception:
+                pass
+
+        _on_ui_thread(_do)
+
     _register_many(config.get("toggle_visibility", ["f1"]), toggle_visibility)
     _register_many(config.get("mirror_vertical", ["f3"]), mirror_v)
     _register_many(config.get("mirror_horizontal", ["f4"]), mirror_h)
     _register_many(config.get("switch_image", ["f2"]), switch_image)
+    _register_many(config.get("randomize_crosshair", []), randomize_crosshair)
 
 
-def setup_hotkeys(label, *, overlay_controller=None) -> None:
+def setup_hotkeys(label, *, crosshair_label=None, overlay_controller=None) -> None:
     """Initialize all hotkeys."""
     global _label_ref
     global _overlay_controller_ref
+    global _crosshair_label_ref
     _label_ref = label
     _overlay_controller_ref = overlay_controller
+    _crosshair_label_ref = crosshair_label
     _ensure_ui_invoker()
     reload_hotkeys()
 
@@ -359,5 +378,6 @@ def get_current_hotkeys() -> str:
         f"Toggle = {_first('toggle_visibility', 'f1')} | "
         f"MirrorV = {_first('mirror_vertical', 'f3')} | "
         f"MirrorH = {_first('mirror_horizontal', 'f4')} | "
-        f"Switch = {_first('switch_image', 'f2')}"
+        f"Switch = {_first('switch_image', 'f2')} | "
+        f"Randomize = {_first('randomize_crosshair', '')}"
     )

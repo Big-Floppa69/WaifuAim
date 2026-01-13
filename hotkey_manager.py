@@ -194,6 +194,8 @@ class HotkeyManagerDialog(QWidget):
             "mirror_vertical": ["f3"],
             "mirror_horizontal": ["f4"],
             "switch_image": ["f2"],
+            # Randomize generated crosshair (optional).
+            "randomize_crosshair": [],
             # Hold this key while dragging the selected art element (optional).
             # Default is empty = no key required while Art Manager is open.
             "hold_to_drag": [],
@@ -425,6 +427,7 @@ class HotkeyManagerDialog(QWidget):
         self._add_hotkey_setting(content_layout, "Mirror Vertical", "mirror_vertical")
         self._add_hotkey_setting(content_layout, "Mirror Horizontal", "mirror_horizontal")
         self._add_hotkey_setting(content_layout, "Switch Image", "switch_image")
+        self._add_hotkey_setting(content_layout, "Randomize Crosshair", "randomize_crosshair")
         self._add_hotkey_setting(content_layout, "Hold to Drag Element", "hold_to_drag")
 
         content_layout.addStretch(1)

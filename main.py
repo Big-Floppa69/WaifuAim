@@ -1,5 +1,4 @@
-"""
-Zenless Zone Zero Crosshair Application
+"""WaifuAim application.
 
 A customizable crosshair overlay with control panel and system tray integration.
 """
@@ -15,6 +14,26 @@ from hotkeys import setup_hotkeys
 from standard_crosshair import initialize_standard_crosshair
 from utils import read_app_settings, set_label_art_from_path
 from art_overlay import ArtOverlayController
+
+
+APP_NAME = "WaifuAim"
+
+
+def _checkbox_checkmark_qss() -> str:
+    # Render a literal purple check mark (no filled square).
+    # Note: '#' must be URL-encoded as '%23' in SVG for Qt style sheets.
+    check_svg = (
+        "data:image/svg+xml;utf8,"
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
+        "<path d='M3 8.5 L6.2 11.7 L13 5' fill='none' stroke='%237C5CFF' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/>"
+        "</svg>"
+    )
+    return (
+        "QCheckBox::indicator { width: 16px; height: 16px; image: none; background: transparent; }\n"
+        "QCheckBox::indicator:unchecked { border: 1px solid rgba(230,225,255,90); border-radius: 4px; }\n"
+        f"QCheckBox::indicator:checked {{ border: 1px solid rgba(124,92,255,200); border-radius: 4px; image: url(\"{check_svg}\"); }}\n"
+        "QCheckBox::indicator:indeterminate { border: 1px solid rgba(230,225,255,90); border-radius: 4px; image: none; background: transparent; }\n"
+    )
 
 
 def create_crosshair_label(app, image_path: str | None = None):
@@ -55,6 +74,22 @@ def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # Important for tray applications
 
+    # App identity (Windows task switcher/tray/tooltips).
+    try:
+        app.setApplicationName(APP_NAME)
+    except Exception:
+        pass
+    try:
+        app.setApplicationDisplayName(APP_NAME)
+    except Exception:
+        pass
+
+    # Global checkbox styling.
+    try:
+        app.setStyleSheet((app.styleSheet() or "") + "\n" + _checkbox_checkmark_qss())
+    except Exception:
+        pass
+
     settings = {}
     try:
         settings = read_app_settings()
@@ -65,8 +100,6 @@ def main():
     # Base image label: keep transparent by default; art overlays are managed
     # as separate elements via the Art Manager.
     image_label = create_crosshair_label(app, image_path=None)
-    if not autostart_enabled:
-        image_label.show()
 
     # Create separate label for generated crosshair overlay and load saved settings
     crosshair_label = create_crosshair_label(app, image_path=None)
@@ -103,7 +136,7 @@ def main():
     tray_icon = create_tray_icon(app, image_label, control_panel)
 
     # Setup keyboard hotkeys
-    setup_hotkeys(image_label, overlay_controller=art_overlay)
+    setup_hotkeys(image_label, crosshair_label=crosshair_label, overlay_controller=art_overlay)
 
     sys.exit(app.exec())
 
