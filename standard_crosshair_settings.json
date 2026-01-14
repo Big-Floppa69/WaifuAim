@@ -31,6 +31,7 @@
   "grid_snap_size": 5,
   "hold_fade_enabled": true,
   "hold_fade_key": "mouse_left",
+  "hold_fade_keys": [],
   "randomize_mode": "preset",
   "randomize_hotkey_enabled": true,
   "active_preset": "Default",

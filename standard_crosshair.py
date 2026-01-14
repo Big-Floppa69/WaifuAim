@@ -350,6 +350,7 @@ class StandardCrosshairSettings:
     # Hold-fade: fade crosshair out while a key/button is held.
     hold_fade_enabled: bool = False
     hold_fade_key: str = "mouse_left"  # mouse_left/mouse_right/mouse_middle/shift/ctrl/alt/space/a/...
+    hold_fade_keys: list[str] = field(default_factory=list)  # optional multi-bindings (preferred)
 
     # Randomize behavior
     randomize_mode: str = "preset"  # preset/absolute
@@ -735,8 +736,19 @@ def _ensure_hold_fade_timer(label: QLabel) -> QTimer:
         if not bool(getattr(settings, "hold_fade_enabled", False)):
             return
 
-        key = str(getattr(settings, "hold_fade_key", "mouse_left") or "mouse_left")
-        held = _is_hold_key_pressed(key)
+        keys = getattr(settings, "hold_fade_keys", None)
+        if isinstance(keys, list) and [k for k in keys if str(k or "").strip()]:
+            held = False
+            for k in keys:
+                kk = str(k or "").strip().lower()
+                if not kk:
+                    continue
+                if _is_hold_key_pressed(kk):
+                    held = True
+                    break
+        else:
+            key = str(getattr(settings, "hold_fade_key", "mouse_left") or "mouse_left")
+            held = _is_hold_key_pressed(key)
         target = 0.0 if held else 1.0
 
         try:
@@ -796,6 +808,24 @@ def load_settings_from_disk() -> StandardCrosshairSettings:
                     setattr(settings, key, value)
         except Exception:
             pass
+
+    # Sanitize/migrate hold-fade keys.
+    try:
+        raw_keys = getattr(settings, "hold_fade_keys", None)
+        if isinstance(raw_keys, list):
+            cleaned = [str(k or "").strip().lower() for k in raw_keys if str(k or "").strip()]
+            settings.hold_fade_keys = cleaned
+        else:
+            settings.hold_fade_keys = []
+    except Exception:
+        settings.hold_fade_keys = []
+
+    # Back-compat: ensure single key is normalized.
+    try:
+        single = str(getattr(settings, "hold_fade_key", "mouse_left") or "mouse_left").strip().lower()
+        settings.hold_fade_key = single or "mouse_left"
+    except Exception:
+        settings.hold_fade_key = "mouse_left"
 
     # Seed presets (templates) for older configs or first-run.
     presets_ok = isinstance(getattr(settings, "presets", None), dict) and bool(settings.presets)
@@ -1135,6 +1165,14 @@ def randomize_standard_crosshair(label: QLabel) -> None:
         mode = "preset"
 
     if mode == "preset":
+        # Randomize must not change hotkey/hold-fade toggles.
+        preserve_randomize_hotkey = bool(getattr(settings, "randomize_hotkey_enabled", False))
+        preserve_hold_fade_enabled = bool(getattr(settings, "hold_fade_enabled", False))
+        preserve_hold_fade_key = str(getattr(settings, "hold_fade_key", "mouse_left") or "mouse_left")
+        preserve_hold_fade_keys = getattr(settings, "hold_fade_keys", None)
+        if not isinstance(preserve_hold_fade_keys, list):
+            preserve_hold_fade_keys = []
+
         presets = settings.presets if isinstance(settings.presets, dict) else {}
         names = [n for n in presets.keys() if isinstance(n, str) and n.strip()]
         if not names:
@@ -1144,6 +1182,14 @@ def randomize_standard_crosshair(label: QLabel) -> None:
         if isinstance(preset, dict):
             settings.active_preset = chosen
             _apply_preset_dict_to_settings(settings, preset)
+
+        try:
+            settings.randomize_hotkey_enabled = preserve_randomize_hotkey
+            settings.hold_fade_enabled = preserve_hold_fade_enabled
+            settings.hold_fade_key = preserve_hold_fade_key
+            settings.hold_fade_keys = list(preserve_hold_fade_keys)
+        except Exception:
+            pass
     else:
         # Absolute random: mixes sane + chaos.
         chaos = bool(random.random() < 0.35)
@@ -3135,7 +3181,7 @@ class StandardCrosshairDialog(QWidget):
             self.settings.randomize_hotkey_enabled = bool(enabled)
         except Exception:
             return
-        save_settings_to_disk(self.settings)
+        self._persist_and_render()
 
     def _on_randomize_hotkey_key_captured(self, key: str) -> None:
         key = str(key or "").strip().lower()
@@ -3176,7 +3222,53 @@ class StandardCrosshairDialog(QWidget):
             if not names:
                 return
             chosen = random.choice(names)
+
+            # Randomize must not change hotkey/hold-fade toggles.
+            preserve_randomize_hotkey = bool(getattr(self.settings, "randomize_hotkey_enabled", False))
+            preserve_hold_fade_enabled = bool(getattr(self.settings, "hold_fade_enabled", False))
+            preserve_hold_fade_key = str(getattr(self.settings, "hold_fade_key", "mouse_left") or "mouse_left")
+            preserve_hold_fade_keys = getattr(self.settings, "hold_fade_keys", None)
+            if not isinstance(preserve_hold_fade_keys, list):
+                preserve_hold_fade_keys = []
+
             self._on_preset_selected(chosen)
+
+            try:
+                self.settings.randomize_hotkey_enabled = preserve_randomize_hotkey
+                self.settings.hold_fade_enabled = preserve_hold_fade_enabled
+                self.settings.hold_fade_key = preserve_hold_fade_key
+                self.settings.hold_fade_keys = list(preserve_hold_fade_keys)
+            except Exception:
+                pass
+
+            try:
+                self.randomize_hotkey_checkbox.blockSignals(True)
+                self.randomize_hotkey_checkbox.setChecked(preserve_randomize_hotkey)
+            except Exception:
+                pass
+            finally:
+                try:
+                    self.randomize_hotkey_checkbox.blockSignals(False)
+                except Exception:
+                    pass
+
+            try:
+                self.hold_fade_checkbox.blockSignals(True)
+                self.hold_fade_checkbox.setChecked(preserve_hold_fade_enabled)
+            except Exception:
+                pass
+            finally:
+                try:
+                    self.hold_fade_checkbox.blockSignals(False)
+                except Exception:
+                    pass
+
+            try:
+                self.hold_fade_key_edit.setText(preserve_hold_fade_key)
+            except Exception:
+                pass
+
+            self._persist_and_render()
             return
 
         chaos = bool(random.random() < 0.35)
@@ -4028,6 +4120,13 @@ class LineBuilderDialog(QWidget):
             "color: " + UI_THEME["text"] + "; font-weight: 700; font-size: 11px;"
         )
         return label
+
+    def showEvent(self, event):  # type: ignore[override]
+        super().showEvent(event)
+        try:
+            apply_language_to_object_tree(self)
+        except Exception:
+            pass
 
     def _toggle_left_panel(self, visible: bool) -> None:
         self.left_panel.setVisible(visible)

@@ -540,12 +540,17 @@ class HotkeyManagerDialog(QWidget):
         row_layout.addWidget(label)
 
         enabled = False
-        key = "mouse_left"
+        keys: list[str] = []
         try:
             s = self._crosshair_settings
             if s is not None:
                 enabled = bool(getattr(s, "hold_fade_enabled", False))
-                key = str(getattr(s, "hold_fade_key", "mouse_left") or "mouse_left").strip().lower()
+                raw = getattr(s, "hold_fade_keys", None)
+                if isinstance(raw, list):
+                    keys = [str(v or "").strip().lower() for v in raw if str(v or "").strip()]
+                if not keys:
+                    key = str(getattr(s, "hold_fade_key", "mouse_left") or "mouse_left").strip().lower()
+                    keys = [key] if key else []
         except Exception:
             pass
 
@@ -558,21 +563,73 @@ class HotkeyManagerDialog(QWidget):
         )
         row_layout.addWidget(self.fade_hold_checkbox)
 
-        self.fade_hold_key_input = HotkeyLineEdit()
-        self.fade_hold_key_input.current_key = key
-        self.fade_hold_key_input.setText(key)
-        self.fade_hold_key_input.setFixedHeight(34)
-        self.fade_hold_key_input.setStyleSheet(
-            "QLineEdit { background-color: "
+        # Multi-bindings (+) like other actions.
+        self.fade_hold_inputs: list[HotkeyLineEdit] = []
+
+        inputs_container = QFrame()
+        inputs_container.setStyleSheet("QFrame { background: transparent; }")
+        inputs_layout = QVBoxLayout(inputs_container)
+        inputs_layout.setContentsMargins(0, 0, 0, 0)
+        inputs_layout.setSpacing(8)
+
+        def _mk_edit(initial: str) -> HotkeyLineEdit:
+            e = HotkeyLineEdit()
+            e.current_key = str(initial or "").strip().lower()
+            e.setText(e.current_key)
+            e.setFixedHeight(34)
+            e.setStyleSheet(
+                "QLineEdit { background-color: "
+                + UI_THEME["surface2"]
+                + "; color: #E0E0E0; border: 1px solid "
+                + UI_THEME["border"]
+                + "; border-radius: 10px; padding: 8px 12px; font-size: 13px; }"
+                "QLineEdit:focus { border: 1px solid "
+                + UI_THEME["accent"]
+                + "; }"
+            )
+            self.fade_hold_inputs.append(e)
+            return e
+
+        def _add_row(initial: str = "") -> None:
+            e = _mk_edit(initial)
+            inputs_layout.insertWidget(max(0, inputs_layout.count() - 1), e)
+
+        add_row = QFrame()
+        add_row.setStyleSheet("QFrame { background: transparent; }")
+        add_row_layout = QHBoxLayout(add_row)
+        add_row_layout.setContentsMargins(0, 0, 0, 0)
+        add_row_layout.setSpacing(0)
+
+        add_btn = QPushButton("+")
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_btn.setToolTip(tr_lit("Add another hotkey"))
+        add_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        add_btn.setFixedHeight(34)
+        add_btn.setStyleSheet(
+            "QPushButton { background-color: "
             + UI_THEME["surface2"]
-            + "; color: #E0E0E0; border: 1px solid "
+            + "; color: "
+            + UI_THEME["text"]
+            + "; border: 1px solid "
             + UI_THEME["border"]
-            + "; border-radius: 10px; padding: 8px 12px; font-size: 13px; }"
-            "QLineEdit:focus { border: 1px solid "
-            + UI_THEME["accent"]
+            + "; border-radius: 10px; font-size: 18px; font-weight: 900; text-align: center; }"
+            "QPushButton:hover { border: 1px solid "
+            + UI_THEME["border_strong"]
+            + "; }"
+            "QPushButton:pressed { background-color: "
+            + UI_THEME["surface"]
             + "; }"
         )
-        row_layout.addWidget(self.fade_hold_key_input, 1)
+        add_btn.clicked.connect(lambda: _add_row(""))
+        add_row_layout.addWidget(add_btn, 1)
+
+        inputs_layout.addWidget(add_row)
+        if not keys:
+            keys = [""]
+        for k in keys:
+            _add_row(k)
+
+        row_layout.addWidget(inputs_container, 1)
         layout.addWidget(row)
     
     def _add_hotkey_setting(self, layout, label_text, key_name):
@@ -886,18 +943,26 @@ class HotkeyManagerDialog(QWidget):
 
             # Persist crosshair hold-fade settings (best-effort).
             try:
-                if hasattr(self, "fade_hold_checkbox") and hasattr(self, "fade_hold_key_input"):
+                if hasattr(self, "fade_hold_checkbox") and hasattr(self, "fade_hold_inputs"):
                     enabled = bool(self.fade_hold_checkbox.isChecked())
-                    key = str(getattr(self.fade_hold_key_input, "current_key", "") or "").strip().lower()
-                    if enabled and not key:
-                        key = "mouse_left"
+                    keys = []
+                    try:
+                        for e in list(self.fade_hold_inputs):
+                            hk = str(getattr(e, "current_key", "") or "").strip().lower()
+                            if hk:
+                                keys.append(hk)
+                    except Exception:
+                        keys = []
+                    if enabled and not keys:
+                        keys = ["mouse_left"]
 
                     from standard_crosshair import load_settings_from_disk, save_settings_to_disk, StandardCrosshairSettings, _sync_hold_fade_timer_state
 
                     s = load_settings_from_disk()
                     if isinstance(s, StandardCrosshairSettings):
                         s.hold_fade_enabled = enabled
-                        s.hold_fade_key = key or "mouse_left"
+                        s.hold_fade_keys = list(keys)
+                        s.hold_fade_key = (keys[0] if keys else "mouse_left")
                         save_settings_to_disk(s)
 
                         # Update the running label immediately if available.
@@ -909,7 +974,8 @@ class HotkeyManagerDialog(QWidget):
                                 cur = getattr(lbl, "_standard_crosshair_settings", None)
                                 if isinstance(cur, StandardCrosshairSettings):
                                     cur.hold_fade_enabled = enabled
-                                    cur.hold_fade_key = key or "mouse_left"
+                                    cur.hold_fade_keys = list(keys)
+                                    cur.hold_fade_key = (keys[0] if keys else "mouse_left")
                                     _sync_hold_fade_timer_state(lbl, cur)
                         except Exception:
                             pass

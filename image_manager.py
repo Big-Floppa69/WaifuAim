@@ -1381,6 +1381,41 @@ class ImageManagerDialog(QWidget):
             enabled = (item.checkState() == Qt.CheckState.Checked)
             self.overlay_controller.enable(key, path=path, enabled=enabled)
 
+            # Sync all other rows that represent the same key (e.g. combo child vs standalone).
+            self._updating_checks = True
+            try:
+                for i in range(self.image_list.count()):
+                    it = self.image_list.item(i)
+                    if it is None or it is item:
+                        continue
+                    m = it.data(Qt.ItemDataRole.UserRole)
+                    if isinstance(m, dict):
+                        continue
+                    if str(m or "") != key:
+                        continue
+                    it.setCheckState(Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked)
+            finally:
+                self._updating_checks = False
+
+            # Refresh combo parent state for any combo that contains this key.
+            try:
+                for i in range(self.image_list.count()):
+                    it = self.image_list.item(i)
+                    if it is None:
+                        continue
+                    parent_meta = it.data(Qt.ItemDataRole.UserRole)
+                    if not isinstance(parent_meta, dict) or parent_meta.get("type") != "combo":
+                        continue
+                    keys = parent_meta.get("keys")
+                    if not isinstance(keys, list) or not keys:
+                        continue
+                    if key in {str(k) for k in keys if str(k).strip()}:
+                        name = str(parent_meta.get("name") or "").strip()
+                        if name:
+                            self._refresh_combo_parent_checkstate(name)
+            except Exception:
+                pass
+
             # If this is a combo child, update the parent tri-state.
             child_meta = item.data(Qt.ItemDataRole.UserRole + 3)
             if isinstance(child_meta, dict) and child_meta.get("type") == "combo_child":

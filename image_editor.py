@@ -84,13 +84,29 @@ class ImageCanvas(QGraphicsView):
         
         self.show_guides = True
         
-        # Canvas size (1920x1080 for crosshair preview)
+        # Canvas size (defaults to 1920x1080; can be overridden for single-overlay editing)
         self.canvas_width = 1920
         self.canvas_height = 1080
         self.setSceneRect(0, 0, self.canvas_width, self.canvas_height)
 
         # Let the canvas expand to fill the dialog; we scale to fit on resize.
         self.setMinimumSize(720, 405)
+        self._fit_scene()
+
+    def set_canvas_size(self, w: int, h: int) -> None:
+        try:
+            w = int(w)
+            h = int(h)
+        except Exception:
+            return
+        if w <= 0 or h <= 0:
+            return
+        self.canvas_width = w
+        self.canvas_height = h
+        try:
+            self.setSceneRect(0, 0, self.canvas_width, self.canvas_height)
+        except Exception:
+            pass
         self._fit_scene()
 
     def resizeEvent(self, event):  # type: ignore[override]
@@ -209,6 +225,16 @@ class ImageEditorDialog(QWidget):
         self._asset_key = str(asset_key) if asset_key else None
         
         self.init_ui()
+
+        # If editing a single overlay element, match the overlay canvas size so
+        # x/y/zoom saved back to app_settings.json round-trips correctly.
+        try:
+            if self._overlay_controller is not None and self._asset_key:
+                cs = getattr(self._overlay_controller, "_canvas_size", None)
+                if isinstance(cs, (tuple, list)) and len(cs) == 2:
+                    self.canvas.set_canvas_size(int(cs[0]), int(cs[1]))
+        except Exception:
+            pass
         
         if image_path and os.path.exists(image_path):
             # If this looks like a previously saved composite, load its project
@@ -559,10 +585,10 @@ class ImageEditorDialog(QWidget):
         self.move(x, y)
     
     def load_art_dialog(self):
-        """Import one or more art files into display_images and add them as layers."""
+        """Import an art file into display_images and replace the current layer."""
 
         file_dialog = QFileDialog(self)
-        file_dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)
+        file_dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
         file_dialog.setNameFilter(
             tr_lit("Art Files (*.png *.jpg *.jpeg *.webp *.gif *.bmp *.mp4 *.avi *.mov *.webm *.mkv *.m4v)")
         )
@@ -575,8 +601,91 @@ class ImageEditorDialog(QWidget):
             return
 
         imported = self._import_art_files(files)
-        for p in imported:
-            self.add_art(p)
+        if not imported:
+            return
+        self._replace_selected_layer(imported[0])
+
+    def _replace_selected_layer(self, file_path: str) -> None:
+        file_path = str(file_path or "").strip()
+        if not file_path or not os.path.exists(file_path):
+            return
+
+        # Pick a target layer (selected item, else single layer, else last layer).
+        target_layer: Optional[_Layer] = None
+        try:
+            selected = list(self.canvas.scene.selectedItems())
+        except Exception:
+            selected = []
+        if selected:
+            sel = selected[0]
+            for layer in self._layers:
+                if layer.item is sel:
+                    target_layer = layer
+                    break
+        if target_layer is None and len(self._layers) == 1:
+            target_layer = self._layers[0]
+        if target_layer is None and self._layers:
+            target_layer = self._layers[-1]
+        if target_layer is None:
+            self.add_art(file_path)
+            return
+
+        it = target_layer.item
+        try:
+            pos = it.pos()
+            scale = float(it.scale() or 1.0)
+            rot = float(it.rotation() or 0.0)
+            op = float(it.opacity() if it.opacity() is not None else 1.0)
+        except Exception:
+            pos = None
+            scale, rot, op = 1.0, 0.0, 1.0
+
+        # Replace content.
+        if is_video_path(file_path):
+            # Simplest: remove old layer and add a new video layer, then restore transform.
+            try:
+                self.canvas.scene.removeItem(it)
+            except Exception:
+                pass
+            try:
+                self._layers = [l for l in self._layers if l is not target_layer]
+            except Exception:
+                pass
+            self._add_video_layer(file_path)
+            try:
+                new_layer = self._layers[-1]
+                if pos is not None:
+                    new_layer.item.setPos(pos)
+                new_layer.item.setScale(scale)
+                new_layer.item.setRotation(rot)
+                new_layer.item.setOpacity(op)
+                self.canvas.scene.clearSelection()
+                new_layer.item.setSelected(True)
+            except Exception:
+                pass
+        else:
+            try:
+                pm = QPixmap(file_path)
+                if pm.isNull():
+                    raise ValueError("Failed to load image")
+                it.setPixmap(pm)
+                it.setTransformOriginPoint(pm.width() / 2, pm.height() / 2)
+                target_layer.source_path = file_path
+                target_layer.is_video = False
+                target_layer.player = None
+                target_layer.sink = None
+                target_layer.audio = None
+                if pos is not None:
+                    it.setPos(pos)
+                it.setScale(scale)
+                it.setRotation(rot)
+                it.setOpacity(op)
+                self.canvas.scene.clearSelection()
+                it.setSelected(True)
+            except Exception as e:
+                QMessageBox.warning(self, tr_lit("Error"), f"{tr_lit('Failed to add image:')} {str(e)}")
+
+        self._sync_controls_from_selection()
 
     def add_art(self, file_path: str) -> None:
         file_path = str(file_path or "").strip()
