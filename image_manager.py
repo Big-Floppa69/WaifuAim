@@ -1320,6 +1320,29 @@ class ImageManagerDialog(QWidget):
         try:
             meta = item.data(Qt.ItemDataRole.UserRole)
 
+            def _abs_path_for_key(k: str) -> str:
+                k = str(k or "").strip()
+                if not k:
+                    return ""
+                if os.path.isabs(k):
+                    return os.path.abspath(k)
+
+                # Keys are stored as workspace-relative paths like "display_images/foo.png".
+                root = os.path.dirname(os.path.abspath(__file__))
+                cand1 = os.path.abspath(os.path.join(root, k.replace("/", os.sep)))
+
+                # Back-compat: some older configs may have stored just the filename.
+                cand2 = os.path.abspath(os.path.join(self.images_folder, os.path.basename(k)))
+                cand3 = os.path.abspath(os.path.join(self.images_folder, k))
+
+                for cand in (cand1, cand3, cand2):
+                    try:
+                        if cand and os.path.exists(cand):
+                            return cand
+                    except Exception:
+                        continue
+                return cand1
+
             # Combo parent toggles all children.
             if isinstance(meta, dict) and meta.get("type") == "combo":
                 name = str(meta.get("name") or "").strip()
@@ -1329,7 +1352,9 @@ class ImageManagerDialog(QWidget):
 
                 enabled = item.checkState() != Qt.CheckState.Unchecked
                 for k in [str(v) for v in keys if str(v).strip()]:
-                    p = os.path.abspath(k) if os.path.isabs(k) else os.path.abspath(os.path.join(self.images_folder, k))
+                    p = _abs_path_for_key(k)
+                    if not p:
+                        continue
                     self.overlay_controller.enable(k, path=p, enabled=enabled)
 
                 # Sync any visible child rows in the list.

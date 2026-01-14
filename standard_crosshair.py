@@ -43,6 +43,7 @@ from utils import UI_THEME, tr_lit, apply_language_to_object_tree
 
 CONFIG_PATH = Path(__file__).resolve().with_name("standard_crosshair_settings.json")
 PROFILES_IMPORT_PATH = Path(__file__).resolve().with_name("crosshair_profiles.json")
+HOTKEY_CONFIG_PATH = Path(__file__).resolve().with_name("hotkey_config.json")
 MAX_CUSTOM_COLORS = 16
 ALLOWED_DOT_SHAPES = {"circle", "square", "diamond"}
 ALLOWED_CROSSHAIR_STYLES = {"plus", "x"}
@@ -351,12 +352,78 @@ class StandardCrosshairSettings:
     hold_fade_key: str = "mouse_left"  # mouse_left/mouse_right/mouse_middle/shift/ctrl/alt/space/a/...
 
     # Randomize behavior
-    randomize_mode: str = "preset"  # preset/full
+    randomize_mode: str = "preset"  # preset/absolute
     randomize_hotkey_enabled: bool = False
 
     # Presets
     active_preset: str = "Default"
     presets: dict[str, dict] = field(default_factory=dict)
+
+
+def _normalize_hotkey_token(token: str) -> str:
+    token = str(token or "").strip().lower()
+    if not token:
+        return ""
+    aliases = {
+        "`": "grave",
+        "~": "grave",
+        "mouse4": "mouse_x1",
+        "mouse5": "mouse_x2",
+        "mouse_4": "mouse_x1",
+        "mouse_5": "mouse_x2",
+        "x1": "mouse_x1",
+        "x2": "mouse_x2",
+        "mb4": "mouse_x1",
+        "mb5": "mouse_x2",
+    }
+    return aliases.get(token, token)
+
+
+def _normalize_hotkey_chord(chord: str) -> str:
+    parts = [p.strip() for p in str(chord or "").split("+") if p.strip()]
+    parts = [_normalize_hotkey_token(p) for p in parts]
+    parts = [p for p in parts if p]
+    if not parts:
+        return ""
+    order = {"ctrl": 0, "alt": 1, "shift": 2, "windows": 3}
+    return "+".join(sorted(set(parts), key=lambda t: (order.get(t, 50), t)))
+
+
+def _load_hotkey_config_from_disk() -> dict:
+    try:
+        with open(HOTKEY_CONFIG_PATH, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_hotkey_config_to_disk(config: dict) -> None:
+    try:
+        with open(HOTKEY_CONFIG_PATH, "w", encoding="utf-8") as fh:
+            json.dump(config, fh, indent=4, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _get_single_hotkey_binding(action: str) -> str:
+    cfg = _load_hotkey_config_from_disk()
+    v = cfg.get(action)
+    if isinstance(v, list) and v:
+        return str(v[0] or "").strip().lower()
+    if isinstance(v, str):
+        return str(v or "").strip().lower()
+    return ""
+
+
+def _set_single_hotkey_binding(action: str, chord: str) -> None:
+    action = str(action or "").strip()
+    if not action:
+        return
+    chord = _normalize_hotkey_chord(chord)
+    cfg = _load_hotkey_config_from_disk()
+    cfg[action] = [chord] if chord else []
+    _save_hotkey_config_to_disk(cfg)
 
 
 def _settings_to_preset_dict(settings: StandardCrosshairSettings) -> dict:
@@ -738,11 +805,12 @@ def load_settings_from_disk() -> StandardCrosshairSettings:
     # Optional: merge presets from external import file.
     _merge_external_presets(settings)
 
-    # Apply active preset before sanitizing.
-    presets = settings.presets if isinstance(settings.presets, dict) else {}
-    active_name = settings.active_preset if isinstance(settings.active_preset, str) else "Default"
-    if presets and active_name in presets and isinstance(presets.get(active_name), dict):
-        _apply_preset_dict_to_settings(settings, presets[active_name])
+    # Do not auto-apply the active preset on startup.
+    # Presets are applied explicitly when selected, and any manual edits should
+    # persist across restarts even if the last-selected preset name remains.
+
+    presets = settings.presets if isinstance(getattr(settings, "presets", None), dict) else {}
+    active_name = settings.active_preset if isinstance(getattr(settings, "active_preset", None), str) else "Default"
     settings.gap = max(0, settings.gap)
     settings.dot_size = clamp(settings.dot_size, 2, 200)
     if settings.dot_shape not in ALLOWED_DOT_SHAPES:
@@ -752,6 +820,14 @@ def load_settings_from_disk() -> StandardCrosshairSettings:
     settings.rotation = settings.rotation % 360
     settings.offset_x = clamp(int(settings.offset_x), -800, 800)
     settings.offset_y = clamp(int(settings.offset_y), -800, 800)
+    try:
+        settings.randomize_mode = str(getattr(settings, "randomize_mode", "preset") or "preset").strip().lower()
+    except Exception:
+        settings.randomize_mode = "preset"
+    if settings.randomize_mode in ("normal", "full"):
+        settings.randomize_mode = "absolute"
+    if settings.randomize_mode not in ("preset", "absolute"):
+        settings.randomize_mode = "preset"
     settings.line_rounding = clamp(int(settings.line_rounding), 0, 400)
     settings.fan_enabled = bool(settings.fan_enabled)
     settings.fan_speed = clamp(int(settings.fan_speed), -2000, 2000)
@@ -1053,7 +1129,9 @@ def randomize_standard_crosshair(label: QLabel) -> None:
         return
 
     mode = str(getattr(settings, "randomize_mode", "preset") or "preset").strip().lower()
-    if mode not in ("preset", "full"):
+    if mode in ("normal", "full"):
+        mode = "absolute"
+    if mode not in ("preset", "absolute"):
         mode = "preset"
 
     if mode == "preset":
@@ -1067,31 +1145,54 @@ def randomize_standard_crosshair(label: QLabel) -> None:
             settings.active_preset = chosen
             _apply_preset_dict_to_settings(settings, preset)
     else:
-        # Fully random: intentionally extreme ranges (still centered).
-        settings.global_scale = int(random.randint(25, 1000))
-        settings.length = int(random.randint(5, 1500))
-        settings.thickness = int(random.randint(1, 200))
-        settings.gap = int(random.randint(0, 600))
-        settings.outline = int(random.randint(0, 60))
-        settings.rotation = float(random.randint(0, 359))
-        # Center locked.
-        settings.offset_x = 0
-        settings.offset_y = 0
-        settings.line_rounding = int(random.randint(0, 400))
+        # Absolute random: mixes sane + chaos.
+        chaos = bool(random.random() < 0.35)
+        if not chaos:
+            settings.global_scale = int(random.randint(60, 180))
+            settings.length = int(random.randint(10, 220))
+            settings.thickness = int(random.randint(1, 18))
+            settings.gap = int(random.randint(0, 80))
+            settings.outline = int(random.randint(0, 10))
+            settings.rotation = float(random.randint(0, 359))
+            settings.offset_x = 0
+            settings.offset_y = 0
+            settings.line_rounding = int(random.randint(0, 40))
 
-        # Fan: random on/off + speed.
-        settings.fan_enabled = bool(random.getrandbits(1))
-        settings.fan_speed = int(random.randint(-2000, 2000))
+            settings.fan_enabled = bool(random.random() < 0.25)
+            settings.fan_speed = int(random.randint(-240, 240))
 
-        settings.crosshair_style = random.choice(["plus", "x"])
-        settings.center_dot = bool(random.getrandbits(1))
-        settings.dot_shape = random.choice(["circle", "square", "diamond"])
-        settings.dot_size = int(random.randint(2, 200))
+            settings.crosshair_style = random.choice(["plus", "x"])
+            settings.center_dot = bool(random.random() < 0.6)
+            settings.dot_shape = random.choice(["circle", "square", "diamond"])
+            settings.dot_size = int(random.randint(2, 20))
 
-        settings.red = int(random.randint(0, 255))
-        settings.green = int(random.randint(0, 255))
-        settings.blue = int(random.randint(0, 255))
-        settings.alpha = int(random.randint(30, 255))
+            settings.red = int(random.randint(0, 255))
+            settings.green = int(random.randint(0, 255))
+            settings.blue = int(random.randint(0, 255))
+            settings.alpha = int(random.randint(120, 255))
+        else:
+            settings.global_scale = int(random.randint(25, 1000))
+            settings.length = int(random.randint(5, 1500))
+            settings.thickness = int(random.randint(1, 200))
+            settings.gap = int(random.randint(0, 600))
+            settings.outline = int(random.randint(0, 60))
+            settings.rotation = float(random.randint(0, 359))
+            settings.offset_x = 0
+            settings.offset_y = 0
+            settings.line_rounding = int(random.randint(0, 400))
+
+            settings.fan_enabled = bool(random.getrandbits(1))
+            settings.fan_speed = int(random.randint(-2000, 2000))
+
+            settings.crosshair_style = random.choice(["plus", "x"])
+            settings.center_dot = bool(random.getrandbits(1))
+            settings.dot_shape = random.choice(["circle", "square", "diamond"])
+            settings.dot_size = int(random.randint(2, 200))
+
+            settings.red = int(random.randint(0, 255))
+            settings.green = int(random.randint(0, 255))
+            settings.blue = int(random.randint(0, 255))
+            settings.alpha = int(random.randint(30, 255))
 
     save_settings_to_disk(settings)
     _sync_fan_timer_state(label, settings)
@@ -1953,17 +2054,6 @@ class StandardCrosshairDialog(QWidget):
 
         # Line Builder: keep as a standalone button card (no accordion wrapper).
         layout.addWidget(self._create_projection_group(carded=False))
-
-        buttons_row = QHBoxLayout()
-        reset_btn = self._create_primary_button(tr_lit("↺ Reset"), UI_THEME["surface2"])
-        reset_btn.clicked.connect(self._reset_defaults)
-        buttons_row.addWidget(reset_btn)
-
-        apply_btn = self._create_primary_button(tr_lit("Apply"), UI_THEME["accent"])
-        apply_btn.clicked.connect(self._persist_and_render)
-        buttons_row.addWidget(apply_btn)
-
-        layout.addLayout(buttons_row)
         return frame
 
     def _create_accordion_section(self, title: str, content: QWidget, *, expanded: bool = False) -> QFrame:
@@ -2246,11 +2336,13 @@ class StandardCrosshairDialog(QWidget):
         self.randomize_mode_combo.setCursor(Qt.CursorShape.PointingHandCursor)
         self.randomize_mode_combo.setStyleSheet(selector_style)
         self.randomize_mode_combo.addItem(tr_lit("From Presets"), "preset")
-        self.randomize_mode_combo.addItem(tr_lit("Fully Random"), "full")
+        self.randomize_mode_combo.addItem(tr_lit("Absolute Random"), "absolute")
         try:
             cur_mode = str(getattr(self.settings, "randomize_mode", "preset") or "preset").strip().lower()
         except Exception:
             cur_mode = "preset"
+        if cur_mode in ("normal", "full"):
+            cur_mode = "absolute"
         idx = self.randomize_mode_combo.findData(cur_mode)
         if idx >= 0:
             self.randomize_mode_combo.setCurrentIndex(idx)
@@ -2273,7 +2365,18 @@ class StandardCrosshairDialog(QWidget):
         self.randomize_hotkey_checkbox.setStyleSheet(self.fan_checkbox.styleSheet())
         self.randomize_hotkey_checkbox.toggled.connect(self._on_randomize_hotkey_toggle)
         rand_hotkey_row.addWidget(self.randomize_hotkey_checkbox)
+
+        self.randomize_hotkey_key_edit = HoldKeyCaptureEdit()
+        self.randomize_hotkey_key_edit.setFixedHeight(26)
+        self.randomize_hotkey_key_edit.setStyleSheet(
+            f"QLineEdit {{ background-color: {UI_THEME['surface2']}; color: {UI_THEME['text']}; border: 1px solid {UI_THEME['border']}; border-radius: 10px; padding: 4px 10px; font-size: 11px; font-weight: 800; }}"
+            f"QLineEdit:hover {{ border: 1px solid {UI_THEME['border_strong']}; }}"
+        )
+        self.randomize_hotkey_key_edit.setToolTip(tr_lit("Click, then press a key or mouse button"))
+        self.randomize_hotkey_key_edit.setText(_get_single_hotkey_binding("randomize_crosshair"))
+        self.randomize_hotkey_key_edit.key_captured.connect(self._on_randomize_hotkey_key_captured)
         rand_hotkey_row.addStretch()
+        rand_hotkey_row.addWidget(self.randomize_hotkey_key_edit)
         layout.addLayout(rand_hotkey_row)
 
         return frame
@@ -3022,7 +3125,7 @@ class StandardCrosshairDialog(QWidget):
         if combo is None:
             return
         mode = str(combo.currentData() or "preset").strip().lower()
-        if mode not in ("preset", "full"):
+        if mode not in ("preset", "absolute"):
             mode = "preset"
         self.settings.randomize_mode = mode
         save_settings_to_disk(self.settings)
@@ -3034,6 +3137,24 @@ class StandardCrosshairDialog(QWidget):
             return
         save_settings_to_disk(self.settings)
 
+    def _on_randomize_hotkey_key_captured(self, key: str) -> None:
+        key = str(key or "").strip().lower()
+        if not key:
+            return
+        _set_single_hotkey_binding("randomize_crosshair", key)
+        edit = getattr(self, "randomize_hotkey_key_edit", None)
+        if isinstance(edit, QLineEdit):
+            try:
+                edit.setText(key)
+            except Exception:
+                pass
+        try:
+            from hotkeys import reload_hotkeys
+
+            reload_hotkeys()
+        except Exception:
+            pass
+
     def _on_randomize_clicked(self) -> None:
         mode = None
         combo = getattr(self, "randomize_mode_combo", None)
@@ -3041,8 +3162,11 @@ class StandardCrosshairDialog(QWidget):
             mode = combo.currentData()
         mode = str(mode or "preset").strip().lower()
 
+        if mode in ("normal", "full"):
+            mode = "absolute"
+
         try:
-            self.settings.randomize_mode = "full" if mode == "full" else "preset"
+            self.settings.randomize_mode = mode if mode in ("preset", "absolute") else "preset"
         except Exception:
             pass
 
@@ -3055,31 +3179,53 @@ class StandardCrosshairDialog(QWidget):
             self._on_preset_selected(chosen)
             return
 
-        # Fully random: intentionally extreme ranges (still centered).
-        self.settings.global_scale = int(random.randint(25, 1000))
-        self.settings.length = int(random.randint(5, 1500))
-        self.settings.thickness = int(random.randint(1, 200))
-        self.settings.gap = int(random.randint(0, 600))
-        self.settings.outline = int(random.randint(0, 60))
-        self.settings.rotation = float(random.randint(0, 359))
-        # Center locked.
-        self.settings.offset_x = 0
-        self.settings.offset_y = 0
-        self.settings.line_rounding = int(random.randint(0, 400))
+        chaos = bool(random.random() < 0.35)
+        if not chaos:
+            self.settings.global_scale = int(random.randint(60, 180))
+            self.settings.length = int(random.randint(10, 220))
+            self.settings.thickness = int(random.randint(1, 18))
+            self.settings.gap = int(random.randint(0, 80))
+            self.settings.outline = int(random.randint(0, 10))
+            self.settings.rotation = float(random.randint(0, 359))
+            self.settings.offset_x = 0
+            self.settings.offset_y = 0
+            self.settings.line_rounding = int(random.randint(0, 40))
 
-        # Fan: random on/off + speed.
-        self.settings.fan_enabled = bool(random.getrandbits(1))
-        self.settings.fan_speed = int(random.randint(-2000, 2000))
+            self.settings.fan_enabled = bool(random.random() < 0.25)
+            self.settings.fan_speed = int(random.randint(-240, 240))
 
-        self.settings.crosshair_style = random.choice(["plus", "x"])
-        self.settings.center_dot = bool(random.getrandbits(1))
-        self.settings.dot_shape = random.choice(["circle", "square", "diamond"])
-        self.settings.dot_size = int(random.randint(2, 200))
+            self.settings.crosshair_style = random.choice(["plus", "x"])
+            self.settings.center_dot = bool(random.random() < 0.6)
+            self.settings.dot_shape = random.choice(["circle", "square", "diamond"])
+            self.settings.dot_size = int(random.randint(2, 20))
 
-        self.settings.red = int(random.randint(0, 255))
-        self.settings.green = int(random.randint(0, 255))
-        self.settings.blue = int(random.randint(0, 255))
-        self.settings.alpha = int(random.randint(30, 255))
+            self.settings.red = int(random.randint(0, 255))
+            self.settings.green = int(random.randint(0, 255))
+            self.settings.blue = int(random.randint(0, 255))
+            self.settings.alpha = int(random.randint(120, 255))
+        else:
+            self.settings.global_scale = int(random.randint(25, 1000))
+            self.settings.length = int(random.randint(5, 1500))
+            self.settings.thickness = int(random.randint(1, 200))
+            self.settings.gap = int(random.randint(0, 600))
+            self.settings.outline = int(random.randint(0, 60))
+            self.settings.rotation = float(random.randint(0, 359))
+            self.settings.offset_x = 0
+            self.settings.offset_y = 0
+            self.settings.line_rounding = int(random.randint(0, 400))
+
+            self.settings.fan_enabled = bool(random.getrandbits(1))
+            self.settings.fan_speed = int(random.randint(-2000, 2000))
+
+            self.settings.crosshair_style = random.choice(["plus", "x"])
+            self.settings.center_dot = bool(random.getrandbits(1))
+            self.settings.dot_shape = random.choice(["circle", "square", "diamond"])
+            self.settings.dot_size = int(random.randint(2, 200))
+
+            self.settings.red = int(random.randint(0, 255))
+            self.settings.green = int(random.randint(0, 255))
+            self.settings.blue = int(random.randint(0, 255))
+            self.settings.alpha = int(random.randint(30, 255))
 
         self._refresh_presets_ui()
         self._sync_controls_from_settings()

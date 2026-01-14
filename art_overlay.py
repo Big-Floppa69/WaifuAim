@@ -10,6 +10,7 @@ Persistence lives in app_settings.json under the key "art_overlays".
 from __future__ import annotations
 
 import json
+import ctypes
 import os
 from dataclasses import dataclass
 from typing import Optional
@@ -487,6 +488,76 @@ class ArtOverlayController:
         """Update whether the hold-to-drag chord is currently active."""
         active = False
 
+        def _vk_from_name(name: str) -> int | None:
+            name = str(name or "").strip().lower()
+            if not name:
+                return None
+            aliases = {
+                "mouse4": "mouse_x1",
+                "mouse5": "mouse_x2",
+                "mouse_4": "mouse_x1",
+                "mouse_5": "mouse_x2",
+                "x1": "mouse_x1",
+                "x2": "mouse_x2",
+                "mb4": "mouse_x1",
+                "mb5": "mouse_x2",
+                "`": "grave",
+                "~": "grave",
+            }
+            name = aliases.get(name, name)
+
+            mapping = {
+                "mouse_left": 0x01,
+                "mouse_right": 0x02,
+                "mouse_middle": 0x04,
+                "mouse_x1": 0x05,
+                "mouse_x2": 0x06,
+                "shift": 0x10,
+                "ctrl": 0x11,
+                "control": 0x11,
+                "alt": 0x12,
+                "windows": 0x5B,
+                "win": 0x5B,
+                "space": 0x20,
+                "tab": 0x09,
+                "esc": 0x1B,
+                "escape": 0x1B,
+                "enter": 0x0D,
+                "return": 0x0D,
+                "backspace": 0x08,
+                "capslock": 0x14,
+                "grave": 0xC0,
+            }
+            if name.startswith("f") and name[1:].isdigit():
+                try:
+                    n = int(name[1:])
+                    if 1 <= n <= 24:
+                        return 0x70 + (n - 1)
+                except Exception:
+                    return None
+            arrows = {"left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28}
+            if name in arrows:
+                return arrows[name]
+            if name in mapping:
+                return mapping[name]
+            if len(name) == 1:
+                ch = name
+                if "a" <= ch <= "z":
+                    return ord(ch.upper())
+                if "0" <= ch <= "9":
+                    return ord(ch)
+            return None
+
+        def _is_pressed_win32(name: str) -> bool:
+            vk = _vk_from_name(name)
+            if vk is None:
+                return False
+            try:
+                state = ctypes.windll.user32.GetAsyncKeyState(int(vk))
+                return bool(state & 0x8000)
+            except Exception:
+                return False
+
         # Empty by default => dragging disabled.
         if self._hold_to_drag:
             try:
@@ -501,7 +572,15 @@ class ArtOverlayController:
                         continue
 
                     # Common alias normalization.
-                    raw = {"`": "grave", "~": "grave"}.get(raw, raw)
+                    raw = {"`": "grave", "~": "grave", "mouse4": "mouse_x1", "mouse5": "mouse_x2"}.get(raw, raw)
+
+                    # Mouse buttons aren't supported by the keyboard lib; use Win32 polling.
+                    if "mouse_" in raw:
+                        parts = [p.strip() for p in raw.split("+") if p.strip()]
+                        if parts and all(_is_pressed_win32(p) for p in parts):
+                            active = True
+                            break
+                        continue
 
                     try:
                         # keyboard.is_pressed can handle combos like "ctrl+shift" and

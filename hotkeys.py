@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import os
 import time
+import ctypes
+import threading
 
 import keyboard as kb  # type: ignore
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -32,6 +34,11 @@ _label_ref = None
 _overlay_controller_ref = None
 _crosshair_label_ref = None
 _hotkeys_paused = False
+
+_win32_hotkey_lock = threading.Lock()
+_win32_hotkey_bindings: list[dict] = []
+_win32_hotkey_thread: threading.Thread | None = None
+_win32_hotkey_stop = threading.Event()
 
 
 class _UiInvoker(QObject):
@@ -103,7 +110,25 @@ def load_hotkey_config() -> dict:
         if not s:
             return ""
         # keyboard library tends to prefer key names like "grave".
-        return {"`": "grave", "~": "grave"}.get(s, s)
+        aliases = {
+            "`": "grave",
+            "~": "grave",
+            "mouse4": "mouse_x1",
+            "mouse5": "mouse_x2",
+            "mouse_4": "mouse_x1",
+            "mouse_5": "mouse_x2",
+            "x1": "mouse_x1",
+            "x2": "mouse_x2",
+            "mb4": "mouse_x1",
+            "mb5": "mouse_x2",
+        }
+        return aliases.get(s, s)
+
+    def _normalize_chord(chord: str) -> str:
+        parts = [p.strip() for p in str(chord or "").split("+") if p.strip()]
+        parts = [_normalize_key_name(p) for p in parts]
+        parts = [p for p in parts if p]
+        return "+".join(parts)
 
     def _normalize(value):
         if value is None:
@@ -111,11 +136,11 @@ def load_hotkey_config() -> dict:
         if isinstance(value, list):
             out = []
             for v in value:
-                s = _normalize_key_name(v)
+                s = _normalize_chord(v)
                 if s:
                     out.append(s)
             return out
-        s = _normalize_key_name(value)
+        s = _normalize_chord(value)
         return [s] if s else []
 
     if os.path.exists(config_file):
@@ -147,6 +172,9 @@ def reload_hotkeys() -> None:
     except Exception:
         pass
 
+    with _win32_hotkey_lock:
+        _win32_hotkey_bindings.clear()
+
     config = load_hotkey_config()
 
     # Keep overlay controller in sync with hold-to-drag chord.
@@ -165,7 +193,76 @@ def reload_hotkeys() -> None:
         if not parts:
             return
 
+        def _vk_from_key_name(name: str) -> int | None:
+            name = str(name or "").strip().lower()
+            if not name:
+                return None
+            mapping = {
+                "mouse_left": 0x01,
+                "mouse_right": 0x02,
+                "mouse_middle": 0x04,
+                "mouse_x1": 0x05,
+                "mouse_x2": 0x06,
+                "shift": 0x10,
+                "ctrl": 0x11,
+                "control": 0x11,
+                "alt": 0x12,
+                "windows": 0x5B,
+                "win": 0x5B,
+                "space": 0x20,
+                "tab": 0x09,
+                "esc": 0x1B,
+                "escape": 0x1B,
+                "enter": 0x0D,
+                "return": 0x0D,
+                "backspace": 0x08,
+                "capslock": 0x14,
+                "grave": 0xC0,
+            }
+            if name.startswith("f") and name[1:].isdigit():
+                try:
+                    n = int(name[1:])
+                    if 1 <= n <= 24:
+                        return 0x70 + (n - 1)
+                except Exception:
+                    return None
+            arrows = {"left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28}
+            if name in arrows:
+                return arrows[name]
+            if name in mapping:
+                return mapping[name]
+            if len(name) == 1:
+                ch = name
+                if "a" <= ch <= "z":
+                    return ord(ch.upper())
+                if "0" <= ch <= "9":
+                    return ord(ch)
+            return None
+
+        def _is_pressed_win32(key_name: str) -> bool:
+            vk = _vk_from_key_name(key_name)
+            if vk is None:
+                return False
+            try:
+                state = ctypes.windll.user32.GetAsyncKeyState(int(vk))
+                return bool(state & 0x8000)
+            except Exception:
+                return False
+
+        def _any_mouse(parts_: list[str]) -> bool:
+            return any(p.startswith("mouse_") for p in parts_)
+
         state = {"armed": True, "last": 0.0}
+
+        if _any_mouse(parts):
+            # Mouse-based chords: poll via Win32 (keyboard lib doesn't support mouse buttons).
+            if any(_vk_from_key_name(p) is None for p in parts):
+                return
+            with _win32_hotkey_lock:
+                _win32_hotkey_bindings.append({"parts": parts, "state": state, "callback": callback})
+
+            _ensure_win32_hotkey_thread()
+            return
 
         def maybe_fire(_=None):
             now = time.monotonic()
@@ -191,6 +288,114 @@ def reload_hotkeys() -> None:
         for p in parts:
             kb.on_press_key(p, maybe_fire)
             kb.on_release_key(p, rearm)
+
+
+def _ensure_win32_hotkey_thread() -> None:
+    global _win32_hotkey_thread
+    if _win32_hotkey_thread is not None and _win32_hotkey_thread.is_alive():
+        return
+
+    _win32_hotkey_stop.clear()
+
+    def _poll_loop() -> None:
+        while not _win32_hotkey_stop.is_set():
+            if _hotkeys_paused:
+                time.sleep(0.05)
+                continue
+
+            with _win32_hotkey_lock:
+                bindings = list(_win32_hotkey_bindings)
+
+            for b in bindings:
+                parts = b.get("parts") or []
+                state = b.get("state") or {"armed": True, "last": 0.0}
+                cb = b.get("callback")
+                if not callable(cb) or not isinstance(parts, list) or not parts:
+                    continue
+
+                now = time.monotonic()
+                if not state.get("armed", True):
+                    # Rearm when released.
+                    try:
+                        if not all(_is_pressed_win32(p) for p in parts):
+                            state["armed"] = True
+                    except Exception:
+                        state["armed"] = True
+                    continue
+
+                try:
+                    if all(_is_pressed_win32(p) for p in parts):
+                        if now - float(state.get("last", 0.0)) < 0.15:
+                            continue
+                        state["last"] = now
+                        state["armed"] = False
+                        cb()
+                except Exception:
+                    continue
+
+            time.sleep(0.01)
+
+    _win32_hotkey_thread = threading.Thread(target=_poll_loop, name="WaifuAimWin32Hotkeys", daemon=True)
+    _win32_hotkey_thread.start()
+
+
+def _is_pressed_win32(key_name: str) -> bool:
+    # Helper for Win32 polling thread.
+    key_name = str(key_name or "").strip().lower()
+    if not key_name:
+        return False
+
+    mapping = {
+        "mouse_left": 0x01,
+        "mouse_right": 0x02,
+        "mouse_middle": 0x04,
+        "mouse_x1": 0x05,
+        "mouse_x2": 0x06,
+        "shift": 0x10,
+        "ctrl": 0x11,
+        "control": 0x11,
+        "alt": 0x12,
+        "windows": 0x5B,
+        "win": 0x5B,
+        "space": 0x20,
+        "tab": 0x09,
+        "esc": 0x1B,
+        "escape": 0x1B,
+        "enter": 0x0D,
+        "return": 0x0D,
+        "backspace": 0x08,
+        "capslock": 0x14,
+        "grave": 0xC0,
+    }
+    if key_name.startswith("f") and key_name[1:].isdigit():
+        try:
+            n = int(key_name[1:])
+            if 1 <= n <= 24:
+                vk = 0x70 + (n - 1)
+            else:
+                return False
+        except Exception:
+            return False
+    elif key_name in ("left", "up", "right", "down"):
+        vk = {"left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28}[key_name]
+    elif key_name in mapping:
+        vk = mapping[key_name]
+    elif len(key_name) == 1:
+        ch = key_name
+        if "a" <= ch <= "z":
+            vk = ord(ch.upper())
+        elif "0" <= ch <= "9":
+            vk = ord(ch)
+        else:
+            return False
+    else:
+        return False
+
+    try:
+        state = ctypes.windll.user32.GetAsyncKeyState(int(vk))
+        return bool(state & 0x8000)
+    except Exception:
+        return False
 
     def _register_many(hotkeys, callback) -> None:
         if hotkeys is None:

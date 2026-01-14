@@ -381,7 +381,7 @@ class DarkControlPanel(QWidget):
             if self._back_btn is not None:
                 self._back_btn.setVisible(False)
             if self._title_label is not None:
-                self._title_label.setText(tr_lit("Standard Crosshair"))
+                self._title_label.setText("WaifuAim")
                 self._title_label.setVisible(True)
         except Exception:
             pass
@@ -566,7 +566,7 @@ class DarkControlPanel(QWidget):
             cur = str(lbl.text() or "")
             if cur in ("Crosshair Control", tr_lit("Crosshair Control")):
                 lbl.setText(tr_lit("Crosshair Control"))
-            elif cur in ("Standard Crosshair", tr_lit("Standard Crosshair"), "WaifuAim"):
+            elif cur in ("WaifuAim", tr_lit("WaifuAim")):
                 lbl.setText("WaifuAim")
 
         # Tooltips/state labels.

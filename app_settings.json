@@ -34,8 +34,8 @@
       "enabled": true,
       "opacity": 1.0,
       "transform": {
-        "x": 1021.9090909090901,
-        "y": 99.09090909090907,
+        "x": 1595.1818181818173,
+        "y": 32.09090909090901,
         "zoom": 0.65,
         "rotation": 0.0
       }
@@ -64,9 +64,14 @@
       }
     },
     "display_images/astra_yao.png": {
-      "enabled": false,
+      "enabled": true,
       "opacity": 1.0,
-      "transform": {}
+      "transform": {
+        "x": 0.0,
+        "y": 0.0,
+        "zoom": 1.0,
+        "rotation": 0.0
+      }
     },
     "display_images/jane_doe.png": {
       "enabled": false,
@@ -79,9 +84,14 @@
       }
     },
     "display_images/astolfo3.png": {
-      "enabled": false,
+      "enabled": true,
       "opacity": 1.0,
-      "transform": {}
+      "transform": {
+        "x": 409.272727272727,
+        "y": 473.18181818181847,
+        "zoom": 0.4,
+        "rotation": 0.0
+      }
     },
     "display_images/astolfo4.png": {
       "enabled": false,
@@ -99,12 +109,22 @@
       "transform": {}
     },
     "display_images/jane_doe2.png": {
-      "enabled": true,
+      "enabled": false,
       "opacity": 1.0,
       "transform": {
         "x": 1294.272727272727,
         "y": 37.454545454545155,
         "zoom": 0.38,
+        "rotation": 0.0
+      }
+    },
+    "display_images/Дизайн без назви (4).png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {
+        "x": -39.727272727272634,
+        "y": -369.18181818181836,
+        "zoom": 0.28,
         "rotation": 0.0
       }
     }
