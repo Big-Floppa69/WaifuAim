@@ -252,10 +252,18 @@ def reload_hotkeys() -> None:
         def _any_mouse(parts_: list[str]) -> bool:
             return any(p.startswith("mouse_") for p in parts_)
 
+        def _all_modifiers(parts_: list[str]) -> bool:
+            if not parts_:
+                return False
+            mods = {"ctrl", "control", "alt", "shift", "windows", "win"}
+            return all(str(p or "").strip().lower() in mods for p in parts_)
+
         state = {"armed": True, "last": 0.0}
 
-        if _any_mouse(parts):
+        if _any_mouse(parts) or _all_modifiers(parts):
             # Mouse-based chords: poll via Win32 (keyboard lib doesn't support mouse buttons).
+            # Modifier-only chords (e.g. "alt") are also unreliable via keyboard hooks on some systems,
+            # so we poll them as well.
             if any(_vk_from_key_name(p) is None for p in parts):
                 return
             with _win32_hotkey_lock:

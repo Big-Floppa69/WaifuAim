@@ -845,6 +845,36 @@ def tr(key: str, *, lang: str | None = None, default: str | None = None) -> str:
 
 _LIT_TRANSLATIONS: dict[str, dict[str, str]] = {
     "ru": {
+            # Dot accordion
+            "Dot Shape": "Форма Точки",
+            "Dot Size": "Размер Точки",
+            "Circle": "Круг",
+            "Square": "Квадрат",
+            "Diamond": "Ромб",
+            "◯ Circle": "◯ Круг",
+            "▢ Square": "▢ Квадрат",
+            "◇ Diamond": "◇ Ромб",
+
+            # Line builder dynamic labels
+            "Left": "Левая",
+            "Right": "Правая",
+            "Top": "Верхняя",
+            "Bottom": "Нижняя",
+            "objects": "объектов",
+            "Line": "Линия",
+            "offset": "смещение",
+            "length": "длина",
+            "radius": "радиус",
+            "size": "размер",
+            "Curve": "Кривая",
+            "pts": "точек",
+            "thickness": "толщина",
+            "Unknown object": "Неизвестный объект",
+            # Color labels
+            "Red": "Красный",
+            "Green": "Зеленый",
+            "Blue": "Синий",
+            "Alpha": "Альфа",
         "Crosshair Control": "Управление прицелом",
         "Standard Crosshair": "WaifuAim",
         "\N{BULLSEYE} Standard Crosshair": "\N{BULLSEYE} WaifuAim",
@@ -882,6 +912,22 @@ _LIT_TRANSLATIONS: dict[str, dict[str, str]] = {
         "The app is currently active. Exit anyway?": "Приложение сейчас активно. Всё равно выйти?",
         "\N{ARTIST PALETTE} Palette": "\N{ARTIST PALETTE} Палитра",
         "Pick Crosshair Color": "Выбор цвета прицела",
+        # QColorDialog / palette dialog strings
+        "Basic colors": "Основные цвета",
+        "Basic colors:": "Основные цвета:",
+        "Custom colors": "Пользовательские цвета",
+        "Add to Custom Colors": "Добавить в пользовательские цвета",
+        "Pick Screen Color": "Выбрать цвет с экрана",
+        "Hue": "Оттенок",
+        "Hue:": "Оттенок:",
+        "Sat": "Насыщенность",
+        "Sat:": "Насыщенность:",
+        "Val": "Яркость",
+        "Val:": "Яркость:",
+        "Alpha channel": "Альфа-канал",
+        "HTML:": "HTML:",
+        "OK": "ОК",
+        "Cancel": "Отмена",
         "Advanced Line Builder": "Расширенный конструктор линий",
         "\N{LEFTWARDS ARROW} Back": "\N{LEFTWARDS ARROW} Назад",
         "Shape stacked lines, drag their order, and preview the result instantly.": "Создавайте составные линии, перетаскивайте их порядок и сразу смотрите результат.",
@@ -1036,7 +1082,34 @@ def tr_lit(text: str, *, lang: str | None = None) -> str:
         lang = get_app_language_from_disk("en")
     lang = str(lang or "en").strip().lower() or "en"
     mapping = _LIT_TRANSLATIONS.get(lang) or {}
-    return mapping.get(s, s)
+
+    # 1) Exact match (fast path).
+    exact = mapping.get(s)
+    if exact is not None:
+        return exact
+
+    # 2) Qt often inserts ampersands for keyboard accelerators ("&OK").
+    #    Our literal translation table is stored without them.
+    if "&" in s:
+        s_no_amp = s.replace("&", "")
+        exact = mapping.get(s_no_amp)
+        if exact is not None:
+            return exact
+
+    # 3) Some built-in dialogs use trailing colons ("Hue:"). If we have the
+    #    base word translated, reuse it and keep the colon.
+    if s.endswith(":"):
+        base = s[:-1]
+        exact = mapping.get(base)
+        if exact is not None:
+            return exact + ":"
+        if "&" in base:
+            base_no_amp = base.replace("&", "")
+            exact = mapping.get(base_no_amp)
+            if exact is not None:
+                return exact + ":"
+
+    return s
 
 
 def apply_language_to_object_tree(root: QObject, *, lang: str | None = None) -> None:

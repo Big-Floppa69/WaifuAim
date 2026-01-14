@@ -981,6 +981,42 @@ class HotkeyManagerDialog(QWidget):
                             pass
             except Exception:
                 pass
+
+            # If a Randomize hotkey is assigned, enable randomize hotkey setting
+            # for the generated crosshair so it works immediately.
+            try:
+                rk = new_hotkeys.get("randomize_crosshair")
+                has_randomize_hotkey = False
+                if isinstance(rk, list):
+                    has_randomize_hotkey = any(str(x or "").strip() for x in rk)
+                elif isinstance(rk, str):
+                    has_randomize_hotkey = bool(str(rk or "").strip())
+
+                if has_randomize_hotkey:
+                    from standard_crosshair import (
+                        load_settings_from_disk,
+                        save_settings_to_disk,
+                        StandardCrosshairSettings,
+                    )
+
+                    s = load_settings_from_disk()
+                    if isinstance(s, StandardCrosshairSettings):
+                        s.randomize_hotkey_enabled = True
+                        save_settings_to_disk(s)
+
+                        # Update the running label immediately if available.
+                        try:
+                            from hotkeys import _crosshair_label_ref  # type: ignore
+
+                            lbl = _crosshair_label_ref
+                            if lbl is not None:
+                                cur = getattr(lbl, "_standard_crosshair_settings", None)
+                                if isinstance(cur, StandardCrosshairSettings):
+                                    cur.randomize_hotkey_enabled = True
+                        except Exception:
+                            pass
+            except Exception:
+                pass
             
             self.current_hotkeys = new_hotkeys
             self.hotkeys_updated.emit(new_hotkeys)

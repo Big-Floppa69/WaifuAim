@@ -498,9 +498,28 @@ class DarkControlPanel(QWidget):
         except Exception:
             was_visible = None
 
+        # Preserve expanded/collapsed accordion state in the embedded crosshair UI.
+        accordion_state = None
+        try:
+            old = getattr(self, "crosshair_dialog", None)
+            fn = getattr(old, "get_accordion_state", None)
+            if callable(fn):
+                accordion_state = fn()
+        except Exception:
+            accordion_state = None
+
         # Rebuild embedded crosshair settings so its UI strings update.
         try:
             self._rebuild_embedded_crosshair_dialog()
+        except Exception:
+            pass
+
+        # Restore accordion expanded/collapsed state after rebuild.
+        try:
+            new = getattr(self, "crosshair_dialog", None)
+            fn = getattr(new, "set_accordion_state", None)
+            if callable(fn):
+                fn(accordion_state)
         except Exception:
             pass
 
@@ -525,6 +544,9 @@ class DarkControlPanel(QWidget):
 
             for w in QApplication.topLevelWidgets():
                 apply_language_to_object_tree(w)
+                fn = getattr(w, "retranslate_dynamic_texts", None)
+                if callable(fn):
+                    fn()
         except Exception:
             pass
 
@@ -2294,6 +2316,15 @@ class DarkControlPanel(QWidget):
                 self._hotkey_info_label.setText(get_current_hotkeys())
         except Exception:
             return
+
+        # Keep in-menu hotkey fields in sync with Hotkey Manager.
+        try:
+            dlg = getattr(self, "crosshair_dialog", None)
+            fn = getattr(dlg, "sync_hotkeys_from_config", None)
+            if callable(fn):
+                fn()
+        except Exception:
+            pass
     
     def toggle_panel(self):
         """Toggle the control panel visibility."""

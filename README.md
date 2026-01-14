@@ -2,49 +2,66 @@
 <img src="astra_yao_tray.png" width="200px" />
 </div>
 
-# <div align="center">Astra Yao Crosshair</div>
+# <div align="center">WaifuAim</div>
 
-This is a scope that will make you unrivaled! Personally, I have already become a radiant in Valorant with it. („¬ᴗ¬„)
+WaifuAim is a lightweight, always-on-top crosshair overlay for Windows.
 
-Even though the project is a joke, I did everything to make this scope **easy to use**:
+It supports two rendering modes:
 
-- You can _hide_ or _show_ the sight by pressing the " **`** " button on the English layout, or " **ё** " on the Russian layout;
+- **Image-based**: show a PNG/JPG/WEBP crosshair from `display_images/`
+- **Generated**: a procedural crosshair (lines/dots/circles/etc.) configured in the built-in editor
 
-- You can _flip_ the sight images horizontally by pressing the "**l alt**" button;
+## Features
 
-- The functions described above are also _available from the tray menu_, which is opened by right-clicking on the application icon in the tray;
+- Global hotkeys (work without focus)
+- System tray icon + tray menu
+- Presets/profiles for the generated crosshair
+- Randomize button + Randomize hotkey
+
+## Hotkeys
+
+Hotkeys are configured in `hotkey_config.json` and can also be changed via the in-app Hotkey UI.
+
+**Chord format** is lower-case keys joined with `+`, for example:
+
+- `ctrl+alt+f2`
+- `shift+mouse_x1`
+- `windows+f3`
+
+Note: modifier-only hotkeys like `alt` / `ctrl+alt` may not work reliably as global hotkeys on Windows. Prefer including a non-modifier key (for example `alt+f2`).
+
+Note: while the **Hotkey Manager** window is open, global hotkeys are paused to prevent accidental triggers.
+
+## Images
+
+- Put your crosshair images into `display_images/`.
+- Supported formats: PNG, JPG/JPEG, WEBP.
+- Use the configured `switch_image` hotkey (default is commonly `f2`) to cycle.
 
 <div align="center">
   <img src="readme.media/tray_menu.png" />
 </div>
 
-- Also, _in the tray menu_, there is an option to **change the image opacity value** (100%, 75%, 50%, 25%);
+## Generated crosshair presets
 
-- Finally, you can **close the application** by clicking "_Exit_" in the application menu from the tray.
+The generated crosshair editor lets you save and switch presets. The Randomize button and Randomize hotkey both use the selected Randomize mode:
 
-Interesting fact - you can put any of **your own images**. The main thing is that it is in _png format_ and _pre-fitted to the size of your screen_.
-To use your own image, name it "**astra_yao.png**" and replace it in the directory where the executable file "**Astra Yao Crosshair.exe**" is located.
+- **From Presets**: picks a preset (avoids re-picking the currently active preset when multiple exist)
+- **Absolute Random**: randomizes parameters directly
 
-## 🚀 Installing
+## Installer (recommended)
 
-**You can download the archive with the latest version of the program on the [releases page](https://github.com/Hitoshi144/Astra_Yao_Crosshair/releases)**
+If you have the installer, just run it and follow the steps. It includes everything needed to start the app (no Python setup required).
 
-Follow these steps to set up and run the project locally:
+## 🚀 Installing (for development)
 
-### 1. Clone the repository
-
-```bash
-git clone https://github.com/Hitoshi144/Astra_Yao_Crosshair.git
-cd Astra_Yao_Crosshair
-```
-
-### 2. Create a virtual environment
+### 1. Create a virtual environment
 
 ```bash
 python -m venv venv
 ```
 
-### 3. Activate the virtual environment
+### 2. Activate the virtual environment
 
 On Windows:
 
@@ -58,13 +75,13 @@ On Linux/MacOS:
 source venv/bin/activate
 ```
 
-### 4. Install dependencies
+### 3. Install dependencies
 
 ```
 pip install -r requirements.txt
 ```
 
-### 5. Run the project
+### 4. Run the project
 
 ```
 python main.py
@@ -79,6 +96,11 @@ python main.py
 See `crosshair_profiles.example.json` for the file format.
 
 ## 🎉 That's it!
+
+## Credits
+
+- Creators: **Big-Floppa69** and **AmacioSlayer**
+- Inspired by **Hitoshi144** (original tiny one-file version)
 
 You can also improve the program by adding additional features.
 

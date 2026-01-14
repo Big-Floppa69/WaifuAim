@@ -31,7 +31,7 @@
   ],
   "art_overlays": {
     "display_images/miyabi-hoshimi-miyabi.mp4": {
-      "enabled": true,
+      "enabled": false,
       "opacity": 1.0,
       "transform": {
         "x": 1595.1818181818173,
@@ -64,7 +64,7 @@
       }
     },
     "display_images/astra_yao.png": {
-      "enabled": true,
+      "enabled": false,
       "opacity": 1.0,
       "transform": {
         "x": 0.0,
@@ -84,11 +84,11 @@
       }
     },
     "display_images/astolfo3.png": {
-      "enabled": true,
+      "enabled": false,
       "opacity": 1.0,
       "transform": {
-        "x": 409.272727272727,
-        "y": 473.18181818181847,
+        "x": 406.9999999999997,
+        "y": 462.90909090909076,
         "zoom": 0.4,
         "rotation": 0.0
       }
@@ -127,17 +127,24 @@
         "zoom": 0.28,
         "rotation": 0.0
       }
+    },
+    "display_images/3b8cfa5fe8b80acff7edf3d465958bd2.jpg": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {}
+    },
+    "display_images/mitsuri_kanroji.png": {
+      "enabled": true,
+      "opacity": 1.0,
+      "transform": {
+        "x": 673.6581818181819,
+        "y": 415.090909090909,
+        "zoom": 0.28,
+        "rotation": 0.0
+      }
     }
   },
-  "art_combos": [
-    {
-      "name": "AstraYao+Miaby",
-      "keys": [
-        "display_images/astra_yao.png",
-        "display_images/miyabi-hoshimi-miyabi.mp4"
-      ]
-    }
-  ],
+  "art_combos": [],
   "art_cycle_sequence": [
     {
       "type": "file",
@@ -182,10 +189,6 @@
     {
       "type": "file",
       "key": "display_images/nagatoro.png"
-    },
-    {
-      "type": "combo",
-      "name": "AstraYao+Miaby"
     },
     {
       "type": "combo",

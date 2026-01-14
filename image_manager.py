@@ -1370,6 +1370,18 @@ class ImageManagerDialog(QWidget):
                         if str(child_meta.get("name") or "") != name:
                             continue
                         it.setCheckState(Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked)
+
+                    # Also sync any standalone/duplicate rows for the same keys.
+                    keyset = {str(v) for v in keys if str(v).strip()}
+                    for i in range(self.image_list.count()):
+                        it = self.image_list.item(i)
+                        if it is None:
+                            continue
+                        m = it.data(Qt.ItemDataRole.UserRole)
+                        if isinstance(m, dict):
+                            continue
+                        if str(m or "") in keyset:
+                            it.setCheckState(Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked)
                 finally:
                     self._updating_checks = False
                 return
