@@ -438,6 +438,13 @@ def _settings_to_preset_dict(settings: StandardCrosshairSettings) -> dict:
     data.pop("active_preset", None)
     # Visibility is a global toggle, not a per-preset property.
     data.pop("visible", None)
+    # These are global toggles/behaviors and should not be saved inside presets.
+    # Keeping them out prevents Randomize/Presets from unexpectedly changing
+    # user hotkeys/hold-fade behavior.
+    data.pop("hold_fade_enabled", None)
+    data.pop("hold_fade_key", None)
+    data.pop("hold_fade_keys", None)
+    data.pop("randomize_hotkey_enabled", None)
     return data
 
 
@@ -445,7 +452,16 @@ def _apply_preset_dict_to_settings(settings: StandardCrosshairSettings, preset: 
     if not isinstance(preset, dict):
         return
     for key, value in preset.items():
-        if key in ("presets", "active_preset", "visible"):
+        if key in (
+            "presets",
+            "active_preset",
+            "visible",
+            # Global-only keys: ignore them even if present in older presets.
+            "hold_fade_enabled",
+            "hold_fade_key",
+            "hold_fade_keys",
+            "randomize_hotkey_enabled",
+        ):
             continue
         if hasattr(settings, key):
             setattr(settings, key, value)
@@ -2188,7 +2204,7 @@ class StandardCrosshairDialog(QWidget):
         presets_outer.addLayout(bottom_row)
         layout.addWidget(presets_frame)
 
-        layout.addWidget(self._create_accordion_section(tr_lit("Basic"), self._create_slider_group(carded=False), expanded=True, key="basic"))
+        layout.addWidget(self._create_accordion_section(tr_lit("Basic"), self._create_slider_group(carded=False), expanded=False, key="basic"))
         layout.addWidget(self._create_accordion_section(tr_lit("Transform"), self._create_shape_group(carded=False), expanded=False, key="transform"))
         layout.addWidget(self._create_accordion_section(tr_lit("Dot"), self._create_dot_group(carded=False), expanded=False, key="dot"))
         layout.addWidget(self._create_accordion_section(tr_lit("Color"), self._create_color_group(carded=False), expanded=False, key="color"))

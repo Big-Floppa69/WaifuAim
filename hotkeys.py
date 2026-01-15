@@ -297,6 +297,146 @@ def reload_hotkeys() -> None:
             kb.on_press_key(p, maybe_fire)
             kb.on_release_key(p, rearm)
 
+    def _register_many(hotkeys, callback) -> None:
+        if hotkeys is None:
+            return
+        if isinstance(hotkeys, str):
+            _register(hotkeys, callback)
+            return
+        if isinstance(hotkeys, list):
+            for hk in hotkeys:
+                _register(hk, callback)
+
+    def toggle_visibility() -> None:
+        def _do():
+            if _label_ref is None:
+                return
+            if _label_ref.isVisible():
+                _label_ref.hide()
+            else:
+                _label_ref.show()
+            try:
+                if _overlay_controller_ref is not None:
+                    _overlay_controller_ref.set_all_visible(bool(_label_ref.isVisible()))
+            except Exception:
+                pass
+
+        _on_ui_thread(_do)
+
+    def mirror_v() -> None:
+        def _do():
+            if _label_ref is None:
+                return
+            mirror_vertical(_label_ref, _label_ref.pixmap())
+
+        _on_ui_thread(_do)
+
+    def mirror_h() -> None:
+        def _do():
+            if _label_ref is None:
+                return
+            mirror_horizontal(_label_ref, _label_ref.pixmap())
+
+        _on_ui_thread(_do)
+
+    index = [0]
+
+    def switch_image() -> None:
+        def _do():
+            if _label_ref is None:
+                return
+
+            entries = get_art_cycle_entries("display_images")
+            if not entries:
+                return
+
+            index[0] = (index[0] + 1) % len(entries)
+            entry = entries[index[0]]
+
+            def _key_for_path(p: str) -> str:
+                try:
+                    root = os.path.dirname(os.path.abspath(__file__))
+                    return os.path.relpath(os.path.abspath(p), root).replace("\\\\", "/")
+                except Exception:
+                    return os.path.abspath(p).replace("\\\\", "/")
+
+            if entry.get("type") == "combo":
+                if _overlay_controller_ref is None:
+                    return
+                keys = entry.get("keys") or []
+                clear_label_art(_label_ref)
+                try:
+                    _overlay_controller_ref.set_selection_keys(keys)
+                    _overlay_controller_ref.request_render_selected_atomic(
+                        "display_images",
+                        visible=bool(_label_ref.isVisible()),
+                    )
+                except Exception:
+                    pass
+                return
+
+            path = str(entry.get("path") or "").strip()
+            if not path:
+                return
+
+            if _overlay_controller_ref is not None:
+                key = _key_for_path(path)
+                clear_label_art(_label_ref)
+
+                def _fallback(_e=None):
+                    try:
+                        _overlay_controller_ref.clear_selection()
+                        _overlay_controller_ref.set_all_visible(False)
+                    except Exception:
+                        pass
+                    try:
+                        set_label_art_from_path(_label_ref, path)
+                    except Exception:
+                        try:
+                            pix = QPixmap(path)
+                            _label_ref.setPixmap(pix)
+                        except Exception:
+                            pass
+
+                try:
+                    _overlay_controller_ref.set_selection_keys([key])
+                    _overlay_controller_ref.request_render_selected_atomic(
+                        "display_images",
+                        visible=bool(_label_ref.isVisible()),
+                        on_error=_fallback,
+                    )
+                except Exception:
+                    _fallback(None)
+                return
+
+            try:
+                set_label_art_from_path(_label_ref, path)
+            except Exception:
+                try:
+                    pix = QPixmap(path)
+                    _label_ref.setPixmap(pix)
+                except Exception:
+                    pass
+
+        _on_ui_thread(_do)
+
+    def randomize_crosshair() -> None:
+        def _do():
+            if _crosshair_label_ref is None:
+                return
+            try:
+                randomize_standard_crosshair(_crosshair_label_ref)
+            except Exception:
+                pass
+
+        _on_ui_thread(_do)
+
+    _register_many(config.get("toggle_visibility", ["f1"]), toggle_visibility)
+    _register_many(config.get("mirror_vertical", ["f3"]), mirror_v)
+    _register_many(config.get("mirror_horizontal", ["f4"]), mirror_h)
+    _register_many(config.get("switch_image", ["f2"]), switch_image)
+    _register_many(config.get("randomize_crosshair", []), randomize_crosshair)
+
 
 def _ensure_win32_hotkey_thread() -> None:
     global _win32_hotkey_thread
@@ -404,146 +544,6 @@ def _is_pressed_win32(key_name: str) -> bool:
         return bool(state & 0x8000)
     except Exception:
         return False
-
-    def _register_many(hotkeys, callback) -> None:
-        if hotkeys is None:
-            return
-        if isinstance(hotkeys, str):
-            _register(hotkeys, callback)
-            return
-        if isinstance(hotkeys, list):
-            for hk in hotkeys:
-                _register(hk, callback)
-
-    def toggle_visibility() -> None:
-        def _do():
-            if _label_ref is None:
-                return
-            if _label_ref.isVisible():
-                _label_ref.hide()
-            else:
-                _label_ref.show()
-            try:
-                if _overlay_controller_ref is not None:
-                    _overlay_controller_ref.set_all_visible(bool(_label_ref.isVisible()))
-            except Exception:
-                pass
-
-        _on_ui_thread(_do)
-
-    def mirror_v() -> None:
-        def _do():
-            if _label_ref is None:
-                return
-            mirror_vertical(_label_ref, _label_ref.pixmap())
-
-        _on_ui_thread(_do)
-
-    def mirror_h() -> None:
-        def _do():
-            if _label_ref is None:
-                return
-            mirror_horizontal(_label_ref, _label_ref.pixmap())
-
-        _on_ui_thread(_do)
-
-    index = [0]
-
-    def switch_image() -> None:
-        def _do():
-            if _label_ref is None:
-                return
-
-            entries = get_art_cycle_entries("display_images")
-            if not entries:
-                return
-
-            index[0] = (index[0] + 1) % len(entries)
-            entry = entries[index[0]]
-
-            def _key_for_path(p: str) -> str:
-                try:
-                    root = os.path.dirname(os.path.abspath(__file__))
-                    return os.path.relpath(os.path.abspath(p), root).replace("\\", "/")
-                except Exception:
-                    return os.path.abspath(p).replace("\\", "/")
-
-            if entry.get("type") == "combo":
-                if _overlay_controller_ref is None:
-                    return
-                keys = entry.get("keys") or []
-                clear_label_art(_label_ref)
-                try:
-                    _overlay_controller_ref.set_selection_keys(keys)
-                    _overlay_controller_ref.request_render_selected_atomic(
-                        "display_images",
-                        visible=bool(_label_ref.isVisible()),
-                    )
-                except Exception:
-                    pass
-                return
-
-            path = str(entry.get("path") or "").strip()
-            if not path:
-                return
-
-            if _overlay_controller_ref is not None:
-                key = _key_for_path(path)
-                clear_label_art(_label_ref)
-
-                def _fallback(_e=None):
-                    try:
-                        _overlay_controller_ref.clear_selection()
-                        _overlay_controller_ref.set_all_visible(False)
-                    except Exception:
-                        pass
-                    try:
-                        set_label_art_from_path(_label_ref, path)
-                    except Exception:
-                        try:
-                            pix = QPixmap(path)
-                            _label_ref.setPixmap(pix)
-                        except Exception:
-                            pass
-
-                try:
-                    _overlay_controller_ref.set_selection_keys([key])
-                    _overlay_controller_ref.request_render_selected_atomic(
-                        "display_images",
-                        visible=bool(_label_ref.isVisible()),
-                        on_error=_fallback,
-                    )
-                except Exception:
-                    _fallback(None)
-                return
-
-            try:
-                set_label_art_from_path(_label_ref, path)
-            except Exception:
-                try:
-                    pix = QPixmap(path)
-                    _label_ref.setPixmap(pix)
-                except Exception:
-                    pass
-
-        _on_ui_thread(_do)
-
-    def randomize_crosshair() -> None:
-        def _do():
-            if _crosshair_label_ref is None:
-                return
-            try:
-                randomize_standard_crosshair(_crosshair_label_ref)
-            except Exception:
-                pass
-
-        _on_ui_thread(_do)
-
-    _register_many(config.get("toggle_visibility", ["f1"]), toggle_visibility)
-    _register_many(config.get("mirror_vertical", ["f3"]), mirror_v)
-    _register_many(config.get("mirror_horizontal", ["f4"]), mirror_h)
-    _register_many(config.get("switch_image", ["f2"]), switch_image)
-    _register_many(config.get("randomize_crosshair", []), randomize_crosshair)
 
 
 def setup_hotkeys(label, *, crosshair_label=None, overlay_controller=None) -> None:

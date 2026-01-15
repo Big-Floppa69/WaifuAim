@@ -9,7 +9,7 @@
   "green": 255,
   "blue": 120,
   "alpha": 255,
-  "visible": true,
+  "visible": false,
   "dot_shape": "circle",
   "dot_size": 6,
   "show_left": true,
@@ -29,13 +29,11 @@
   "line_layers": [],
   "draggable_mode": false,
   "grid_snap_size": 5,
-  "hold_fade_enabled": true,
+  "hold_fade_enabled": false,
   "hold_fade_key": "mouse_left",
-  "hold_fade_keys": [
-    "mouse_left"
-  ],
+  "hold_fade_keys": [],
   "randomize_mode": "preset",
-  "randomize_hotkey_enabled": true,
+  "randomize_hotkey_enabled": false,
   "active_preset": "Default",
   "presets": {
     "Default": {
@@ -68,11 +66,7 @@
       "line_layers": [],
       "draggable_mode": false,
       "grid_snap_size": 5,
-      "hold_fade_enabled": false,
-      "hold_fade_key": "mouse_left",
-      "hold_fade_keys": [],
-      "randomize_mode": "preset",
-      "randomize_hotkey_enabled": false
+      "randomize_mode": "preset"
     },
     "Dot": {
       "center_dot": true,
