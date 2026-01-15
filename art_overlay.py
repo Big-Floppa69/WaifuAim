@@ -10,11 +10,12 @@ Persistence lives in app_settings.json under the key "art_overlays".
 from __future__ import annotations
 
 import json
+import ctypes
 import os
 from dataclasses import dataclass
 from typing import Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QApplication, QLabel
 
@@ -69,6 +70,10 @@ class MovableOverlayLabel(QLabel):
             self._drag_active = False
             self._drag_start_global = None
             self._drag_start_xy = None
+            try:
+                self._controller.flush_transform(self._key)
+            except Exception:
+                pass
             event.accept()
 
 
@@ -84,11 +89,33 @@ class ArtOverlayController:
         self._labels: dict[str, MovableOverlayLabel] = {}
         self._global_opacity = 1.0
 
-        # Drag context is enabled while the Art Manager is open.
-        self._drag_context_enabled = False
+        # Monotonic counter to cancel stale deferred renders.
+        self._render_generation = 0
+
+        # Drag context: overlays become interactive only while a configured
+        # hold-to-drag chord is held. Default empty chord disables dragging.
+        self._drag_context_enabled = True
         self._selected_key: Optional[str] = None
         # Optional hold chord, e.g. "alt" or "ctrl+shift". Empty => no hold.
         self._hold_to_drag: list[str] = []
+        self._drag_hold_active = False
+
+        # Poll hold-to-drag state so dragging can work globally.
+        self._hold_poll = QTimer(self._app)
+        self._hold_poll.setInterval(30)
+        self._hold_poll.timeout.connect(self._update_hold_state)
+        self._hold_poll.start()
+
+        # Whether the UI currently expects art overlays to be visible.
+        # Used so checkbox toggles can render immediately when "Show Art" is on.
+        self._visible_requested = False
+
+        # Coalesce repeated drag updates for smoother movement.
+        self._pending_reapply: set[str] = set()
+        self._reapply_timer = QTimer(self._app)
+        self._reapply_timer.setSingleShot(True)
+        self._reapply_timer.setInterval(16)
+        self._reapply_timer.timeout.connect(self._process_pending_reapply)
 
     def enabled_keys(self) -> list[str]:
         data = self._read_settings()
@@ -179,6 +206,76 @@ class ArtOverlayController:
             self._ensure_label(key)
             self._apply_label(key, p)
 
+    def request_render_selected_atomic(
+        self,
+        folder: str = "display_images",
+        *,
+        visible: bool,
+        on_error=None,
+    ) -> None:
+        """Render selection without transient overlap.
+
+        Steps:
+        - Hide all existing overlay labels immediately.
+        - Defer actual rendering to the next Qt tick.
+        - Only show overlays (via set_all_visible) after a successful render.
+
+        This avoids one-frame stacking when selection changes and also prevents
+        the legacy fallback from double-rendering on partial overlay failures.
+        """
+        self._visible_requested = bool(visible)
+        self._render_generation += 1
+        gen = self._render_generation
+
+        # Hide everything first (old selection may still be enabled in settings).
+        for _k, lbl in list(self._labels.items()):
+            try:
+                lbl.hide()
+            except Exception:
+                pass
+
+        def _do_render() -> None:
+            if gen != self._render_generation:
+                return
+            try:
+                self._render_selected_from_folder_hidden(folder)
+            except Exception as e:
+                # Keep overlays hidden on failure.
+                if on_error is not None:
+                    try:
+                        on_error(e)
+                    except Exception:
+                        pass
+                return
+            self.set_all_visible(bool(visible))
+
+        QTimer.singleShot(0, _do_render)
+
+    def _render_selected_from_folder_hidden(self, folder: str = "display_images") -> None:
+        """Like render_selected_from_folder(), but keeps overlays hidden until caller shows them."""
+        folder = str(folder or "").strip() or "display_images"
+        abs_folder = os.path.abspath(folder)
+        if not os.path.exists(abs_folder):
+            return
+
+        def _key_for_path(p: str) -> str:
+            try:
+                root = os.path.dirname(os.path.abspath(__file__))
+                return os.path.relpath(os.path.abspath(p), root).replace("\\", "/")
+            except Exception:
+                return os.path.abspath(p).replace("\\", "/")
+
+        enabled = set(self.enabled_keys())
+        for name in sorted(os.listdir(abs_folder)):
+            p = os.path.join(abs_folder, name)
+            if not os.path.isfile(p):
+                continue
+            key = _key_for_path(p)
+            if key not in enabled:
+                continue
+            self._ensure_label(key)
+            self._apply_label(key, p, visible_override=False)
+
     # --- persistence -----------------------------------------------------------------
 
     def _read_settings(self) -> dict:
@@ -244,6 +341,7 @@ class ArtOverlayController:
             if s:
                 out.append(s)
         self._hold_to_drag = out
+        self._update_hold_state()
 
     def set_drag_context(self, enabled: bool, *, selected_key: Optional[str] = None) -> None:
         self._drag_context_enabled = bool(enabled)
@@ -269,10 +367,10 @@ class ArtOverlayController:
                 except Exception:
                     pass
         else:
-            # Checkbox selects the element but does not show it immediately.
-            # Rendering happens when the user toggles "Show Art".
             try:
                 self._ensure_label(key)
+                if self._visible_requested:
+                    self._apply_label(key, path, visible_override=True)
             except Exception:
                 pass
         self._sync_interactivity()
@@ -292,6 +390,7 @@ class ArtOverlayController:
 
     def set_all_visible(self, visible: bool) -> None:
         visible = bool(visible)
+        self._visible_requested = visible
         for key, lbl in list(self._labels.items()):
             st = self._get_state(key)
             try:
@@ -313,9 +412,47 @@ class ArtOverlayController:
         lbl = self._labels.get(key)
         if lbl is None:
             return
+        # Defer re-apply to avoid re-rendering on every mousemove.
+        try:
+            self._pending_reapply.add(key)
+            if not self._reapply_timer.isActive():
+                self._reapply_timer.start()
+        except Exception:
+            path = getattr(lbl, "_zzz_source_path", None)
+            if isinstance(path, str) and path:
+                self._apply_label(key, path)
+
+    def flush_transform(self, key: str) -> None:
+        """Force-apply any pending transform for `key` immediately."""
+        key = str(key or "").strip()
+        if not key:
+            return
+        try:
+            if key in self._pending_reapply:
+                self._pending_reapply.discard(key)
+        except Exception:
+            pass
+        lbl = self._labels.get(key)
+        if lbl is None:
+            return
         path = getattr(lbl, "_zzz_source_path", None)
         if isinstance(path, str) and path:
             self._apply_label(key, path)
+
+    def _process_pending_reapply(self) -> None:
+        keys = []
+        try:
+            keys = list(self._pending_reapply)
+            self._pending_reapply.clear()
+        except Exception:
+            keys = []
+        for key in keys:
+            lbl = self._labels.get(key)
+            if lbl is None:
+                continue
+            path = getattr(lbl, "_zzz_source_path", None)
+            if isinstance(path, str) and path:
+                self._apply_label(key, path)
 
     def set_opacity(self, key: str, opacity: float) -> None:
         st = self._get_state(key)
@@ -343,30 +480,130 @@ class ArtOverlayController:
     def can_drag(self, key: str) -> bool:
         if not self._drag_context_enabled:
             return False
-        if not self._selected_key or self._selected_key != key:
+        if not self._drag_hold_active:
             return False
+        return bool(self.is_enabled(key))
 
-        # If a hold chord is configured, require it.
+    def _update_hold_state(self) -> None:
+        """Update whether the hold-to-drag chord is currently active."""
+        active = False
+
+        def _vk_from_name(name: str) -> int | None:
+            name = str(name or "").strip().lower()
+            if not name:
+                return None
+            aliases = {
+                "mouse4": "mouse_x1",
+                "mouse5": "mouse_x2",
+                "mouse_4": "mouse_x1",
+                "mouse_5": "mouse_x2",
+                "x1": "mouse_x1",
+                "x2": "mouse_x2",
+                "mb4": "mouse_x1",
+                "mb5": "mouse_x2",
+                "`": "grave",
+                "~": "grave",
+            }
+            name = aliases.get(name, name)
+
+            mapping = {
+                "mouse_left": 0x01,
+                "mouse_right": 0x02,
+                "mouse_middle": 0x04,
+                "mouse_x1": 0x05,
+                "mouse_x2": 0x06,
+                "shift": 0x10,
+                "ctrl": 0x11,
+                "control": 0x11,
+                "alt": 0x12,
+                "windows": 0x5B,
+                "win": 0x5B,
+                "space": 0x20,
+                "tab": 0x09,
+                "esc": 0x1B,
+                "escape": 0x1B,
+                "enter": 0x0D,
+                "return": 0x0D,
+                "backspace": 0x08,
+                "capslock": 0x14,
+                "grave": 0xC0,
+            }
+            if name.startswith("f") and name[1:].isdigit():
+                try:
+                    n = int(name[1:])
+                    if 1 <= n <= 24:
+                        return 0x70 + (n - 1)
+                except Exception:
+                    return None
+            arrows = {"left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28}
+            if name in arrows:
+                return arrows[name]
+            if name in mapping:
+                return mapping[name]
+            if len(name) == 1:
+                ch = name
+                if "a" <= ch <= "z":
+                    return ord(ch.upper())
+                if "0" <= ch <= "9":
+                    return ord(ch)
+            return None
+
+        def _is_pressed_win32(name: str) -> bool:
+            vk = _vk_from_name(name)
+            if vk is None:
+                return False
+            try:
+                state = ctypes.windll.user32.GetAsyncKeyState(int(vk))
+                return bool(state & 0x8000)
+            except Exception:
+                return False
+
+        # Empty by default => dragging disabled.
         if self._hold_to_drag:
             try:
                 import keyboard as kb  # type: ignore
             except Exception:
-                return False
+                kb = None
 
-            # Accept if ANY configured chord is held.
-            for chord in self._hold_to_drag:
-                parts = [p.strip() for p in str(chord).split("+") if p.strip()]
-                if not parts:
-                    continue
-                try:
-                    if all(kb.is_pressed(p) for p in parts):
-                        return True
-                except Exception:
-                    continue
-            return False
+            if kb is not None:
+                for chord in self._hold_to_drag:
+                    raw = str(chord or "").strip().lower()
+                    if not raw:
+                        continue
 
-        # Default: no key required while Art Manager is open.
-        return True
+                    # Common alias normalization.
+                    raw = {"`": "grave", "~": "grave", "mouse4": "mouse_x1", "mouse5": "mouse_x2"}.get(raw, raw)
+
+                    # Mouse buttons aren't supported by the keyboard lib; use Win32 polling.
+                    if "mouse_" in raw:
+                        parts = [p.strip() for p in raw.split("+") if p.strip()]
+                        if parts and all(_is_pressed_win32(p) for p in parts):
+                            active = True
+                            break
+                        continue
+
+                    try:
+                        # keyboard.is_pressed can handle combos like "ctrl+shift" and
+                        # special keys better than manual splitting.
+                        if kb.is_pressed(raw):
+                            active = True
+                            break
+                    except Exception:
+                        # Fallback: try split form.
+                        parts = [p.strip() for p in raw.split("+") if p.strip()]
+                        if not parts:
+                            continue
+                        try:
+                            if all(kb.is_pressed(p) for p in parts):
+                                active = True
+                                break
+                        except Exception:
+                            continue
+
+        if active == self._drag_hold_active:
+            return
+        self._drag_hold_active = active
+        self._sync_interactivity()
 
     # --- internals -------------------------------------------------------------------
 
@@ -395,8 +632,9 @@ class ArtOverlayController:
         lbl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         lbl.setScaledContents(False)
 
+        # Keep hidden until explicitly shown (prevents transient stacking).
         try:
-            lbl.show()
+            lbl.hide()
         except Exception:
             pass
 
@@ -413,7 +651,7 @@ class ArtOverlayController:
         self._labels[key] = lbl
         return lbl
 
-    def _apply_label(self, key: str, path: str) -> None:
+    def _apply_label(self, key: str, path: str, *, visible_override: Optional[bool] = None) -> None:
         lbl = self._labels.get(key)
         if lbl is None:
             return
@@ -436,7 +674,8 @@ class ArtOverlayController:
         set_label_art_from_path(lbl, path, canvas_size=self._canvas_size, transform=dict(st.transform or {}))
 
         try:
-            lbl.setVisible(bool(st.enabled))
+            target_visible = bool(st.enabled) if visible_override is None else bool(visible_override)
+            lbl.setVisible(target_visible)
         except Exception:
             pass
         try:
@@ -456,12 +695,16 @@ class ArtOverlayController:
 
     def _sync_interactivity(self) -> None:
         for key, lbl in list(self._labels.items()):
-            desired_interactive = bool(self._drag_context_enabled and self._selected_key == key)
+            desired_interactive = bool(self._drag_context_enabled and self._drag_hold_active and self.is_enabled(key))
             self._set_label_interactive(lbl, desired_interactive)
 
     def _set_label_interactive(self, lbl: QLabel, interactive: bool) -> None:
         interactive = bool(interactive)
         flags = lbl.windowFlags()
+        try:
+            was_visible = bool(lbl.isVisible())
+        except Exception:
+            was_visible = False
         if interactive:
             if flags & Qt.WindowType.WindowTransparentForInput:
                 flags = flags & ~Qt.WindowType.WindowTransparentForInput
@@ -471,8 +714,11 @@ class ArtOverlayController:
 
         try:
             lbl.setWindowFlags(flags)
-            lbl.show()
-            lbl.raise_()
-            self._crosshair_overlay.raise_()
+            if was_visible:
+                lbl.show()
+                lbl.raise_()
+                self._crosshair_overlay.raise_()
+            else:
+                lbl.hide()
         except Exception:
             pass

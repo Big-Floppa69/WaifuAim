@@ -10,5 +10,11 @@
     ],
     "switch_image": [
         "f2"
+    ],
+    "randomize_crosshair": [
+        "alt"
+    ],
+    "hold_to_drag": [
+        "`"
     ]
 }

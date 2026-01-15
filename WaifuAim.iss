@@ -1,7 +1,7 @@
-; Zenless Zone Zero Crosshair Installer Script
+; WaifuAim Installer Script
 ; Created for Inno Setup
 
-#define MyAppName "Zenless Zone Zero Crosshair"
+#define MyAppName "WaifuAim"
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "FDDC Team (Open Source)"
 #define MyAppURL "https://github.com/Big-Floppa69/ZenlessZoneZeroCrosshair.git"
@@ -23,11 +23,12 @@ AllowNoIcons=yes
 LicenseFile=LICENSE.txt
 InfoBeforeFile=README.md
 OutputDir=Output
-OutputBaseFilename=ZenlessZoneZeroCrosshair_Setup_v{#MyAppVersion}
+OutputBaseFilename=WaifuAim_Setup_v{#MyAppVersion}
 SetupIconFile=astra_yao_tray.ico
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
+ShowLanguageDialog=yes
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
@@ -40,7 +41,7 @@ Name: "ukrainian"; MessagesFile: "compiler:Languages\Ukrainian.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked; OnlyBelowVersion: 6.1
-Name: "startup"; Description: "Run Zenless Zone Zero Crosshair on system startup"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "startup"; Description: "Run WaifuAim on system startup"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "pythoncheck"; Description: "Check for Python installation and dependencies"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
@@ -83,9 +84,9 @@ Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\{#MyAppName}"; Fil
 
 [Registry]
 ; Add registry entries for the application
-Root: HKCU; Subkey: "Software\Zenless Zone Zero Crosshair"; ValueType: string; ValueName: "InstallPath"; ValueData: "{app}"
-Root: HKCU; Subkey: "Software\Zenless Zone Zero Crosshair"; ValueType: string; ValueName: "Version"; ValueData: "{#MyAppVersion}"
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "ZenlessZoneZeroCrosshair"; ValueData: "cmd /c ""cd /d ""{app}"" && python main.py"""; Tasks: startup; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\WaifuAim"; ValueType: string; ValueName: "InstallPath"; ValueData: "{app}"
+Root: HKCU; Subkey: "Software\WaifuAim"; ValueType: string; ValueName: "Version"; ValueData: "{#MyAppVersion}"
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "WaifuAim"; ValueData: "cmd /c ""cd /d ""{app}"" && python main.py"""; Tasks: startup; Flags: uninsdeletevalue
 
 [Run]
 Filename: "{cmd}"; Parameters: "/c ""cd /d ""{app}"" && python --version"""; Flags: runascurrentuser; StatusMsg: "Checking Python installation..."; Tasks: pythoncheck
@@ -97,6 +98,7 @@ Filename: "{cmd}"; Parameters: "/c ""cd /d ""{app}"" && python main.py"""; Flags
 
 [UninstallRun]
 Filename: "{cmd}"; Parameters: "/c ""taskkill /f /im python.exe 2>nul"""; Flags: runascurrentuser
+Filename: "{cmd}"; Parameters: "/c ""reg delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Run"" /v ""WaifuAim"" /f 2>nul"""; Flags: runascurrentuser
 Filename: "{cmd}"; Parameters: "/c ""reg delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Run"" /v ""ZenlessZoneZeroCrosshair"" /f 2>nul"""; Flags: runascurrentuser
 
 [UninstallDelete]
@@ -130,8 +132,9 @@ begin
   
   // Python installation check will be handled in the [Run] section
   
-  // Check if this is an upgrade
-  if RegQueryStringValue(HKCU, 'Software\Zenless Zone Zero Crosshair', 'InstallPath', sUnInstallString) then
+    // Check if this is an upgrade
+    if RegQueryStringValue(HKCU, 'Software\WaifuAim', 'InstallPath', sUnInstallString) or
+      RegQueryStringValue(HKCU, 'Software\Zenless Zone Zero Crosshair', 'InstallPath', sUnInstallString) then
   begin
     sUnInstallString := RemoveBackslashUnlessRoot(sUnInstallString);
     if sUnInstallString = ExpandConstant('{app}') then

@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QPushButton,
     QLabel,
+    QCheckBox,
     QFrame,
     QGraphicsDropShadowEffect,
     QLineEdit,
@@ -19,7 +20,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QColor, QKeyEvent
 from PyQt6.QtCore import Qt, pyqtSignal
-from utils import UI_THEME
+from utils import UI_THEME, tr_lit
 
 
 class HotkeyLineEdit(QLineEdit):
@@ -27,11 +28,13 @@ class HotkeyLineEdit(QLineEdit):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setPlaceholderText("Click and press a key...")
+        self.setPlaceholderText(tr_lit("Click and press a key..."))
         self.current_key = ""
         self.original_key = ""
         self._captured_tokens: set[str] = set()
         self._held_tokens: set[str] = set()
+        self._capturing = False
+        self._ignore_next_mouse = False
         
     def focusInEvent(self, event):
         """Store original key when focused."""
@@ -39,7 +42,9 @@ class HotkeyLineEdit(QLineEdit):
         self.original_key = self.current_key
         self._captured_tokens.clear()
         self._held_tokens.clear()
-        self.setText("Press a key or ESC to cancel...")
+        self._capturing = True
+        self._ignore_next_mouse = True
+        self.setText(tr_lit("Press a key or ESC to cancel..."))
         self.setStyleSheet(self.styleSheet() + "color: rgba(200, 200, 220, 150);")
         
     def focusOutEvent(self, event):
@@ -49,7 +54,54 @@ class HotkeyLineEdit(QLineEdit):
             self.setText(self.current_key)
         self._captured_tokens.clear()
         self._held_tokens.clear()
+        self._capturing = False
+        self._ignore_next_mouse = False
         self.setStyleSheet(self.styleSheet().replace("color: rgba(200, 200, 220, 150);", "color: #E0E0E0;"))
+
+    def mousePressEvent(self, event):  # type: ignore[override]
+        if not self._capturing:
+            super().mousePressEvent(event)
+            return
+
+        # Ignore the first click that focused the input.
+        if self._ignore_next_mouse:
+            self._ignore_next_mouse = False
+            event.accept()
+            return
+
+        btn = event.button()
+        mouse = None
+        if btn == Qt.MouseButton.LeftButton:
+            mouse = "mouse_left"
+        elif btn == Qt.MouseButton.RightButton:
+            mouse = "mouse_right"
+        elif btn == Qt.MouseButton.MiddleButton:
+            mouse = "mouse_middle"
+        elif btn == Qt.MouseButton.XButton1:
+            mouse = "mouse_x1"
+        elif btn == Qt.MouseButton.XButton2:
+            mouse = "mouse_x2"
+        if mouse is None:
+            event.accept()
+            return
+
+        tokens: set[str] = {mouse}
+        mods = event.modifiers()
+        if mods & Qt.KeyboardModifier.ControlModifier:
+            tokens.add("ctrl")
+        if mods & Qt.KeyboardModifier.AltModifier:
+            tokens.add("alt")
+        if mods & Qt.KeyboardModifier.ShiftModifier:
+            tokens.add("shift")
+        if mods & Qt.KeyboardModifier.MetaModifier:
+            tokens.add("windows")
+
+        self.current_key = self._format_tokens(tokens)
+        self.setText(self.current_key)
+        self._captured_tokens.clear()
+        self._held_tokens.clear()
+        self.clearFocus()
+        event.accept()
         
     def keyPressEvent(self, event: QKeyEvent):
         """Capture key press and display it."""
@@ -194,11 +246,23 @@ class HotkeyManagerDialog(QWidget):
             "mirror_vertical": ["f3"],
             "mirror_horizontal": ["f4"],
             "switch_image": ["f2"],
+            # Randomize generated crosshair (optional).
+            "randomize_crosshair": [],
             # Hold this key while dragging the selected art element (optional).
             # Default is empty = no key required while Art Manager is open.
             "hold_to_drag": [],
         }
         self.current_hotkeys = self.load_hotkeys()
+
+        # Crosshair-specific settings (not part of hotkey_config.json)
+        self._crosshair_settings = None
+        try:
+            from standard_crosshair import load_settings_from_disk
+
+            self._crosshair_settings = load_settings_from_disk()
+        except Exception:
+            self._crosshair_settings = None
+
         self.init_ui()
 
     def showEvent(self, event):  # type: ignore[override]
@@ -343,7 +407,7 @@ class HotkeyManagerDialog(QWidget):
         title_bar_layout.setSpacing(5)
         
         # Title
-        title = QLabel("⌨️ Hotkey Manager")
+        title = QLabel(tr_lit("⌨️ Hotkey Manager"))
         title.setStyleSheet(
             "QLabel { color: "
             + UI_THEME["text"]
@@ -392,7 +456,7 @@ class HotkeyManagerDialog(QWidget):
         outer.setSpacing(18)
         
         # Info label
-        info = QLabel("Click on a field and press a key combination to set a hotkey.\nPress ESC to cancel while editing.")
+        info = QLabel(tr_lit("Click on a field and press a key combination to set a hotkey.\nPress ESC to cancel while editing."))
         info.setWordWrap(True)
         info.setStyleSheet(
             "QLabel { color: "
@@ -421,11 +485,15 @@ class HotkeyManagerDialog(QWidget):
         content_layout.addWidget(info)
 
         # Hotkey settings
-        self._add_hotkey_setting(content_layout, "Toggle Visibility", "toggle_visibility")
-        self._add_hotkey_setting(content_layout, "Mirror Vertical", "mirror_vertical")
-        self._add_hotkey_setting(content_layout, "Mirror Horizontal", "mirror_horizontal")
-        self._add_hotkey_setting(content_layout, "Switch Image", "switch_image")
-        self._add_hotkey_setting(content_layout, "Hold to Drag Element", "hold_to_drag")
+        self._add_hotkey_setting(content_layout, tr_lit("Toggle Visibility"), "toggle_visibility")
+        self._add_hotkey_setting(content_layout, tr_lit("Mirror Vertical"), "mirror_vertical")
+        self._add_hotkey_setting(content_layout, tr_lit("Mirror Horizontal"), "mirror_horizontal")
+        self._add_hotkey_setting(content_layout, tr_lit("Switch Image"), "switch_image")
+        self._add_hotkey_setting(content_layout, tr_lit("Randomize Crosshair"), "randomize_crosshair")
+        self._add_hotkey_setting(content_layout, tr_lit("Hold to Drag Element"), "hold_to_drag")
+
+        # Crosshair settings (stored in standard_crosshair_settings.json)
+        self._add_crosshair_fade_setting(content_layout)
 
         content_layout.addStretch(1)
 
@@ -437,18 +505,132 @@ class HotkeyManagerDialog(QWidget):
         buttons_layout.setSpacing(10)
         
         # Reset button
-        reset_btn = self._create_button("Reset to Defaults", role="neutral")
+        reset_btn = self._create_button(tr_lit("Reset to Defaults"), role="neutral")
         reset_btn.clicked.connect(self.reset_to_defaults)
         buttons_layout.addWidget(reset_btn)
         
         # Save button
-        save_btn = self._create_button("Save Hotkeys", role="primary")
+        save_btn = self._create_button(tr_lit("Save Hotkeys"), role="primary")
         save_btn.clicked.connect(self.save_hotkeys)
         buttons_layout.addWidget(save_btn)
         
         outer.addLayout(buttons_layout)
         
         return content_frame
+
+    def _add_crosshair_fade_setting(self, layout) -> None:
+        row = QFrame()
+        row.setStyleSheet(
+            "QFrame { background-color: "
+            + UI_THEME["surface"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 12px; padding: 5px; }"
+        )
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(12, 10, 12, 10)
+
+        label = QLabel(tr_lit("Fade while holding"))
+        label.setStyleSheet(
+            "QLabel { color: "
+            + UI_THEME["text"]
+            + "; font-size: 14px; background: transparent; }"
+        )
+        label.setMinimumWidth(180)
+        row_layout.addWidget(label)
+
+        enabled = False
+        keys: list[str] = []
+        try:
+            s = self._crosshair_settings
+            if s is not None:
+                enabled = bool(getattr(s, "hold_fade_enabled", False))
+                raw = getattr(s, "hold_fade_keys", None)
+                if isinstance(raw, list):
+                    keys = [str(v or "").strip().lower() for v in raw if str(v or "").strip()]
+                if not keys:
+                    key = str(getattr(s, "hold_fade_key", "mouse_left") or "mouse_left").strip().lower()
+                    keys = [key] if key else []
+        except Exception:
+            pass
+
+        self.fade_hold_checkbox = QCheckBox("")
+        self.fade_hold_checkbox.setChecked(enabled)
+        self.fade_hold_checkbox.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.fade_hold_checkbox.setStyleSheet(
+            f"QCheckBox {{ color: {UI_THEME['text']}; font-weight: 600; }}"
+            "QCheckBox::indicator { width: 18px; height: 18px; }"
+        )
+        row_layout.addWidget(self.fade_hold_checkbox)
+
+        # Multi-bindings (+) like other actions.
+        self.fade_hold_inputs: list[HotkeyLineEdit] = []
+
+        inputs_container = QFrame()
+        inputs_container.setStyleSheet("QFrame { background: transparent; }")
+        inputs_layout = QVBoxLayout(inputs_container)
+        inputs_layout.setContentsMargins(0, 0, 0, 0)
+        inputs_layout.setSpacing(8)
+
+        def _mk_edit(initial: str) -> HotkeyLineEdit:
+            e = HotkeyLineEdit()
+            e.current_key = str(initial or "").strip().lower()
+            e.setText(e.current_key)
+            e.setFixedHeight(34)
+            e.setStyleSheet(
+                "QLineEdit { background-color: "
+                + UI_THEME["surface2"]
+                + "; color: #E0E0E0; border: 1px solid "
+                + UI_THEME["border"]
+                + "; border-radius: 10px; padding: 8px 12px; font-size: 13px; }"
+                "QLineEdit:focus { border: 1px solid "
+                + UI_THEME["accent"]
+                + "; }"
+            )
+            self.fade_hold_inputs.append(e)
+            return e
+
+        def _add_row(initial: str = "") -> None:
+            e = _mk_edit(initial)
+            inputs_layout.insertWidget(max(0, inputs_layout.count() - 1), e)
+
+        add_row = QFrame()
+        add_row.setStyleSheet("QFrame { background: transparent; }")
+        add_row_layout = QHBoxLayout(add_row)
+        add_row_layout.setContentsMargins(0, 0, 0, 0)
+        add_row_layout.setSpacing(0)
+
+        add_btn = QPushButton("+")
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_btn.setToolTip(tr_lit("Add another hotkey"))
+        add_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        add_btn.setFixedHeight(34)
+        add_btn.setStyleSheet(
+            "QPushButton { background-color: "
+            + UI_THEME["surface2"]
+            + "; color: "
+            + UI_THEME["text"]
+            + "; border: 1px solid "
+            + UI_THEME["border"]
+            + "; border-radius: 10px; font-size: 18px; font-weight: 900; text-align: center; }"
+            "QPushButton:hover { border: 1px solid "
+            + UI_THEME["border_strong"]
+            + "; }"
+            "QPushButton:pressed { background-color: "
+            + UI_THEME["surface"]
+            + "; }"
+        )
+        add_btn.clicked.connect(lambda: _add_row(""))
+        add_row_layout.addWidget(add_btn, 1)
+
+        inputs_layout.addWidget(add_row)
+        if not keys:
+            keys = [""]
+        for k in keys:
+            _add_row(k)
+
+        row_layout.addWidget(inputs_container, 1)
+        layout.addWidget(row)
     
     def _add_hotkey_setting(self, layout, label_text, key_name):
         """Add a hotkey setting row."""
@@ -502,7 +684,7 @@ class HotkeyManagerDialog(QWidget):
 
         add_btn = QPushButton("+")
         add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        add_btn.setToolTip("Add another hotkey")
+        add_btn.setToolTip(tr_lit("Add another hotkey"))
         add_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         add_btn.setFixedHeight(34)
         add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -749,8 +931,8 @@ class HotkeyManagerDialog(QWidget):
         if len(hotkey_values) != len(set(hotkey_values)):
             QMessageBox.warning(
                 self,
-                "Duplicate Hotkeys",
-                "You have assigned the same hotkey to multiple actions. Please use unique hotkeys."
+                tr_lit("Duplicate Hotkeys"),
+                tr_lit("You have assigned the same hotkey to multiple actions. Please use unique hotkeys.")
             )
             return
         
@@ -758,6 +940,83 @@ class HotkeyManagerDialog(QWidget):
         try:
             with open(self.config_file, 'w') as f:
                 json.dump(new_hotkeys, f, indent=4)
+
+            # Persist crosshair hold-fade settings (best-effort).
+            try:
+                if hasattr(self, "fade_hold_checkbox") and hasattr(self, "fade_hold_inputs"):
+                    enabled = bool(self.fade_hold_checkbox.isChecked())
+                    keys = []
+                    try:
+                        for e in list(self.fade_hold_inputs):
+                            hk = str(getattr(e, "current_key", "") or "").strip().lower()
+                            if hk:
+                                keys.append(hk)
+                    except Exception:
+                        keys = []
+                    if enabled and not keys:
+                        keys = ["mouse_left"]
+
+                    from standard_crosshair import load_settings_from_disk, save_settings_to_disk, StandardCrosshairSettings, _sync_hold_fade_timer_state
+
+                    s = load_settings_from_disk()
+                    if isinstance(s, StandardCrosshairSettings):
+                        s.hold_fade_enabled = enabled
+                        s.hold_fade_keys = list(keys)
+                        s.hold_fade_key = (keys[0] if keys else "mouse_left")
+                        save_settings_to_disk(s)
+
+                        # Update the running label immediately if available.
+                        try:
+                            from hotkeys import _crosshair_label_ref  # type: ignore
+
+                            lbl = _crosshair_label_ref
+                            if lbl is not None:
+                                cur = getattr(lbl, "_standard_crosshair_settings", None)
+                                if isinstance(cur, StandardCrosshairSettings):
+                                    cur.hold_fade_enabled = enabled
+                                    cur.hold_fade_keys = list(keys)
+                                    cur.hold_fade_key = (keys[0] if keys else "mouse_left")
+                                    _sync_hold_fade_timer_state(lbl, cur)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            # If a Randomize hotkey is assigned, enable randomize hotkey setting
+            # for the generated crosshair so it works immediately.
+            try:
+                rk = new_hotkeys.get("randomize_crosshair")
+                has_randomize_hotkey = False
+                if isinstance(rk, list):
+                    has_randomize_hotkey = any(str(x or "").strip() for x in rk)
+                elif isinstance(rk, str):
+                    has_randomize_hotkey = bool(str(rk or "").strip())
+
+                if has_randomize_hotkey:
+                    from standard_crosshair import (
+                        load_settings_from_disk,
+                        save_settings_to_disk,
+                        StandardCrosshairSettings,
+                    )
+
+                    s = load_settings_from_disk()
+                    if isinstance(s, StandardCrosshairSettings):
+                        s.randomize_hotkey_enabled = True
+                        save_settings_to_disk(s)
+
+                        # Update the running label immediately if available.
+                        try:
+                            from hotkeys import _crosshair_label_ref  # type: ignore
+
+                            lbl = _crosshair_label_ref
+                            if lbl is not None:
+                                cur = getattr(lbl, "_standard_crosshair_settings", None)
+                                if isinstance(cur, StandardCrosshairSettings):
+                                    cur.randomize_hotkey_enabled = True
+                        except Exception:
+                            pass
+            except Exception:
+                pass
             
             self.current_hotkeys = new_hotkeys
             self.hotkeys_updated.emit(new_hotkeys)
@@ -768,15 +1027,15 @@ class HotkeyManagerDialog(QWidget):
             
             QMessageBox.information(
                 self,
-                "Hotkeys Saved",
-                "Hotkeys have been saved and applied successfully!"
+                tr_lit("Hotkeys Saved"),
+                tr_lit("Hotkeys have been saved and applied successfully!")
             )
             self.close()
         except Exception as e:
             QMessageBox.critical(
                 self,
-                "Save Error",
-                f"Failed to save hotkeys: {str(e)}"
+                tr_lit("Save Error"),
+                f"{tr_lit('Failed to save hotkeys:')} {str(e)}"
             )
     
     def load_hotkeys(self):

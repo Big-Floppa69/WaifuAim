@@ -1,8 +1,11 @@
 """Standard crosshair dialog that renders a configurable crosshair overlay."""
 import json
+import random
+import ctypes
+import weakref
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
-from typing import List, Optional, Callable
+from typing import List, Optional, Callable, Dict, Set
 from uuid import uuid4
 from copy import deepcopy
 from PyQt6.QtWidgets import (
@@ -37,10 +40,11 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QColor, QPainter, QPixmap, QPainterPath, QPen, QKeySequence, QShortcut, QRegion
 from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal, QTimer
 
-from utils import UI_THEME
+from utils import UI_THEME, tr_lit, apply_language_to_object_tree
 
 CONFIG_PATH = Path(__file__).resolve().with_name("standard_crosshair_settings.json")
 PROFILES_IMPORT_PATH = Path(__file__).resolve().with_name("crosshair_profiles.json")
+HOTKEY_CONFIG_PATH = Path(__file__).resolve().with_name("hotkey_config.json")
 MAX_CUSTOM_COLORS = 16
 ALLOWED_DOT_SHAPES = {"circle", "square", "diamond"}
 ALLOWED_CROSSHAIR_STYLES = {"plus", "x"}
@@ -317,6 +321,8 @@ class StandardCrosshairSettings:
     thickness: int = 4
     gap: int = 10
     outline: int = 1
+    # Overall scale in percent. 100 = normal size, 200 = 2x, 0 = hidden.
+    global_scale: int = 100
     red: int = 0
     green: int = 255
     blue: int = 120
@@ -342,15 +348,103 @@ class StandardCrosshairSettings:
     draggable_mode: bool = False
     grid_snap_size: int = 5
 
+    # Hold-fade: fade crosshair out while a key/button is held.
+    hold_fade_enabled: bool = False
+    hold_fade_key: str = "mouse_left"  # mouse_left/mouse_right/mouse_middle/shift/ctrl/alt/space/a/...
+    hold_fade_keys: list[str] = field(default_factory=list)  # optional multi-bindings (preferred)
+
+    # Randomize behavior
+    randomize_mode: str = "preset"  # preset/absolute
+    randomize_hotkey_enabled: bool = False
+
     # Presets
     active_preset: str = "Default"
     presets: dict[str, dict] = field(default_factory=dict)
+
+
+def _normalize_hotkey_token(token: str) -> str:
+    token = str(token or "").strip().lower()
+    if not token:
+        return ""
+    aliases = {
+        "`": "grave",
+        "~": "grave",
+        "mouse4": "mouse_x1",
+        "mouse5": "mouse_x2",
+        "mouse_4": "mouse_x1",
+        "mouse_5": "mouse_x2",
+        "x1": "mouse_x1",
+        "x2": "mouse_x2",
+        "mb4": "mouse_x1",
+        "mb5": "mouse_x2",
+    }
+    return aliases.get(token, token)
+
+
+def _normalize_hotkey_chord(chord: str) -> str:
+    parts = [p.strip() for p in str(chord or "").split("+") if p.strip()]
+    parts = [_normalize_hotkey_token(p) for p in parts]
+    parts = [p for p in parts if p]
+    if not parts:
+        return ""
+    order = {"ctrl": 0, "alt": 1, "shift": 2, "windows": 3}
+    return "+".join(sorted(set(parts), key=lambda t: (order.get(t, 50), t)))
+
+
+def _load_hotkey_config_from_disk() -> dict:
+    try:
+        with open(HOTKEY_CONFIG_PATH, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_hotkey_config_to_disk(config: dict) -> None:
+    try:
+        with open(HOTKEY_CONFIG_PATH, "w", encoding="utf-8") as fh:
+            json.dump(config, fh, indent=4, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _get_single_hotkey_binding(action: str) -> str:
+    cfg = _load_hotkey_config_from_disk()
+    v = cfg.get(action)
+    if isinstance(v, list) and v:
+        return str(v[0] or "").strip().lower()
+    if isinstance(v, str):
+        return str(v or "").strip().lower()
+    return ""
+
+
+def _get_single_hotkey_binding_normalized(action: str) -> str:
+    return _normalize_hotkey_chord(_get_single_hotkey_binding(action))
+
+
+def _set_single_hotkey_binding(action: str, chord: str) -> None:
+    action = str(action or "").strip()
+    if not action:
+        return
+    chord = _normalize_hotkey_chord(chord)
+    cfg = _load_hotkey_config_from_disk()
+    cfg[action] = [chord] if chord else []
+    _save_hotkey_config_to_disk(cfg)
 
 
 def _settings_to_preset_dict(settings: StandardCrosshairSettings) -> dict:
     data = asdict(settings)
     data.pop("presets", None)
     data.pop("active_preset", None)
+    # Visibility is a global toggle, not a per-preset property.
+    data.pop("visible", None)
+    # These are global toggles/behaviors and should not be saved inside presets.
+    # Keeping them out prevents Randomize/Presets from unexpectedly changing
+    # user hotkeys/hold-fade behavior.
+    data.pop("hold_fade_enabled", None)
+    data.pop("hold_fade_key", None)
+    data.pop("hold_fade_keys", None)
+    data.pop("randomize_hotkey_enabled", None)
     return data
 
 
@@ -358,7 +452,16 @@ def _apply_preset_dict_to_settings(settings: StandardCrosshairSettings, preset: 
     if not isinstance(preset, dict):
         return
     for key, value in preset.items():
-        if key in ("presets", "active_preset"):
+        if key in (
+            "presets",
+            "active_preset",
+            "visible",
+            # Global-only keys: ignore them even if present in older presets.
+            "hold_fade_enabled",
+            "hold_fade_key",
+            "hold_fade_keys",
+            "randomize_hotkey_enabled",
+        ):
             continue
         if hasattr(settings, key):
             setattr(settings, key, value)
@@ -405,6 +508,378 @@ def _sync_fan_timer_state(label: QLabel, settings: StandardCrosshairSettings) ->
         setattr(label, "_standard_crosshair_fan_angle", 0.0)
 
 
+def _vk_from_hold_key(key: str) -> Optional[int]:
+    key = str(key or "").strip().lower()
+    if not key:
+        return None
+
+    mapping = {
+        "mouse_left": 0x01,
+        "mouse_right": 0x02,
+        "mouse_middle": 0x04,
+        "mouse_x1": 0x05,
+        "mouse_x2": 0x06,
+        "shift": 0x10,
+        "ctrl": 0x11,
+        "control": 0x11,
+        "alt": 0x12,
+        "space": 0x20,
+        "tab": 0x09,
+        "escape": 0x1B,
+        "esc": 0x1B,
+        "enter": 0x0D,
+        "return": 0x0D,
+        "capslock": 0x14,
+        "backspace": 0x08,
+        "grave": 0xC0,
+        "`": 0xC0,
+        "~": 0xC0,
+    }
+    if key.startswith("f") and key[1:].isdigit():
+        try:
+            n = int(key[1:])
+            if 1 <= n <= 24:
+                return 0x70 + (n - 1)
+        except Exception:
+            pass
+    arrows = {
+        "left": 0x25,
+        "up": 0x26,
+        "right": 0x27,
+        "down": 0x28,
+    }
+    if key in arrows:
+        return arrows[key]
+    if key in mapping:
+        return mapping[key]
+    if len(key) == 1:
+        ch = key
+        if "a" <= ch <= "z":
+            return ord(ch.upper())
+        if "0" <= ch <= "9":
+            return ord(ch)
+    return None
+
+
+def _is_hold_key_pressed(key: str) -> bool:
+    # Allow chords like "ctrl+alt+f1".
+    parts = [p.strip().lower() for p in str(key or "").split("+") if p.strip()]
+    if not parts:
+        return False
+
+    for part in parts:
+        vk = _vk_from_hold_key(part)
+        if vk is None:
+            return False
+        try:
+            state = ctypes.windll.user32.GetAsyncKeyState(int(vk))
+            if not bool(state & 0x8000):
+                return False
+        except Exception:
+            return False
+    return True
+
+
+class HoldKeyCaptureEdit(QLineEdit):
+    """Read-only field that captures a hold key/chord when clicked.
+
+    - Click to start capture.
+    - Press a key / mouse button to set.
+    - Press Esc to cancel.
+    """
+
+    key_captured = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setReadOnly(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._capturing = False
+        self._previous_text = ""
+        self._captured_keys: List[str] = []
+        self._captured_mods: Set[str] = set()
+        self._finalize_timer = QTimer(self)
+        self._finalize_timer.setSingleShot(True)
+        self._finalize_timer.setInterval(450)
+        self._finalize_timer.timeout.connect(self._finalize_capture)
+
+    def _finalize_capture(self) -> None:
+        if not self._capturing:
+            return
+        keys = [k for k in self._captured_keys if isinstance(k, str) and k.strip()]
+        mods = {m for m in self._captured_mods if isinstance(m, str) and m.strip()}
+
+        if not keys and not mods:
+            return
+
+        order = ["ctrl", "alt", "shift", "windows"]
+        mod_list = [m for m in order if m in mods]
+        chord = "+".join([*mod_list, *keys])
+        chord = _normalize_hotkey_chord(chord)
+
+        self._capturing = False
+        try:
+            self.releaseKeyboard()
+        except Exception:
+            pass
+        self.key_captured.emit(chord)
+
+    def begin_capture(self) -> None:
+        if self._capturing:
+            return
+        self._previous_text = self.text()
+        self._capturing = True
+        self._captured_keys = []
+        self._captured_mods = set()
+        try:
+            self._finalize_timer.stop()
+        except Exception:
+            pass
+        try:
+            self.setText(tr_lit("Press a key… (Esc to cancel)"))
+        except Exception:
+            self.setText("Press a key… (Esc to cancel)")
+        try:
+            self.grabKeyboard()
+        except Exception:
+            pass
+
+    def cancel_capture(self) -> None:
+        if not self._capturing:
+            return
+        self._capturing = False
+        try:
+            self._finalize_timer.stop()
+        except Exception:
+            pass
+        try:
+            self.releaseKeyboard()
+        except Exception:
+            pass
+        self.setText(self._previous_text)
+
+    def mouseReleaseEvent(self, event):  # type: ignore[override]
+        # First click arms capture; the click itself should not be captured.
+        if not self._capturing:
+            self.begin_capture()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mousePressEvent(self, event):  # type: ignore[override]
+        if not self._capturing:
+            super().mousePressEvent(event)
+            return
+
+        mods = []
+        try:
+            m = QApplication.keyboardModifiers()
+            if m & Qt.KeyboardModifier.ControlModifier:
+                mods.append("ctrl")
+            if m & Qt.KeyboardModifier.AltModifier:
+                mods.append("alt")
+            if m & Qt.KeyboardModifier.ShiftModifier:
+                mods.append("shift")
+            if m & Qt.KeyboardModifier.MetaModifier:
+                mods.append("windows")
+        except Exception:
+            pass
+
+        btn = event.button()
+        mouse = None
+        if btn == Qt.MouseButton.LeftButton:
+            mouse = "mouse_left"
+        elif btn == Qt.MouseButton.RightButton:
+            mouse = "mouse_right"
+        elif btn == Qt.MouseButton.MiddleButton:
+            mouse = "mouse_middle"
+        elif btn == Qt.MouseButton.XButton1:
+            mouse = "mouse_x1"
+        elif btn == Qt.MouseButton.XButton2:
+            mouse = "mouse_x2"
+        if mouse is None:
+            return
+
+        # Mouse capture finalizes immediately.
+        chord = "+".join([*mods, mouse]) if mods else mouse
+        chord = _normalize_hotkey_chord(chord)
+        self._capturing = False
+        try:
+            self.releaseKeyboard()
+        except Exception:
+            pass
+        self.key_captured.emit(chord)
+        event.accept()
+
+    def keyPressEvent(self, event):  # type: ignore[override]
+        if not self._capturing:
+            super().keyPressEvent(event)
+            return
+
+        if event.key() in (Qt.Key.Key_Escape,):
+            self.cancel_capture()
+            event.accept()
+            return
+
+        key_name = None
+        k = event.key()
+        if k in (Qt.Key.Key_Control,):
+            key_name = "ctrl"
+        elif k in (Qt.Key.Key_Shift,):
+            key_name = "shift"
+        elif k in (Qt.Key.Key_Alt,):
+            key_name = "alt"
+        elif k in (Qt.Key.Key_Meta,):
+            key_name = "windows"
+        elif k in (Qt.Key.Key_Space,):
+            key_name = "space"
+        elif k in (Qt.Key.Key_Tab,):
+            key_name = "tab"
+        elif k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            key_name = "enter"
+        elif k in (Qt.Key.Key_Backspace,):
+            key_name = "backspace"
+        elif k in (Qt.Key.Key_CapsLock,):
+            key_name = "capslock"
+        elif k in (Qt.Key.Key_QuoteLeft,):
+            key_name = "grave"
+        elif Qt.Key.Key_F1 <= k <= Qt.Key.Key_F24:
+            key_name = f"f{int(k) - int(Qt.Key.Key_F1) + 1}"
+        elif k == Qt.Key.Key_Left:
+            key_name = "left"
+        elif k == Qt.Key.Key_Right:
+            key_name = "right"
+        elif k == Qt.Key.Key_Up:
+            key_name = "up"
+        elif k == Qt.Key.Key_Down:
+            key_name = "down"
+        else:
+            text = (event.text() or "").strip().lower()
+            if len(text) == 1 and ("a" <= text <= "z" or "0" <= text <= "9" or text in ("`", "~")):
+                key_name = "grave" if text in ("`", "~") else text
+
+        if not key_name:
+            return
+
+        # Track modifiers separately so we can support multi-key chords like "q+w".
+        try:
+            m = event.modifiers()
+            if m & Qt.KeyboardModifier.ControlModifier:
+                self._captured_mods.add("ctrl")
+            if m & Qt.KeyboardModifier.AltModifier:
+                self._captured_mods.add("alt")
+            if m & Qt.KeyboardModifier.ShiftModifier:
+                self._captured_mods.add("shift")
+            if m & Qt.KeyboardModifier.MetaModifier:
+                self._captured_mods.add("windows")
+        except Exception:
+            pass
+
+        # Put modifiers into the modifiers set (not the key list).
+        if key_name in ("ctrl", "alt", "shift", "windows"):
+            try:
+                self._captured_mods.add(key_name)
+            except Exception:
+                pass
+
+            # Don't finalize on modifiers alone; wait for a non-modifier key.
+            try:
+                self._finalize_timer.stop()
+            except Exception:
+                pass
+        else:
+            if key_name not in self._captured_keys:
+                self._captured_keys.append(key_name)
+
+            # Finalize shortly after the last keypress.
+            try:
+                self._finalize_timer.start()
+            except Exception:
+                pass
+        event.accept()
+
+    def focusOutEvent(self, event):  # type: ignore[override]
+        if self._capturing:
+            self.cancel_capture()
+        super().focusOutEvent(event)
+
+
+def _ensure_hold_fade_timer(label: QLabel) -> QTimer:
+    timer = getattr(label, "_standard_crosshair_hold_fade_timer", None)
+    if isinstance(timer, QTimer):
+        return timer
+
+    timer = QTimer(label)
+    timer.setInterval(16)
+
+    def on_tick() -> None:
+        settings = getattr(label, "_standard_crosshair_settings", None)
+        if not isinstance(settings, StandardCrosshairSettings):
+            return
+        if not bool(getattr(settings, "hold_fade_enabled", False)):
+            return
+
+        keys = getattr(settings, "hold_fade_keys", None)
+        if isinstance(keys, list) and [k for k in keys if str(k or "").strip()]:
+            held = False
+            for k in keys:
+                kk = str(k or "").strip().lower()
+                if not kk:
+                    continue
+                if _is_hold_key_pressed(kk):
+                    held = True
+                    break
+        else:
+            key = str(getattr(settings, "hold_fade_key", "mouse_left") or "mouse_left")
+            held = _is_hold_key_pressed(key)
+        target = 0.0 if held else 1.0
+
+        try:
+            cur = float(getattr(label, "_standard_crosshair_hold_fade_alpha", 1.0))
+        except Exception:
+            cur = 1.0
+
+        # Smooth approach (~120-200ms feel).
+        speed = 0.18
+        cur = cur + (target - cur) * speed
+        if abs(cur - target) < 0.01:
+            cur = target
+
+        prev = getattr(label, "_standard_crosshair_hold_fade_alpha", None)
+        try:
+            setattr(label, "_standard_crosshair_hold_fade_alpha", float(max(0.0, min(1.0, cur))))
+        except Exception:
+            return
+
+        try:
+            if prev is not None and abs(float(prev) - cur) < 0.002:
+                return
+        except Exception:
+            pass
+
+        extra = float(getattr(label, "_standard_crosshair_fan_angle", 0.0)) if getattr(settings, "fan_enabled", False) else 0.0
+        render_crosshair_on_label(label, settings, extra_rotation=extra)
+
+    timer.timeout.connect(on_tick)
+    setattr(label, "_standard_crosshair_hold_fade_timer", timer)
+    setattr(label, "_standard_crosshair_hold_fade_alpha", 1.0)
+    return timer
+
+
+def _sync_hold_fade_timer_state(label: QLabel, settings: StandardCrosshairSettings) -> None:
+    timer = _ensure_hold_fade_timer(label)
+    if bool(getattr(settings, "hold_fade_enabled", False)):
+        if not timer.isActive():
+            timer.start()
+    else:
+        if timer.isActive():
+            timer.stop()
+        try:
+            setattr(label, "_standard_crosshair_hold_fade_alpha", 1.0)
+        except Exception:
+            pass
+
+
 def load_settings_from_disk() -> StandardCrosshairSettings:
     """Load saved crosshair settings if available."""
     settings = StandardCrosshairSettings()
@@ -417,6 +892,24 @@ def load_settings_from_disk() -> StandardCrosshairSettings:
         except Exception:
             pass
 
+    # Sanitize/migrate hold-fade keys.
+    try:
+        raw_keys = getattr(settings, "hold_fade_keys", None)
+        if isinstance(raw_keys, list):
+            cleaned = [str(k or "").strip().lower() for k in raw_keys if str(k or "").strip()]
+            settings.hold_fade_keys = cleaned
+        else:
+            settings.hold_fade_keys = []
+    except Exception:
+        settings.hold_fade_keys = []
+
+    # Back-compat: ensure single key is normalized.
+    try:
+        single = str(getattr(settings, "hold_fade_key", "mouse_left") or "mouse_left").strip().lower()
+        settings.hold_fade_key = single or "mouse_left"
+    except Exception:
+        settings.hold_fade_key = "mouse_left"
+
     # Seed presets (templates) for older configs or first-run.
     presets_ok = isinstance(getattr(settings, "presets", None), dict) and bool(settings.presets)
     if not presets_ok:
@@ -425,13 +918,14 @@ def load_settings_from_disk() -> StandardCrosshairSettings:
     # Optional: merge presets from external import file.
     _merge_external_presets(settings)
 
-    # Apply active preset before sanitizing.
-    presets = settings.presets if isinstance(settings.presets, dict) else {}
-    active_name = settings.active_preset if isinstance(settings.active_preset, str) else "Default"
-    if presets and active_name in presets and isinstance(presets.get(active_name), dict):
-        _apply_preset_dict_to_settings(settings, presets[active_name])
+    # Do not auto-apply the active preset on startup.
+    # Presets are applied explicitly when selected, and any manual edits should
+    # persist across restarts even if the last-selected preset name remains.
+
+    presets = settings.presets if isinstance(getattr(settings, "presets", None), dict) else {}
+    active_name = settings.active_preset if isinstance(getattr(settings, "active_preset", None), str) else "Default"
     settings.gap = max(0, settings.gap)
-    settings.dot_size = clamp(settings.dot_size, 2, 32)
+    settings.dot_size = clamp(settings.dot_size, 2, 200)
     if settings.dot_shape not in ALLOWED_DOT_SHAPES:
         settings.dot_shape = "circle"
     settings.crosshair_style = settings.crosshair_style if settings.crosshair_style in ALLOWED_CROSSHAIR_STYLES else "plus"
@@ -439,9 +933,17 @@ def load_settings_from_disk() -> StandardCrosshairSettings:
     settings.rotation = settings.rotation % 360
     settings.offset_x = clamp(int(settings.offset_x), -800, 800)
     settings.offset_y = clamp(int(settings.offset_y), -800, 800)
-    settings.line_rounding = clamp(int(settings.line_rounding), 0, 25)
+    try:
+        settings.randomize_mode = str(getattr(settings, "randomize_mode", "preset") or "preset").strip().lower()
+    except Exception:
+        settings.randomize_mode = "preset"
+    if settings.randomize_mode in ("normal", "full"):
+        settings.randomize_mode = "absolute"
+    if settings.randomize_mode not in ("preset", "absolute"):
+        settings.randomize_mode = "preset"
+    settings.line_rounding = clamp(int(settings.line_rounding), 0, 400)
     settings.fan_enabled = bool(settings.fan_enabled)
-    settings.fan_speed = clamp(int(settings.fan_speed), -360, 360)
+    settings.fan_speed = clamp(int(settings.fan_speed), -2000, 2000)
     normalized_colors: List[str] = []
     for value in settings.custom_colors[:MAX_CUSTOM_COLORS]:
         normalized = normalize_hex_color(value)
@@ -702,7 +1204,12 @@ def render_crosshair_on_label(
             height = geo.height()
         else:
             width, height = 1920, 1080
-    pixmap = generate_crosshair_pixmap(width, height, settings, extra_rotation)
+    try:
+        fade_alpha = float(getattr(label, "_standard_crosshair_hold_fade_alpha", 1.0))
+    except Exception:
+        fade_alpha = 1.0
+    fade_alpha = max(0.0, min(1.0, fade_alpha))
+    pixmap = generate_crosshair_pixmap(width, height, settings, extra_rotation, opacity_multiplier=fade_alpha)
     label.setPixmap(pixmap)
 
 
@@ -711,6 +1218,7 @@ def initialize_standard_crosshair(label: QLabel) -> StandardCrosshairSettings:
     settings = load_settings_from_disk()
     _bind_settings_to_label(label, settings)
     _sync_fan_timer_state(label, settings)
+    _sync_hold_fade_timer_state(label, settings)
     render_crosshair_on_label(label, settings)
     label.setVisible(settings.visible)
     if settings.visible:
@@ -718,6 +1226,125 @@ def initialize_standard_crosshair(label: QLabel) -> StandardCrosshairSettings:
     else:
         label.hide()
     return settings
+
+
+def randomize_standard_crosshair(label: QLabel) -> None:
+    """Randomize the standard crosshair bound to a label.
+
+    Intended for global hotkey usage (works even when the editor dialog is closed).
+    """
+    settings = getattr(label, "_standard_crosshair_settings", None)
+    if not isinstance(settings, StandardCrosshairSettings):
+        settings = load_settings_from_disk()
+        _bind_settings_to_label(label, settings)
+
+    if not bool(getattr(settings, "randomize_hotkey_enabled", False)):
+        return
+
+    # If the dialog is open (embedded or floating), delegate to the same handler
+    # as the Randomize button so behavior always matches the UI.
+    try:
+        dlg_ref = getattr(label, "_standard_crosshair_dialog_ref", None)
+        dlg = dlg_ref() if callable(dlg_ref) else None
+        fn = getattr(dlg, "_on_randomize_clicked", None)
+        if callable(fn):
+            fn()
+            return
+    except Exception:
+        pass
+
+    mode = str(getattr(settings, "randomize_mode", "preset") or "preset").strip().lower()
+    if mode in ("normal", "full"):
+        mode = "absolute"
+    if mode not in ("preset", "absolute"):
+        mode = "preset"
+
+    if mode == "preset":
+        # Randomize must not change hotkey/hold-fade toggles.
+        preserve_randomize_hotkey = bool(getattr(settings, "randomize_hotkey_enabled", False))
+        preserve_hold_fade_enabled = bool(getattr(settings, "hold_fade_enabled", False))
+        preserve_hold_fade_key = str(getattr(settings, "hold_fade_key", "mouse_left") or "mouse_left")
+        preserve_hold_fade_keys = getattr(settings, "hold_fade_keys", None)
+        if not isinstance(preserve_hold_fade_keys, list):
+            preserve_hold_fade_keys = []
+
+        presets = settings.presets if isinstance(settings.presets, dict) else {}
+        names = [n for n in presets.keys() if isinstance(n, str) and n.strip()]
+        if not names:
+            return
+
+        # Prefer switching away from the currently active preset so a hotkey press
+        # always results in an observable change when multiple presets exist.
+        cur = str(getattr(settings, "active_preset", "") or "").strip()
+        pool = [n for n in names if n != cur] if len(names) > 1 else list(names)
+        chosen = random.choice(pool or names)
+        preset = presets.get(chosen)
+        if isinstance(preset, dict):
+            settings.active_preset = chosen
+            _apply_preset_dict_to_settings(settings, preset)
+
+        try:
+            settings.randomize_hotkey_enabled = preserve_randomize_hotkey
+            settings.hold_fade_enabled = preserve_hold_fade_enabled
+            settings.hold_fade_key = preserve_hold_fade_key
+            settings.hold_fade_keys = list(preserve_hold_fade_keys)
+        except Exception:
+            pass
+    else:
+        # Absolute random: mixes sane + chaos.
+        chaos = bool(random.random() < 0.35)
+        if not chaos:
+            settings.global_scale = int(random.randint(60, 180))
+            settings.length = int(random.randint(10, 220))
+            settings.thickness = int(random.randint(1, 18))
+            settings.gap = int(random.randint(0, 80))
+            settings.outline = int(random.randint(0, 10))
+            settings.rotation = float(random.randint(0, 359))
+            settings.offset_x = 0
+            settings.offset_y = 0
+            settings.line_rounding = int(random.randint(0, 40))
+
+            settings.fan_enabled = bool(random.random() < 0.25)
+            settings.fan_speed = int(random.randint(-240, 240))
+
+            settings.crosshair_style = random.choice(["plus", "x"])
+            settings.center_dot = bool(random.random() < 0.6)
+            settings.dot_shape = random.choice(["circle", "square", "diamond"])
+            settings.dot_size = int(random.randint(2, 20))
+
+            settings.red = int(random.randint(0, 255))
+            settings.green = int(random.randint(0, 255))
+            settings.blue = int(random.randint(0, 255))
+            settings.alpha = int(random.randint(120, 255))
+        else:
+            settings.global_scale = int(random.randint(25, 1000))
+            settings.length = int(random.randint(5, 1500))
+            settings.thickness = int(random.randint(1, 200))
+            settings.gap = int(random.randint(0, 600))
+            settings.outline = int(random.randint(0, 60))
+            settings.rotation = float(random.randint(0, 359))
+            settings.offset_x = 0
+            settings.offset_y = 0
+            settings.line_rounding = int(random.randint(0, 400))
+
+            settings.fan_enabled = bool(random.getrandbits(1))
+            settings.fan_speed = int(random.randint(-2000, 2000))
+
+            settings.crosshair_style = random.choice(["plus", "x"])
+            settings.center_dot = bool(random.getrandbits(1))
+            settings.dot_shape = random.choice(["circle", "square", "diamond"])
+            settings.dot_size = int(random.randint(2, 200))
+
+            settings.red = int(random.randint(0, 255))
+            settings.green = int(random.randint(0, 255))
+            settings.blue = int(random.randint(0, 255))
+            settings.alpha = int(random.randint(30, 255))
+
+    save_settings_to_disk(settings)
+    _sync_fan_timer_state(label, settings)
+    _sync_hold_fade_timer_state(label, settings)
+    extra = float(getattr(label, "_standard_crosshair_fan_angle", 0.0)) if getattr(settings, "fan_enabled", False) else 0.0
+    render_crosshair_on_label(label, settings, extra_rotation=extra)
 
 
 def save_crosshair_visibility(is_visible: bool) -> None:
@@ -732,6 +1359,7 @@ def generate_crosshair_pixmap(
     height: int,
     settings: StandardCrosshairSettings,
     extra_rotation: float = 0.0,
+    opacity_multiplier: float = 1.0,
 ) -> QPixmap:
     """Create a transparent pixmap containing the configured crosshair."""
     pixmap = QPixmap(max(1, width), max(1, height))
@@ -739,6 +1367,23 @@ def generate_crosshair_pixmap(
 
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    try:
+        opacity_multiplier = float(opacity_multiplier)
+    except Exception:
+        opacity_multiplier = 1.0
+    opacity_multiplier = max(0.0, min(1.0, opacity_multiplier))
+    if opacity_multiplier != 1.0:
+        try:
+            painter.setOpacity(opacity_multiplier)
+        except Exception:
+            pass
+
+    try:
+        scale_factor = float(getattr(settings, "global_scale", 100) or 0) / 100.0
+    except Exception:
+        scale_factor = 1.0
+    scale_factor = max(0.0, min(100.0, scale_factor))
 
     center_x = width / 2 + settings.offset_x
     center_y = height / 2 + settings.offset_y
@@ -767,6 +1412,8 @@ def generate_crosshair_pixmap(
 
         painter.save()
         painter.translate(center_x, center_y)
+        if scale_factor != 1.0:
+            painter.scale(scale_factor, scale_factor)
         painter.rotate(total_angle + total_rotation)
         painter.translate(0.0, perp_offset)
         # Apply component rotation around its own center (at start position)
@@ -798,6 +1445,8 @@ def generate_crosshair_pixmap(
         radius = max(0.1, radius)
         painter.save()
         painter.translate(center_x, center_y)
+        if scale_factor != 1.0:
+            painter.scale(scale_factor, scale_factor)
         painter.rotate(total_angle + total_rotation)
         painter.translate(offset, perp_offset)
         # Circles don't need rotation, but parameter kept for consistency
@@ -822,6 +1471,8 @@ def generate_crosshair_pixmap(
         sides = int(max(3, min(12, sides)))
         painter.save()
         painter.translate(center_x, center_y)
+        if scale_factor != 1.0:
+            painter.scale(scale_factor, scale_factor)
         painter.rotate(total_angle + total_rotation)
         painter.translate(offset, perp_offset)
         if abs(component_rotation) > 0.01:
@@ -857,6 +1508,8 @@ def generate_crosshair_pixmap(
         half = size / 2.0
         painter.save()
         painter.translate(center_x, center_y)
+        if scale_factor != 1.0:
+            painter.scale(scale_factor, scale_factor)
         painter.rotate(total_angle + total_rotation)
         painter.translate(offset, perp_offset)
         if abs(component_rotation) > 0.01:
@@ -886,6 +1539,8 @@ def generate_crosshair_pixmap(
         thickness = max(0.1, float(thickness))
         painter.save()
         painter.translate(center_x, center_y)
+        if scale_factor != 1.0:
+            painter.scale(scale_factor, scale_factor)
         painter.rotate(total_angle + total_rotation)
         painter.translate(offset, perp_offset)
         if abs(component_rotation) > 0.01:
@@ -1249,6 +1904,17 @@ class StandardCrosshairDialog(QWidget):
     ):
         super().__init__(parent)
         self.label = label
+
+        # Allow global hotkeys to find the active dialog and reuse its handlers.
+        try:
+            setattr(self.label, "_standard_crosshair_dialog_ref", weakref.ref(self))
+        except Exception:
+            pass
+        try:
+            self.destroyed.connect(lambda *_: setattr(self.label, "_standard_crosshair_dialog_ref", None))
+        except Exception:
+            pass
+
         self._embedded = bool(embedded)
         self._on_request_close = on_request_close
         self.settings = load_settings_from_disk()
@@ -1280,6 +1946,11 @@ class StandardCrosshairDialog(QWidget):
 
         self._init_ui()
         self._sync_controls_from_settings()
+
+        try:
+            apply_language_to_object_tree(self)
+        except Exception:
+            pass
 
         try:
             self._resize_overlay = _CrosshairResizeOverlay(self, self.label)
@@ -1414,7 +2085,7 @@ class StandardCrosshairDialog(QWidget):
         layout = QHBoxLayout(title_bar)
         layout.setContentsMargins(15, 8, 8, 8)
 
-        title_label = QLabel("🎯 Standard Crosshair")
+        title_label = QLabel("🎯 WaifuAim")
         title_label.setStyleSheet(
             f"""
             QLabel {{
@@ -1441,7 +2112,7 @@ class StandardCrosshairDialog(QWidget):
         layout.setContentsMargins(14 if self._embedded else 12, 10 if self._embedded else 12, 14 if self._embedded else 12, 12 if self._embedded else 14)
         layout.setSpacing(10)
 
-        info = QLabel("Choose or edit a preset for generated crosshairs.")
+        info = QLabel(tr_lit("Choose or edit a preset for generated crosshairs."))
         info.setWordWrap(True)
         info.setStyleSheet(f"color: {UI_THEME['muted']};")
         layout.addWidget(info)
@@ -1467,7 +2138,7 @@ class StandardCrosshairDialog(QWidget):
 
         top_row = QHBoxLayout()
         top_row.setSpacing(8)
-        preset_label = QLabel("Preset")
+        preset_label = QLabel(tr_lit("Preset"))
         preset_label.setStyleSheet(f"color: {UI_THEME['text']}; font-weight: 600; font-size: 11px;")
         top_row.addWidget(preset_label)
 
@@ -1518,10 +2189,10 @@ class StandardCrosshairDialog(QWidget):
             )
             return btn
 
-        self.preset_save_btn = make_small_btn("Save", UI_THEME["accent"])
-        self.preset_save_as_btn = make_small_btn("Save As", UI_THEME["surface2"], fg=UI_THEME["text"])
-        self.preset_delete_btn = make_small_btn("Delete", UI_THEME["danger"])
-        self.preset_reset_btn = make_small_btn("Reset", UI_THEME["surface2"], fg=UI_THEME["text"])
+        self.preset_save_btn = make_small_btn(tr_lit("Save"), UI_THEME["accent"])
+        self.preset_save_as_btn = make_small_btn(tr_lit("Save As"), UI_THEME["surface2"], fg=UI_THEME["text"])
+        self.preset_delete_btn = make_small_btn(tr_lit("Delete"), UI_THEME["danger"])
+        self.preset_reset_btn = make_small_btn(tr_lit("Reset"), UI_THEME["surface2"], fg=UI_THEME["text"])
 
         bottom_row = QHBoxLayout()
         bottom_row.setSpacing(8)
@@ -1533,34 +2204,22 @@ class StandardCrosshairDialog(QWidget):
         presets_outer.addLayout(bottom_row)
         layout.addWidget(presets_frame)
 
-        self.visibility_btn = self._create_primary_button("👁️ Hide Crosshair", UI_THEME["surface2"])
-        self.visibility_btn.setCheckable(True)
-        self.visibility_btn.clicked.connect(self._toggle_visibility)
-        layout.addWidget(self.visibility_btn)
-        self._update_visibility_button()
-
-        layout.addWidget(self._create_accordion_section("Basic", self._create_slider_group(carded=False), expanded=True))
-        layout.addWidget(self._create_accordion_section("Transform", self._create_shape_group(carded=False), expanded=False))
-        layout.addWidget(self._create_accordion_section("Dot", self._create_dot_group(carded=False), expanded=False))
-        layout.addWidget(self._create_accordion_section("Color", self._create_color_group(carded=False), expanded=False))
+        layout.addWidget(self._create_accordion_section(tr_lit("Basic"), self._create_slider_group(carded=False), expanded=False, key="basic"))
+        layout.addWidget(self._create_accordion_section(tr_lit("Transform"), self._create_shape_group(carded=False), expanded=False, key="transform"))
+        layout.addWidget(self._create_accordion_section(tr_lit("Dot"), self._create_dot_group(carded=False), expanded=False, key="dot"))
+        layout.addWidget(self._create_accordion_section(tr_lit("Color"), self._create_color_group(carded=False), expanded=False, key="color"))
 
         # Line Builder: keep as a standalone button card (no accordion wrapper).
         layout.addWidget(self._create_projection_group(carded=False))
-
-        buttons_row = QHBoxLayout()
-        reset_btn = self._create_primary_button("↺ Reset", UI_THEME["surface2"])
-        reset_btn.clicked.connect(self._reset_defaults)
-        buttons_row.addWidget(reset_btn)
-
-        apply_btn = self._create_primary_button("Apply", UI_THEME["accent"])
-        apply_btn.clicked.connect(self._persist_and_render)
-        buttons_row.addWidget(apply_btn)
-
-        layout.addLayout(buttons_row)
         return frame
 
-    def _create_accordion_section(self, title: str, content: QWidget, *, expanded: bool = False) -> QFrame:
+    def _create_accordion_section(self, title: str, content: QWidget, *, expanded: bool = False, key: Optional[str] = None) -> QFrame:
         wrapper = QFrame()
+        try:
+            if key:
+                wrapper.setProperty("accordion_key", str(key))
+        except Exception:
+            pass
         wrapper.setStyleSheet(
             f"""
             QFrame {{
@@ -1575,10 +2234,16 @@ class StandardCrosshairDialog(QWidget):
         outer.setSpacing(8)
 
         header = QToolButton()
-        header.setText(str(title or "Section"))
+        header.setText(tr_lit(str(title or "Section")))
         header.setCheckable(True)
         header.setChecked(bool(expanded))
         header.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+        try:
+            if key:
+                header.setObjectName(f"accordionHeader_{str(key)}")
+                header.setProperty("accordion_key", str(key))
+        except Exception:
+            pass
         header.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         header.setCursor(Qt.CursorShape.PointingHandCursor)
         header.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -1607,6 +2272,93 @@ class StandardCrosshairDialog(QWidget):
         outer.addWidget(header)
         outer.addWidget(content)
         return wrapper
+
+    def get_accordion_state(self) -> Dict[str, bool]:
+        """Return expanded/collapsed state for known accordion sections.
+
+        Keys are stable (language-independent) strings like "basic".
+        """
+        out: Dict[str, bool] = {}
+        try:
+            wrappers = self.findChildren(QFrame)
+        except Exception:
+            wrappers = []
+        for w in wrappers:
+            try:
+                key = w.property("accordion_key")
+            except Exception:
+                key = None
+            if not isinstance(key, str) or not key:
+                continue
+            header = None
+            try:
+                headers = w.findChildren(QToolButton)
+                header = headers[0] if headers else None
+            except Exception:
+                header = None
+            if header is None:
+                continue
+            try:
+                out[key] = bool(header.isChecked())
+            except Exception:
+                continue
+        return out
+
+    def set_accordion_state(self, state: Optional[Dict[str, bool]]) -> None:
+        """Restore expanded/collapsed state saved by get_accordion_state()."""
+        if not isinstance(state, dict) or not state:
+            return
+        try:
+            wrappers = self.findChildren(QFrame)
+        except Exception:
+            wrappers = []
+        for w in wrappers:
+            try:
+                key = w.property("accordion_key")
+            except Exception:
+                key = None
+            if not isinstance(key, str) or key not in state:
+                continue
+            desired = bool(state.get(key, False))
+
+            header = None
+            try:
+                headers = w.findChildren(QToolButton)
+                header = headers[0] if headers else None
+            except Exception:
+                header = None
+            if header is None:
+                continue
+
+            # Find the content widget (second item in the wrapper's layout).
+            content = None
+            try:
+                lay = w.layout()
+                if lay is not None and lay.count() >= 2:
+                    content = lay.itemAt(1).widget()
+            except Exception:
+                content = None
+
+            try:
+                header.blockSignals(True)
+                header.setChecked(desired)
+            except Exception:
+                pass
+            finally:
+                try:
+                    header.blockSignals(False)
+                except Exception:
+                    pass
+
+            try:
+                if content is not None:
+                    content.setVisible(desired)
+            except Exception:
+                pass
+            try:
+                header.setArrowType(Qt.ArrowType.DownArrow if desired else Qt.ArrowType.RightArrow)
+            except Exception:
+                pass
 
     def _refresh_presets_ui(self) -> None:
         if not hasattr(self, "preset_combo"):
@@ -1677,20 +2429,27 @@ class StandardCrosshairDialog(QWidget):
         self.presets_changed.emit()
 
     def _reset_presets(self) -> None:
-        """Reset presets and settings to factory defaults."""
+        """Reset only the currently-selected preset to factory defaults."""
+        if not isinstance(self.settings.presets, dict) or not self.settings.presets:
+            return
+        active = self.settings.active_preset if isinstance(self.settings.active_preset, str) else "Default"
+        if not active:
+            active = "Default"
+
         # Preserve current visibility so Reset doesn't unexpectedly hide/show.
         current_visible = bool(getattr(self.settings, "visible", True))
-        defaults = StandardCrosshairSettings()
-        defaults.visible = current_visible
-        _seed_builtin_presets(defaults)
-        defaults.active_preset = "Default"
 
-        try:
-            for key, value in asdict(defaults).items():
-                if hasattr(self.settings, key):
-                    setattr(self.settings, key, value)
-        except Exception:
-            self.settings = defaults
+        defaults = StandardCrosshairSettings()
+        _seed_builtin_presets(defaults)
+        baseline = defaults.presets.get(active)
+        if not isinstance(baseline, dict):
+            baseline = defaults.presets.get("Default", {})
+
+        _apply_preset_dict_to_settings(self.settings, baseline)
+        self.settings.visible = current_visible
+
+        # Overwrite only the active preset.
+        self.settings.presets[active] = _settings_to_preset_dict(self.settings)
 
         self._refresh_presets_ui()
         self._sync_controls_from_settings()
@@ -1715,6 +2474,16 @@ class StandardCrosshairDialog(QWidget):
         layout.setContentsMargins(0 if not carded else 8, 0 if not carded else 8, 0 if not carded else 8, 0 if not carded else 8)
         layout.setSpacing(8)
 
+        self.global_scale_slider = self._add_slider(
+            layout,
+            "Size",
+            0,
+            10000,
+            int(getattr(self.settings, "global_scale", 100) or 100),
+            self._on_global_scale,
+            suffix="%",
+            step=1,
+        )
         self.length_slider = self._add_slider(layout, "Length", 5, 80, self.settings.length, self._on_length)
         self.thickness_slider = self._add_slider(layout, "Thickness", 1, 15, self.settings.thickness, self._on_thickness)
         self.gap_slider = self._add_slider(layout, "Gap", 0, 40, self.settings.gap, self._on_gap)
@@ -1740,7 +2509,7 @@ class StandardCrosshairDialog(QWidget):
         layout.setSpacing(8)
 
         style_row = QHBoxLayout()
-        style_row.addWidget(self._section_label("Crosshair Style"))
+        style_row.addWidget(self._section_label(tr_lit("Crosshair Style")))
         self.plus_style_btn = self._create_choice_button("＋ Plus", self.settings.crosshair_style == "plus")
         self.plus_style_btn.setProperty("style_key", "plus")
         self.x_style_btn = self._create_choice_button("✕ X", self.settings.crosshair_style == "x")
@@ -1765,23 +2534,11 @@ class StandardCrosshairDialog(QWidget):
         self.line_rounding_slider = self._add_slider(layout, "Line Corner Radius", 0, 20, self.settings.line_rounding, self._on_line_rounding, suffix="px")
 
         fan_row = QHBoxLayout()
-        self.fan_checkbox = QCheckBox("Enable Fan Animation")
+        self.fan_checkbox = QCheckBox(tr_lit("Enable Fan Animation"))
         self.fan_checkbox.setChecked(self.settings.fan_enabled)
         self.fan_checkbox.setStyleSheet(
-            f"""
-            QCheckBox {{ color: {UI_THEME['text']}; font-weight: 600; }}
-            QCheckBox::indicator {{ width: 18px; height: 18px; }}
-            QCheckBox::indicator:unchecked {{
-                border: 2px solid {UI_THEME['border_strong']};
-                border-radius: 5px;
-                background-color: transparent;
-            }}
-            QCheckBox::indicator:checked {{
-                background-color: {UI_THEME['accent']};
-                border: 2px solid {UI_THEME['accent']};
-                border-radius: 5px;
-            }}
-        """
+            f"QCheckBox {{ color: {UI_THEME['text']}; font-weight: 600; }}"
+            "QCheckBox::indicator { width: 18px; height: 18px; }"
         )
         self.fan_checkbox.toggled.connect(self._on_fan_toggle)
         fan_row.addWidget(self.fan_checkbox)
@@ -1798,6 +2555,84 @@ class StandardCrosshairDialog(QWidget):
             suffix="°/s",
             step=1,
         )
+
+        # Hold-fade: fade crosshair while a key/button is held.
+        fade_row = QHBoxLayout()
+        self.hold_fade_checkbox = QCheckBox(tr_lit("Fade while holding"))
+        self.hold_fade_checkbox.setChecked(bool(getattr(self.settings, "hold_fade_enabled", False)))
+        self.hold_fade_checkbox.setStyleSheet(self.fan_checkbox.styleSheet())
+        self.hold_fade_checkbox.toggled.connect(self._on_hold_fade_toggle)
+        fade_row.addWidget(self.hold_fade_checkbox)
+
+        selector_style = (
+            f"QComboBox {{ background-color: {UI_THEME['surface2']}; color: {UI_THEME['text']}; border: 1px solid {UI_THEME['border']}; border-radius: 10px; padding: 4px 10px; font-size: 11px; font-weight: 800; }}"
+            f"QComboBox:hover {{ border: 1px solid {UI_THEME['border_strong']}; }}"
+            f"QComboBox::drop-down {{ border: none; width: 18px; }}"
+            f"QComboBox QAbstractItemView {{ background-color: {UI_THEME['surface']}; color: {UI_THEME['text']}; border: 1px solid {UI_THEME['border']}; selection-background-color: {UI_THEME['accent']}; }}"
+        )
+
+        self.hold_fade_key_edit = HoldKeyCaptureEdit()
+        self.hold_fade_key_edit.setFixedHeight(26)
+        self.hold_fade_key_edit.setStyleSheet(
+            f"QLineEdit {{ background-color: {UI_THEME['surface2']}; color: {UI_THEME['text']}; border: 1px solid {UI_THEME['border']}; border-radius: 10px; padding: 4px 10px; font-size: 11px; font-weight: 800; }}"
+            f"QLineEdit:hover {{ border: 1px solid {UI_THEME['border_strong']}; }}"
+        )
+        self.hold_fade_key_edit.setToolTip(tr_lit("Click, then press a key or mouse button"))
+        self.hold_fade_key_edit.setText(str(getattr(self.settings, "hold_fade_key", "mouse_left") or "mouse_left"))
+        self.hold_fade_key_edit.key_captured.connect(self._on_hold_fade_key_captured)
+        fade_row.addStretch()
+        fade_row.addWidget(self.hold_fade_key_edit)
+        layout.addLayout(fade_row)
+
+        # Randomize
+        rand_row = QHBoxLayout()
+        rand_row.addWidget(self._section_label(tr_lit("Randomize")))
+        self.randomize_mode_combo = QComboBox()
+        self.randomize_mode_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.randomize_mode_combo.setStyleSheet(selector_style)
+        self.randomize_mode_combo.addItem(tr_lit("From Presets"), "preset")
+        self.randomize_mode_combo.addItem(tr_lit("Absolute Random"), "absolute")
+        try:
+            cur_mode = str(getattr(self.settings, "randomize_mode", "preset") or "preset").strip().lower()
+        except Exception:
+            cur_mode = "preset"
+        if cur_mode in ("normal", "full"):
+            cur_mode = "absolute"
+        idx = self.randomize_mode_combo.findData(cur_mode)
+        if idx >= 0:
+            self.randomize_mode_combo.setCurrentIndex(idx)
+        self.randomize_mode_combo.currentIndexChanged.connect(self._on_randomize_mode_changed)
+        rand_row.addWidget(self.randomize_mode_combo, 1)
+        self.randomize_btn = QPushButton(tr_lit("Randomize"))
+        self.randomize_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.randomize_btn.setFixedHeight(26)
+        self.randomize_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {UI_THEME['surface2']}; color: {UI_THEME['text']}; border: 1px solid {UI_THEME['border']}; border-radius: 10px; padding: 3px 10px; font-weight: 700; }}"
+            f"QPushButton:hover {{ border: 1px solid {UI_THEME['border_strong']}; }}"
+        )
+        self.randomize_btn.clicked.connect(self._on_randomize_clicked)
+        rand_row.addWidget(self.randomize_btn)
+        layout.addLayout(rand_row)
+
+        rand_hotkey_row = QHBoxLayout()
+        self.randomize_hotkey_checkbox = QCheckBox(tr_lit("Enable randomize hotkey"))
+        self.randomize_hotkey_checkbox.setChecked(bool(getattr(self.settings, "randomize_hotkey_enabled", False)))
+        self.randomize_hotkey_checkbox.setStyleSheet(self.fan_checkbox.styleSheet())
+        self.randomize_hotkey_checkbox.toggled.connect(self._on_randomize_hotkey_toggle)
+        rand_hotkey_row.addWidget(self.randomize_hotkey_checkbox)
+
+        self.randomize_hotkey_key_edit = HoldKeyCaptureEdit()
+        self.randomize_hotkey_key_edit.setFixedHeight(26)
+        self.randomize_hotkey_key_edit.setStyleSheet(
+            f"QLineEdit {{ background-color: {UI_THEME['surface2']}; color: {UI_THEME['text']}; border: 1px solid {UI_THEME['border']}; border-radius: 10px; padding: 4px 10px; font-size: 11px; font-weight: 800; }}"
+            f"QLineEdit:hover {{ border: 1px solid {UI_THEME['border_strong']}; }}"
+        )
+        self.randomize_hotkey_key_edit.setToolTip(tr_lit("Click, then press a key or mouse button"))
+        self.randomize_hotkey_key_edit.setText(_get_single_hotkey_binding_normalized("randomize_crosshair"))
+        self.randomize_hotkey_key_edit.key_captured.connect(self._on_randomize_hotkey_key_captured)
+        rand_hotkey_row.addStretch()
+        rand_hotkey_row.addWidget(self.randomize_hotkey_key_edit)
+        layout.addLayout(rand_hotkey_row)
 
         return frame
 
@@ -1819,34 +2654,19 @@ class StandardCrosshairDialog(QWidget):
         layout.setContentsMargins(0 if not carded else 8, 0 if not carded else 8, 0 if not carded else 8, 0 if not carded else 8)
         layout.setSpacing(8)
 
-        self.center_dot_check = QCheckBox("Add Center Dot")
+        self.center_dot_check = QCheckBox(tr_lit("Add Center Dot"))
         self.center_dot_check.setStyleSheet(
-            f"""
-            QCheckBox {{ color: {UI_THEME['text']}; font-weight: 600; }}
-            QCheckBox::indicator {{
-                width: 18px;
-                height: 18px;
-            }}
-            QCheckBox::indicator:unchecked {{
-                border: 2px solid {UI_THEME['border_strong']};
-                border-radius: 5px;
-                background-color: transparent;
-            }}
-            QCheckBox::indicator:checked {{
-                background-color: {UI_THEME['accent']};
-                border: 2px solid {UI_THEME['accent']};
-                border-radius: 5px;
-            }}
-        """
+            f"QCheckBox {{ color: {UI_THEME['text']}; font-weight: 600; }}"
+            "QCheckBox::indicator { width: 18px; height: 18px; }"
         )
         self.center_dot_check.toggled.connect(self._on_center_dot_toggled)
         layout.addWidget(self.center_dot_check)
 
         shape_row = QHBoxLayout()
-        shape_row.addWidget(self._section_label("Dot Shape"))
-        self.circle_btn = self._create_choice_button("◯ Circle", self.settings.dot_shape == "circle")
-        self.square_btn = self._create_choice_button("▢ Square", self.settings.dot_shape == "square")
-        self.diamond_btn = self._create_choice_button("◇ Diamond", self.settings.dot_shape == "diamond")
+        shape_row.addWidget(self._section_label(tr_lit("Dot Shape")))
+        self.circle_btn = self._create_choice_button(tr_lit("◯ Circle"), self.settings.dot_shape == "circle")
+        self.square_btn = self._create_choice_button(tr_lit("▢ Square"), self.settings.dot_shape == "square")
+        self.diamond_btn = self._create_choice_button(tr_lit("◇ Diamond"), self.settings.dot_shape == "diamond")
         self.circle_btn.clicked.connect(lambda: self._set_dot_shape("circle"))
         self.square_btn.clicked.connect(lambda: self._set_dot_shape("square"))
         self.diamond_btn.clicked.connect(lambda: self._set_dot_shape("diamond"))
@@ -1856,7 +2676,7 @@ class StandardCrosshairDialog(QWidget):
         layout.addLayout(shape_row)
 
         self.dot_size_slider = self._add_slider(
-            layout, "Dot Size", 2, 32, self.settings.dot_size, self._on_dot_size, suffix="px"
+            layout, tr_lit("Dot Size"), 2, 200, self.settings.dot_size, self._on_dot_size, suffix="px"
         )
 
         return frame
@@ -1893,7 +2713,7 @@ class StandardCrosshairDialog(QWidget):
         builder_row = QHBoxLayout(builder_card)
         builder_row.setSpacing(0)
         builder_row.setContentsMargins(8, 6, 8, 6)
-        builder_btn = QPushButton("Open Line Builder")
+        builder_btn = QPushButton(tr_lit("Open Line Builder"))
         builder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         builder_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         builder_btn.setStyleSheet(
@@ -1939,10 +2759,10 @@ class StandardCrosshairDialog(QWidget):
         self.color_preview.setStyleSheet(self._color_preview_style())
         layout.addWidget(self.color_preview)
 
-        self.red_slider = self._add_slider(layout, "Red", 0, 255, self.settings.red, self._on_red, suffix="")
-        self.green_slider = self._add_slider(layout, "Green", 0, 255, self.settings.green, self._on_green, suffix="")
-        self.blue_slider = self._add_slider(layout, "Blue", 0, 255, self.settings.blue, self._on_blue, suffix="")
-        self.alpha_slider = self._add_slider(layout, "Alpha", 25, 255, self.settings.alpha, self._on_alpha, suffix="")
+        self.red_slider = self._add_slider(layout, tr_lit("Red"), 0, 255, self.settings.red, self._on_red, suffix="")
+        self.green_slider = self._add_slider(layout, tr_lit("Green"), 0, 255, self.settings.green, self._on_green, suffix="")
+        self.blue_slider = self._add_slider(layout, tr_lit("Blue"), 0, 255, self.settings.blue, self._on_blue, suffix="")
+        self.alpha_slider = self._add_slider(layout, tr_lit("Alpha"), 25, 255, self.settings.alpha, self._on_alpha, suffix="")
 
         picker_layout = QHBoxLayout()
         picker_layout.setSpacing(8)
@@ -1968,7 +2788,7 @@ class StandardCrosshairDialog(QWidget):
         self.hex_input.editingFinished.connect(self._on_hex_input_finished)
         picker_layout.addWidget(self.hex_input)
 
-        palette_btn = QPushButton("🎨 Palette")
+        palette_btn = QPushButton(tr_lit("🎨 Palette"))
         palette_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         palette_btn.setStyleSheet(
             f"""
@@ -2014,7 +2834,7 @@ class StandardCrosshairDialog(QWidget):
     ) -> QSlider:
         row = QVBoxLayout()
         row.setSpacing(2)
-        text = QLabel(label_text)
+        text = QLabel(tr_lit(label_text))
         text.setStyleSheet(f"color: {UI_THEME['muted']}; font-size: 11px; font-weight: 650;")
         row.addWidget(text)
 
@@ -2199,7 +3019,7 @@ class StandardCrosshairDialog(QWidget):
         return btn
 
     def _create_primary_button(self, text: str, color: str) -> QPushButton:
-        btn = QPushButton(text)
+        btn = QPushButton(tr_lit(text))
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setStyleSheet(
             f"""
@@ -2248,6 +3068,7 @@ class StandardCrosshairDialog(QWidget):
             self.center_dot_check.blockSignals(False)
 
         for slider, value in (
+            (getattr(self, "global_scale_slider", None), int(getattr(self.settings, "global_scale", 100) or 100)),
             (getattr(self, "length_slider", None), self.settings.length),
             (getattr(self, "thickness_slider", None), self.settings.thickness),
             (getattr(self, "gap_slider", None), self.settings.gap),
@@ -2287,20 +3108,51 @@ class StandardCrosshairDialog(QWidget):
             self.fan_checkbox.setChecked(self.settings.fan_enabled)
             self.fan_checkbox.blockSignals(False)
 
+        if hasattr(self, "hold_fade_checkbox"):
+            self.hold_fade_checkbox.blockSignals(True)
+            self.hold_fade_checkbox.setChecked(bool(getattr(self.settings, "hold_fade_enabled", False)))
+            self.hold_fade_checkbox.blockSignals(False)
+        if hasattr(self, "hold_fade_key_edit"):
+            key = str(getattr(self.settings, "hold_fade_key", "mouse_left") or "mouse_left")
+            try:
+                self.hold_fade_key_edit.blockSignals(True)
+                self.hold_fade_key_edit.setText(key)
+                self.hold_fade_key_edit.blockSignals(False)
+            except Exception:
+                pass
+
+        if hasattr(self, "randomize_mode_combo"):
+            mode = str(getattr(self.settings, "randomize_mode", "preset") or "preset").strip().lower()
+            idx = self.randomize_mode_combo.findData(mode)
+            self.randomize_mode_combo.blockSignals(True)
+            if idx >= 0:
+                self.randomize_mode_combo.setCurrentIndex(idx)
+            self.randomize_mode_combo.blockSignals(False)
+        if hasattr(self, "randomize_hotkey_checkbox"):
+            self.randomize_hotkey_checkbox.blockSignals(True)
+            self.randomize_hotkey_checkbox.setChecked(bool(getattr(self.settings, "randomize_hotkey_enabled", False)))
+            self.randomize_hotkey_checkbox.blockSignals(False)
+
         self.label.setVisible(self.settings.visible)
         if self.settings.visible:
             self.label.raise_()
         self._update_visibility_button()
         _bind_settings_to_label(self.label, self.settings)
         _sync_fan_timer_state(self.label, self.settings)
+        _sync_hold_fade_timer_state(self.label, self.settings)
         self._render_current_state()
 
     def _render_current_state(self) -> None:
         self._sync_linked_standard_base_components()
+        _sync_hold_fade_timer_state(self.label, self.settings)
         extra_rotation = float(getattr(self.label, "_standard_crosshair_fan_angle", 0.0)) if self.settings.fan_enabled else 0.0
         render_crosshair_on_label(self.label, self.settings, extra_rotation=extra_rotation)
 
     def _persist_and_render(self) -> None:
+        # Keep runtime label state in sync so global hotkeys read updated settings.
+        _bind_settings_to_label(self.label, self.settings)
+        _sync_fan_timer_state(self.label, self.settings)
+        _sync_hold_fade_timer_state(self.label, self.settings)
         self._render_current_state()
         save_settings_to_disk(self.settings)
 
@@ -2348,6 +3200,8 @@ class StandardCrosshairDialog(QWidget):
                 base["draggable"] = True
 
     def _toggle_visibility(self) -> None:
+        if not hasattr(self, "visibility_btn"):
+            return
         hidden = self.visibility_btn.isChecked()
         self.label.setVisible(not hidden)
         if self.label.isVisible():
@@ -2358,6 +3212,8 @@ class StandardCrosshairDialog(QWidget):
         self.visibility_changed.emit(self.label.isVisible())
 
     def _update_visibility_button(self) -> None:
+        if not hasattr(self, "visibility_btn"):
+            return
         hidden = not self.label.isVisible()
         self.visibility_btn.blockSignals(True)
         self.visibility_btn.setChecked(hidden)
@@ -2444,6 +3300,29 @@ class StandardCrosshairDialog(QWidget):
         self.settings.visible = self.label.isVisible()
         self._update_visibility_button()
         save_settings_to_disk(self.settings)
+        self.sync_hotkeys_from_config()
+
+    def sync_hotkeys_from_config(self) -> None:
+        """Refresh hotkey text fields from hotkey_config.json."""
+        try:
+            edit = getattr(self, "randomize_hotkey_key_edit", None)
+            if isinstance(edit, QLineEdit):
+                edit.setText(_get_single_hotkey_binding_normalized("randomize_crosshair"))
+        except Exception:
+            pass
+
+        # If something external updated the setting, keep the checkbox in sync.
+        try:
+            cb = getattr(self, "randomize_hotkey_checkbox", None)
+            if isinstance(cb, QCheckBox):
+                cb.blockSignals(True)
+                cb.setChecked(bool(getattr(self.settings, "randomize_hotkey_enabled", False)))
+                cb.blockSignals(False)
+        except Exception:
+            try:
+                cb.blockSignals(False)  # type: ignore[name-defined]
+            except Exception:
+                pass
 
     def _on_center_dot_toggled(self, checked: bool) -> None:
         self.settings.center_dot = checked
@@ -2451,6 +3330,10 @@ class StandardCrosshairDialog(QWidget):
 
     def _on_length(self, value: int) -> None:
         self.settings.length = value
+        self._persist_and_render()
+
+    def _on_global_scale(self, value: int) -> None:
+        self.settings.global_scale = max(0, min(10000, int(value)))
         self._persist_and_render()
 
     def _on_thickness(self, value: int) -> None:
@@ -2489,6 +3372,196 @@ class StandardCrosshairDialog(QWidget):
     def _on_fan_speed(self, value: int) -> None:
         self.settings.fan_speed = max(-360, min(360, value))
         _sync_fan_timer_state(self.label, self.settings)
+        self._persist_and_render()
+
+    def _on_hold_fade_toggle(self, enabled: bool) -> None:
+        self.settings.hold_fade_enabled = bool(enabled)
+        _sync_hold_fade_timer_state(self.label, self.settings)
+        self._persist_and_render()
+
+    def _on_hold_fade_key_changed(self, _index: int) -> None:
+        combo = getattr(self, "hold_fade_key_combo", None)
+        if combo is None:
+            return
+        key = combo.currentData()
+        self.settings.hold_fade_key = str(key or "mouse_left")
+        _sync_hold_fade_timer_state(self.label, self.settings)
+        self._persist_and_render()
+
+    def _on_hold_fade_key_captured(self, key: str) -> None:
+        key = str(key or "").strip().lower()
+        if not key:
+            return
+        self.settings.hold_fade_key = key
+        edit = getattr(self, "hold_fade_key_edit", None)
+        if isinstance(edit, QLineEdit):
+            try:
+                edit.setText(key)
+            except Exception:
+                pass
+        _sync_hold_fade_timer_state(self.label, self.settings)
+        self._persist_and_render()
+
+    def _on_randomize_mode_changed(self, _index: int) -> None:
+        combo = getattr(self, "randomize_mode_combo", None)
+        if combo is None:
+            return
+        mode = str(combo.currentData() or "preset").strip().lower()
+        if mode not in ("preset", "absolute"):
+            mode = "preset"
+        self.settings.randomize_mode = mode
+        save_settings_to_disk(self.settings)
+
+    def _on_randomize_hotkey_toggle(self, enabled: bool) -> None:
+        try:
+            self.settings.randomize_hotkey_enabled = bool(enabled)
+        except Exception:
+            return
+        self._persist_and_render()
+
+    def _on_randomize_hotkey_key_captured(self, key: str) -> None:
+        key = str(key or "").strip().lower()
+        if not key:
+            return
+        _set_single_hotkey_binding("randomize_crosshair", key)
+        edit = getattr(self, "randomize_hotkey_key_edit", None)
+        if isinstance(edit, QLineEdit):
+            try:
+                edit.setText(key)
+            except Exception:
+                pass
+        try:
+            from hotkeys import reload_hotkeys
+
+            reload_hotkeys()
+        except Exception:
+            pass
+
+    def _on_randomize_clicked(self) -> None:
+        mode = None
+        combo = getattr(self, "randomize_mode_combo", None)
+        if combo is not None:
+            mode = combo.currentData()
+        mode = str(mode or "preset").strip().lower()
+
+        if mode in ("normal", "full"):
+            mode = "absolute"
+
+        try:
+            self.settings.randomize_mode = mode if mode in ("preset", "absolute") else "preset"
+        except Exception:
+            pass
+
+        if mode == "preset":
+            presets = self.settings.presets if isinstance(self.settings.presets, dict) else {}
+            names = [n for n in presets.keys() if isinstance(n, str) and n.strip()]
+            if not names:
+                return
+
+            # Prefer switching away from the currently active preset so clicking
+            # Randomize always changes something when multiple presets exist.
+            cur = str(getattr(self.settings, "active_preset", "") or "").strip()
+            pool = [n for n in names if n != cur] if len(names) > 1 else list(names)
+            chosen = random.choice(pool or names)
+
+            # Randomize must not change hotkey/hold-fade toggles.
+            preserve_randomize_hotkey = bool(getattr(self.settings, "randomize_hotkey_enabled", False))
+            preserve_hold_fade_enabled = bool(getattr(self.settings, "hold_fade_enabled", False))
+            preserve_hold_fade_key = str(getattr(self.settings, "hold_fade_key", "mouse_left") or "mouse_left")
+            preserve_hold_fade_keys = getattr(self.settings, "hold_fade_keys", None)
+            if not isinstance(preserve_hold_fade_keys, list):
+                preserve_hold_fade_keys = []
+
+            self._on_preset_selected(chosen)
+
+            try:
+                self.settings.randomize_hotkey_enabled = preserve_randomize_hotkey
+                self.settings.hold_fade_enabled = preserve_hold_fade_enabled
+                self.settings.hold_fade_key = preserve_hold_fade_key
+                self.settings.hold_fade_keys = list(preserve_hold_fade_keys)
+            except Exception:
+                pass
+
+            try:
+                self.randomize_hotkey_checkbox.blockSignals(True)
+                self.randomize_hotkey_checkbox.setChecked(preserve_randomize_hotkey)
+            except Exception:
+                pass
+            finally:
+                try:
+                    self.randomize_hotkey_checkbox.blockSignals(False)
+                except Exception:
+                    pass
+
+            try:
+                self.hold_fade_checkbox.blockSignals(True)
+                self.hold_fade_checkbox.setChecked(preserve_hold_fade_enabled)
+            except Exception:
+                pass
+            finally:
+                try:
+                    self.hold_fade_checkbox.blockSignals(False)
+                except Exception:
+                    pass
+
+            try:
+                self.hold_fade_key_edit.setText(preserve_hold_fade_key)
+            except Exception:
+                pass
+
+            self._persist_and_render()
+            return
+
+        chaos = bool(random.random() < 0.35)
+        if not chaos:
+            self.settings.global_scale = int(random.randint(60, 180))
+            self.settings.length = int(random.randint(10, 220))
+            self.settings.thickness = int(random.randint(1, 18))
+            self.settings.gap = int(random.randint(0, 80))
+            self.settings.outline = int(random.randint(0, 10))
+            self.settings.rotation = float(random.randint(0, 359))
+            self.settings.offset_x = 0
+            self.settings.offset_y = 0
+            self.settings.line_rounding = int(random.randint(0, 40))
+
+            self.settings.fan_enabled = bool(random.random() < 0.25)
+            self.settings.fan_speed = int(random.randint(-240, 240))
+
+            self.settings.crosshair_style = random.choice(["plus", "x"])
+            self.settings.center_dot = bool(random.random() < 0.6)
+            self.settings.dot_shape = random.choice(["circle", "square", "diamond"])
+            self.settings.dot_size = int(random.randint(2, 20))
+
+            self.settings.red = int(random.randint(0, 255))
+            self.settings.green = int(random.randint(0, 255))
+            self.settings.blue = int(random.randint(0, 255))
+            self.settings.alpha = int(random.randint(120, 255))
+        else:
+            self.settings.global_scale = int(random.randint(25, 1000))
+            self.settings.length = int(random.randint(5, 1500))
+            self.settings.thickness = int(random.randint(1, 200))
+            self.settings.gap = int(random.randint(0, 600))
+            self.settings.outline = int(random.randint(0, 60))
+            self.settings.rotation = float(random.randint(0, 359))
+            self.settings.offset_x = 0
+            self.settings.offset_y = 0
+            self.settings.line_rounding = int(random.randint(0, 400))
+
+            self.settings.fan_enabled = bool(random.getrandbits(1))
+            self.settings.fan_speed = int(random.randint(-2000, 2000))
+
+            self.settings.crosshair_style = random.choice(["plus", "x"])
+            self.settings.center_dot = bool(random.getrandbits(1))
+            self.settings.dot_shape = random.choice(["circle", "square", "diamond"])
+            self.settings.dot_size = int(random.randint(2, 200))
+
+            self.settings.red = int(random.randint(0, 255))
+            self.settings.green = int(random.randint(0, 255))
+            self.settings.blue = int(random.randint(0, 255))
+            self.settings.alpha = int(random.randint(30, 255))
+
+        self._refresh_presets_ui()
+        self._sync_controls_from_settings()
         self._persist_and_render()
 
     def _set_dot_shape(self, shape: str) -> None:
@@ -2643,7 +3716,7 @@ class StandardCrosshairDialog(QWidget):
             btn.setStyleSheet(self._choice_button_style(active))
 
     def _create_choice_button(self, text: str, active: bool) -> QPushButton:
-        btn = QPushButton(text)
+        btn = QPushButton(tr_lit(text))
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setCheckable(True)
         btn.setStyleSheet(self._choice_button_style(active))
@@ -2668,7 +3741,7 @@ class StandardCrosshairDialog(QWidget):
         """
 
     def _section_label(self, text: str) -> QLabel:
-        label = QLabel(text)
+        label = QLabel(tr_lit(text))
         label.setStyleSheet(f"color: {UI_THEME['muted']}; font-size: 11px; font-weight: 800;")
         return label
 
@@ -2853,10 +3926,18 @@ class StandardCrosshairDialog(QWidget):
         initial = QColor(self.settings.red, self.settings.green, self.settings.blue, self.settings.alpha)
         self._apply_custom_palette_to_dialog()
         dialog = QColorDialog(initial, self)
-        dialog.setWindowTitle("Pick Crosshair Color")
+        dialog.setWindowTitle(tr_lit("Pick Crosshair Color"))
         dialog.setOption(QColorDialog.ColorDialogOption.ShowAlphaChannel, True)
         dialog.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog, True)
         dialog.setStyleSheet(self._color_dialog_stylesheet())
+        # QColorDialog builds most of its internal widget tree on show.
+        # Apply translations a tick later so labels/buttons exist.
+        try:
+            apply_language_to_object_tree(dialog)
+            QTimer.singleShot(0, lambda: apply_language_to_object_tree(dialog))
+            QTimer.singleShot(50, lambda: apply_language_to_object_tree(dialog))
+        except Exception:
+            pass
         if dialog.exec() != QDialog.DialogCode.Accepted:
             self._capture_custom_palette_from_dialog()
             return
@@ -3001,7 +4082,7 @@ class LineBuilderDialog(QWidget):
         self._history_group_timer.setSingleShot(True)
         self._history_group_timer.timeout.connect(self._end_history_group)
 
-        self.setWindowTitle("Advanced Line Builder")
+        self.setWindowTitle(tr_lit("Advanced Line Builder"))
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
         self.setMinimumSize(580, 440)
 
@@ -3076,9 +4157,9 @@ class LineBuilderDialog(QWidget):
 
         top_row = QHBoxLayout()
         top_row.setSpacing(6)
-        self.back_btn = QPushButton("← Back")
+        self.back_btn = QPushButton(tr_lit("← Back"))
         self.back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.back_btn.setToolTip("Return to Crosshair Settings")
+        self.back_btn.setToolTip(tr_lit("Return to Crosshair Settings"))
         self.back_btn.setStyleSheet(
             "QPushButton { background-color: "
             + UI_THEME["surface2"]
@@ -3098,7 +4179,7 @@ class LineBuilderDialog(QWidget):
         top_row.addStretch()
         layout.addLayout(top_row)
 
-        intro = QLabel("Shape stacked lines, drag their order, and preview the result instantly.")
+        intro = QLabel(tr_lit("Shape stacked lines, drag their order, and preview the result instantly."))
         intro.setWordWrap(True)
         intro.setStyleSheet(
             "color: " + UI_THEME["muted"] + "; font-weight: 600; font-size: 10px;"
@@ -3176,7 +4257,7 @@ class LineBuilderDialog(QWidget):
         self.standard_list.currentRowChanged.connect(self._on_standard_selection_changed)
         left_panel.addWidget(self.standard_list)
 
-        std_hint = QLabel("Standard lines still respect the toggles above; builder layers optional geometry on top.")
+        std_hint = QLabel(tr_lit("Standard lines still respect the toggles above; builder layers optional geometry on top."))
         std_hint.setWordWrap(True)
         std_hint.setStyleSheet("color: " + UI_THEME["muted"] + "; font-size: 9px;")
         std_hint.setVisible(False)
@@ -3239,7 +4320,7 @@ class LineBuilderDialog(QWidget):
         self.custom_list.currentRowChanged.connect(self._on_custom_selection_changed)
         left_panel.addWidget(self.custom_list, 1)
 
-        custom_hint = QLabel("Drag custom lines to reorder draw priority or stack multiple spokes at once.")
+        custom_hint = QLabel(tr_lit("Drag custom lines to reorder draw priority or stack multiple spokes at once."))
         custom_hint.setWordWrap(True)
         custom_hint.setStyleSheet("color: " + UI_THEME["muted"] + "; font-size: 9px;")
         custom_hint.setVisible(False)
@@ -3289,6 +4370,13 @@ class LineBuilderDialog(QWidget):
         )
         return label
 
+    def showEvent(self, event):  # type: ignore[override]
+        super().showEvent(event)
+        try:
+            apply_language_to_object_tree(self)
+        except Exception:
+            pass
+
     def _toggle_left_panel(self, visible: bool) -> None:
         self.left_panel.setVisible(visible)
         self.left_panel_toggle.setText("◀" if visible else "▶")
@@ -3312,34 +4400,16 @@ class LineBuilderDialog(QWidget):
         self.grid_toggle.setChecked(self.show_grid)
         self.grid_toggle.setStyleSheet(
             "QCheckBox { color: " + UI_THEME["text"] + "; font-size: 10px; font-weight: 600; }"
-            "QCheckBox::indicator { width: 14px; height: 14px; border-radius: 4px; border: 1px solid "
-            + UI_THEME["border"]
-            + "; background: "
-            + UI_THEME["surface2"]
-            + "; }"
-            "QCheckBox::indicator:checked { background: "
-            + UI_THEME["accent"]
-            + "; border: 1px solid "
-            + UI_THEME["accent"]
-            + "; }"
+            "QCheckBox::indicator { width: 14px; height: 14px; }"
         )
         self.grid_toggle.toggled.connect(self._on_grid_toggle)
         header_row.addWidget(self.grid_toggle)
         
-        self.snap_toggle = QCheckBox("⚲ Snap")
+        self.snap_toggle = QCheckBox(tr_lit("⚲ Snap"))
         self.snap_toggle.setChecked(self.grid_snap_enabled)
         self.snap_toggle.setStyleSheet(
             "QCheckBox { color: " + UI_THEME["text"] + "; font-size: 11px; font-weight: 600; }"
-            "QCheckBox::indicator { width: 14px; height: 14px; border-radius: 4px; border: 1px solid "
-            + UI_THEME["border"]
-            + "; background: "
-            + UI_THEME["surface2"]
-            + "; }"
-            "QCheckBox::indicator:checked { background: "
-            + UI_THEME["accent"]
-            + "; border: 1px solid "
-            + UI_THEME["accent"]
-            + "; }"
+            "QCheckBox::indicator { width: 14px; height: 14px; }"
         )
         self.snap_toggle.toggled.connect(self._on_snap_toggle)
         header_row.addWidget(self.snap_toggle)
@@ -3364,7 +4434,7 @@ class LineBuilderDialog(QWidget):
         grid_size_layout.setContentsMargins(0, 0, 0, 0)
         grid_size_layout.setSpacing(5)
         
-        grid_size_label = QLabel("Grid Size")
+        grid_size_label = QLabel(tr_lit("Grid Size"))
         grid_size_label.setStyleSheet("color: " + UI_THEME["muted"] + "; font-size: 12px;")
         grid_size_layout.addWidget(grid_size_label)
         
@@ -3445,7 +4515,7 @@ class LineBuilderDialog(QWidget):
         self.layer_label_input.textChanged.connect(self._on_layer_label_changed)
         form.addRow("Label", self.layer_label_input)
 
-        self.layer_enabled_check = QCheckBox("Visible")
+        self.layer_enabled_check = QCheckBox(tr_lit("Visible"))
         self.layer_enabled_check.toggled.connect(self._on_layer_enabled_toggled)
         form.addRow("", self.layer_enabled_check)
 
@@ -3479,7 +4549,7 @@ class LineBuilderDialog(QWidget):
         scroll_layout.addWidget(self._subheading("Selected Object"))
 
         self.component_editor_stack = QStackedWidget()
-        placeholder = QLabel("Select an object to edit it.")
+        placeholder = QLabel(tr_lit("Select an object to edit it."))
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         placeholder.setStyleSheet("color: " + UI_THEME["muted"] + ";")
         self.component_editor_stack.addWidget(placeholder)
@@ -3488,7 +4558,7 @@ class LineBuilderDialog(QWidget):
         segment_form = QFormLayout(segment_editor)
         segment_form.setSpacing(4)
 
-        self.segment_draggable = QCheckBox("Draggable")
+        self.segment_draggable = QCheckBox(tr_lit("Draggable"))
         self.segment_draggable.setStyleSheet(
             "QCheckBox { color: " + UI_THEME["text"] + "; font-weight: 600; }"
         )
@@ -3505,7 +4575,7 @@ class LineBuilderDialog(QWidget):
         circle_form = QFormLayout(circle_editor)
         circle_form.setSpacing(4)
 
-        self.circle_draggable = QCheckBox("Draggable")
+        self.circle_draggable = QCheckBox(tr_lit("Draggable"))
         self.circle_draggable.setStyleSheet(
             "QCheckBox { color: " + UI_THEME["text"] + "; font-weight: 600; }"
         )
@@ -3522,7 +4592,7 @@ class LineBuilderDialog(QWidget):
         square_form = QFormLayout(square_editor)
         square_form.setSpacing(4)
 
-        self.square_draggable = QCheckBox("Draggable")
+        self.square_draggable = QCheckBox(tr_lit("Draggable"))
         self.square_draggable.setStyleSheet(
             "QCheckBox { color: " + UI_THEME["text"] + "; font-weight: 600; }"
         )
@@ -3539,7 +4609,7 @@ class LineBuilderDialog(QWidget):
         triangle_form = QFormLayout(triangle_editor)
         triangle_form.setSpacing(4)
 
-        self.triangle_draggable = QCheckBox("Draggable")
+        self.triangle_draggable = QCheckBox(tr_lit("Draggable"))
         self.triangle_draggable.setStyleSheet(
             "QCheckBox { color: " + UI_THEME["text"] + "; font-weight: 600; }"
         )
@@ -3556,7 +4626,7 @@ class LineBuilderDialog(QWidget):
         curve_form = QFormLayout(curve_editor)
         curve_form.setSpacing(4)
 
-        self.curve_draggable = QCheckBox("Draggable")
+        self.curve_draggable = QCheckBox(tr_lit("Draggable"))
         self.curve_draggable.setStyleSheet(
             "QCheckBox { color: " + UI_THEME["text"] + "; font-weight: 600; }"
         )
@@ -3873,7 +4943,8 @@ class LineBuilderDialog(QWidget):
         container = self.settings.line_components if isinstance(self.settings.line_components, dict) else {}
         stack = container.get(line_key, []) if isinstance(container, dict) else []
         count = len(stack) if isinstance(stack, list) else 0
-        return f"{LINE_LABELS.get(line_key, line_key.title())} ({count} objects)"
+        label = str(LINE_LABELS.get(line_key, line_key.title()))
+        return f"{tr_lit(label)} ({count} {tr_lit('objects')})"
 
     def _custom_layer_summary(self, layer: dict) -> str:
         label = str(layer.get("label") or "Custom Line")
@@ -3881,7 +4952,7 @@ class LineBuilderDialog(QWidget):
         status = "ON" if layer.get("enabled", True) else "OFF"
         components = layer.get("components", []) if isinstance(layer.get("components"), list) else []
         count = len(components) if isinstance(components, list) else 0
-        return f"[{status}] {label} • {angle:.0f}° ({count} objects)"
+        return f"[{status}] {label} • {angle:.0f}° ({count} {tr_lit('objects')})"
 
     def _on_standard_selection_changed(self, row: int) -> None:
         if row < 0 or row >= len(LINE_KEYS):
@@ -4059,25 +5130,49 @@ class LineBuilderDialog(QWidget):
     def _component_summary(self, component: dict) -> str:
         ctype = component.get("type")
         if ctype == "segment":
-            return "Line • offset={:.1f}px length={:.1f}px".format(
+            return f"{tr_lit('Line')} • {tr_lit('offset')}={{:.1f}}px {tr_lit('length')}={{:.1f}}px".format(
                 component.get("offset", 0.0),
                 component.get("length", 0.0),
             )
         if ctype == "circle":
-            return "Circle • offset={:.1f}px radius={:.1f}px".format(
+            return f"{tr_lit('Circle')} • {tr_lit('offset')}={{:.1f}}px {tr_lit('radius')}={{:.1f}}px".format(
                 component.get("offset", 0.0),
                 component.get("radius", 0.0),
             )
         if ctype in ("polygon", "triangle"):
-            return "Triangle • r={:.1f}px".format(float(component.get("radius", 0.0)))
+            return f"{tr_lit('Triangle')} • r={{:.1f}}px".format(float(component.get("radius", 0.0)))
         if ctype == "square":
-            return "Square • size={:.1f}px".format(float(component.get("size", 0.0)))
+            return f"{tr_lit('Square')} • {tr_lit('size')}={{:.1f}}px".format(float(component.get("size", 0.0)))
         if ctype == "curve":
             pts = component.get("points")
             if isinstance(pts, list) and len(pts) >= 2:
-                return "Curve • pts={} thickness={:.1f}px".format(len(pts), float(component.get("thickness", 0.0)))
-            return "Curve • thickness={:.1f}px".format(float(component.get("thickness", 0.0)))
-        return "Unknown object"
+                return f"{tr_lit('Curve')} • {tr_lit('pts')}={{}} {tr_lit('thickness')}={{:.1f}}px".format(
+                    len(pts), float(component.get("thickness", 0.0))
+                )
+            return f"{tr_lit('Curve')} • {tr_lit('thickness')}={{:.1f}}px".format(float(component.get("thickness", 0.0)))
+        return tr_lit("Unknown object")
+
+    def retranslate_dynamic_texts(self) -> None:
+        try:
+            apply_language_to_object_tree(self)
+        except Exception:
+            pass
+        try:
+            self._build_standard_list()
+        except Exception:
+            pass
+        try:
+            self._build_custom_list(selected_id=self.active_scope_id if self.active_scope_kind == "custom" else None)
+        except Exception:
+            pass
+        try:
+            self._refresh_component_list()
+        except Exception:
+            pass
+        try:
+            self._update_layer_metadata_view()
+        except Exception:
+            pass
 
     def _on_component_selection_changed(self, row: int) -> None:
         stack = self._current_component_stack()
@@ -5547,7 +6642,7 @@ class LineBuilderDialog(QWidget):
         temp_settings.offset_y = 0
         temp_settings.visible = True
         
-        crosshair_pixmap = generate_crosshair_pixmap(w, h, temp_settings)
+        crosshair_pixmap = generate_crosshair_pixmap(w, h, temp_settings, extra_rotation=0.0, opacity_multiplier=1.0)
         
         # Composite the crosshair onto the grid
         painter = QPainter(pixmap)

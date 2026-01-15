@@ -19,6 +19,7 @@ from utils import UI_THEME
 from utils import (
     ART_EXTS,
     is_video_path,
+    tr_lit,
 )
 
 
@@ -53,6 +54,7 @@ class _Layer:
     sink: Optional[QVideoSink] = None
     audio: Optional[QAudioOutput] = None
     pending_center: Optional[tuple[float, float]] = None
+    pending_overlay_transform: Optional[dict[str, float]] = None
 
 
 class ImageCanvas(QGraphicsView):
@@ -83,13 +85,29 @@ class ImageCanvas(QGraphicsView):
         
         self.show_guides = True
         
-        # Canvas size (1920x1080 for crosshair preview)
+        # Canvas size (defaults to 1920x1080; can be overridden for single-overlay editing)
         self.canvas_width = 1920
         self.canvas_height = 1080
         self.setSceneRect(0, 0, self.canvas_width, self.canvas_height)
 
         # Let the canvas expand to fill the dialog; we scale to fit on resize.
         self.setMinimumSize(720, 405)
+        self._fit_scene()
+
+    def set_canvas_size(self, w: int, h: int) -> None:
+        try:
+            w = int(w)
+            h = int(h)
+        except Exception:
+            return
+        if w <= 0 or h <= 0:
+            return
+        self.canvas_width = w
+        self.canvas_height = h
+        try:
+            self.setSceneRect(0, 0, self.canvas_width, self.canvas_height)
+        except Exception:
+            pass
         self._fit_scene()
 
     def resizeEvent(self, event):  # type: ignore[override]
@@ -129,12 +147,12 @@ class ImageCanvas(QGraphicsView):
         painter.drawLine(int(center_x), int(center_y - crosshair_size), 
                         int(center_x), int(center_y + crosshair_size))
     
-    def add_layer_pixmap(self, pixmap: QPixmap) -> QGraphicsPixmapItem:
+    def add_layer_pixmap(self, pixmap: QPixmap, *, selectable: bool = True) -> QGraphicsPixmapItem:
         item = QGraphicsPixmapItem(pixmap)
-        item.setFlags(
-            QGraphicsPixmapItem.GraphicsItemFlag.ItemIsMovable |
-            QGraphicsPixmapItem.GraphicsItemFlag.ItemIsSelectable
-        )
+        flags = QGraphicsPixmapItem.GraphicsItemFlag.ItemIsMovable
+        if selectable:
+            flags = flags | QGraphicsPixmapItem.GraphicsItemFlag.ItemIsSelectable
+        item.setFlags(flags)
         try:
             item.setTransformOriginPoint(pixmap.width() / 2, pixmap.height() / 2)
         except Exception:
@@ -206,17 +224,40 @@ class ImageEditorDialog(QWidget):
         # to app_settings.json instead of exporting a new PNG/MP4.
         self._overlay_controller = overlay_controller
         self._asset_key = str(asset_key) if asset_key else None
+        self._single_asset_mode = bool(self._overlay_controller is not None and self._asset_key)
         
         self.init_ui()
+
+        # In single-asset mode (opened from Art Manager), the editor must only
+        # operate on the one asset and should not expose "Load Art".
+        try:
+            if self._single_asset_mode and getattr(self, "_load_btn", None) is not None:
+                self._load_btn.hide()
+        except Exception:
+            pass
+
+        # If editing a single overlay element, match the overlay canvas size so
+        # x/y/zoom saved back to app_settings.json round-trips correctly.
+        try:
+            if self._overlay_controller is not None and self._asset_key:
+                cs = getattr(self._overlay_controller, "_canvas_size", None)
+                if isinstance(cs, (tuple, list)) and len(cs) == 2:
+                    self.canvas.set_canvas_size(int(cs[0]), int(cs[1]))
+        except Exception:
+            pass
         
         if image_path and os.path.exists(image_path):
-            # If this looks like a previously saved composite, load its project
-            # so the user can keep editing layers (not a single fused MP4/PNG).
-            project_path = self._project_path_for_output(str(image_path))
-            if project_path and os.path.exists(project_path):
-                self._load_project(project_path)
-            else:
+            # Single-asset mode must never load a multi-layer project.
+            if self._single_asset_mode:
                 self.add_art(image_path)
+            else:
+                # If this looks like a previously saved composite, load its project
+                # so the user can keep editing layers (not a single fused MP4/PNG).
+                project_path = self._project_path_for_output(str(image_path))
+                if project_path and os.path.exists(project_path):
+                    self._load_project(project_path)
+                else:
+                    self.add_art(image_path)
 
             # If this editor is opened for a single overlay element, apply its
             # saved transform/opacity for preview.
@@ -481,6 +522,7 @@ class ImageEditorDialog(QWidget):
         
         # Load art button
         load_btn = self._create_button("📁 Load Art", role="neutral")
+        self._load_btn = load_btn
         load_btn.clicked.connect(self.load_art_dialog)
         buttons_layout.addWidget(load_btn)
 
@@ -558,12 +600,17 @@ class ImageEditorDialog(QWidget):
         self.move(x, y)
     
     def load_art_dialog(self):
-        """Import one or more art files into display_images and add them as layers."""
+        """Import an art file into display_images and replace the current layer."""
+
+        # In single-asset mode the editor is intentionally constrained to one
+        # item; replacing the asset is done from the Art Manager.
+        if bool(getattr(self, "_single_asset_mode", False)):
+            return
 
         file_dialog = QFileDialog(self)
-        file_dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)
+        file_dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
         file_dialog.setNameFilter(
-            "Art Files (*.png *.jpg *.jpeg *.webp *.gif *.bmp *.mp4 *.avi *.mov *.webm *.mkv *.m4v)"
+            tr_lit("Art Files (*.png *.jpg *.jpeg *.webp *.gif *.bmp *.mp4 *.avi *.mov *.webm *.mkv *.m4v)")
         )
 
         if not file_dialog.exec():
@@ -574,23 +621,124 @@ class ImageEditorDialog(QWidget):
             return
 
         imported = self._import_art_files(files)
-        for p in imported:
-            self.add_art(p)
+        if not imported:
+            return
+        self._replace_selected_layer(imported[0])
+
+    def _replace_selected_layer(self, file_path: str) -> None:
+        file_path = str(file_path or "").strip()
+        if not file_path or not os.path.exists(file_path):
+            return
+
+        # Pick a target layer (selected item, else single layer, else last layer).
+        target_layer: Optional[_Layer] = None
+        try:
+            selected = list(self.canvas.scene.selectedItems())
+        except Exception:
+            selected = []
+        if selected:
+            sel = selected[0]
+            for layer in self._layers:
+                if layer.item is sel:
+                    target_layer = layer
+                    break
+        if target_layer is None and len(self._layers) == 1:
+            target_layer = self._layers[0]
+        if target_layer is None and self._layers:
+            target_layer = self._layers[-1]
+        if target_layer is None:
+            self.add_art(file_path)
+            return
+
+        it = target_layer.item
+        try:
+            pos = it.pos()
+            scale = float(it.scale() or 1.0)
+            rot = float(it.rotation() or 0.0)
+            op = float(it.opacity() if it.opacity() is not None else 1.0)
+        except Exception:
+            pos = None
+            scale, rot, op = 1.0, 0.0, 1.0
+
+        # Replace content.
+        if is_video_path(file_path):
+            # Simplest: remove old layer and add a new video layer, then restore transform.
+            try:
+                self.canvas.scene.removeItem(it)
+            except Exception:
+                pass
+            try:
+                self._layers = [l for l in self._layers if l is not target_layer]
+            except Exception:
+                pass
+            self._add_video_layer(file_path)
+            try:
+                new_layer = self._layers[-1]
+                if pos is not None:
+                    new_layer.item.setPos(pos)
+                new_layer.item.setScale(scale)
+                new_layer.item.setRotation(rot)
+                new_layer.item.setOpacity(op)
+                if not bool(getattr(self, "_single_asset_mode", False)):
+                    self.canvas.scene.clearSelection()
+                    new_layer.item.setSelected(True)
+            except Exception:
+                pass
+        else:
+            try:
+                pm = QPixmap(file_path)
+                if pm.isNull():
+                    raise ValueError("Failed to load image")
+                it.setPixmap(pm)
+                it.setTransformOriginPoint(pm.width() / 2, pm.height() / 2)
+                target_layer.source_path = file_path
+                target_layer.is_video = False
+                target_layer.player = None
+                target_layer.sink = None
+                target_layer.audio = None
+                if pos is not None:
+                    it.setPos(pos)
+                it.setScale(scale)
+                it.setRotation(rot)
+                it.setOpacity(op)
+                if not bool(getattr(self, "_single_asset_mode", False)):
+                    self.canvas.scene.clearSelection()
+                    it.setSelected(True)
+            except Exception as e:
+                QMessageBox.warning(self, tr_lit("Error"), f"{tr_lit('Failed to add image:')} {str(e)}")
+
+        self._sync_controls_from_selection()
 
     def add_art(self, file_path: str) -> None:
         file_path = str(file_path or "").strip()
         if not file_path or not os.path.exists(file_path):
             return
+
+        # Single-asset mode: never allow multiple layers. Replace the existing
+        # layer content while preserving transform.
+        if bool(getattr(self, "_single_asset_mode", False)) and self._layers:
+            try:
+                self._replace_selected_layer(file_path)
+            except Exception:
+                pass
+            return
+
         if is_video_path(file_path):
             self._add_video_layer(file_path)
         else:
             self._add_image_layer(file_path)
 
-        # Select the newest layer.
+        # Select the newest layer (multi-layer mode only).
+        if not bool(getattr(self, "_single_asset_mode", False)):
+            try:
+                if self._layers:
+                    self.canvas.scene.clearSelection()
+                    self._layers[-1].item.setSelected(True)
+            except Exception:
+                pass
+
         try:
-            if self._layers:
-                self.canvas.scene.clearSelection()
-                self._layers[-1].item.setSelected(True)
+            self._ensure_item_visible(self._layers[-1].item)
         except Exception:
             pass
     
@@ -599,17 +747,23 @@ class ImageEditorDialog(QWidget):
             pm = QPixmap(file_path)
             if pm.isNull():
                 raise ValueError("Failed to load image")
-            item = self.canvas.add_layer_pixmap(pm)
+            item = self.canvas.add_layer_pixmap(
+                pm,
+                selectable=(not bool(getattr(self, "_single_asset_mode", False))),
+            )
             self._layers.append(_Layer(item=item, source_path=file_path, is_video=False))
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to add image: {str(e)}")
+            QMessageBox.warning(self, tr_lit("Error"), f"{tr_lit('Failed to add image:')} {str(e)}")
 
     def _add_video_layer(self, file_path: str) -> None:
         try:
             # Placeholder pixmap until the first frame arrives.
             pm = QPixmap(4, 4)
             pm.fill(Qt.GlobalColor.transparent)
-            item = self.canvas.add_layer_pixmap(pm)
+            item = self.canvas.add_layer_pixmap(
+                pm,
+                selectable=(not bool(getattr(self, "_single_asset_mode", False))),
+            )
 
             audio = QAudioOutput()
             try:
@@ -644,6 +798,25 @@ class ImageEditorDialog(QWidget):
                     layer.item.setPixmap(pm2)
                     layer.item.setTransformOriginPoint(pm2.width() / 2, pm2.height() / 2)
 
+                    # Single-asset mode: apply the saved overlay transform once
+                    # we know the real video frame dimensions.
+                    if layer.pending_overlay_transform is not None:
+                        try:
+                            pt = dict(layer.pending_overlay_transform)
+                            layer.pending_overlay_transform = None
+                            x = float(pt.get("x", layer.item.pos().x()) or 0.0)
+                            y = float(pt.get("y", layer.item.pos().y()) or 0.0)
+                            zoom = float(pt.get("zoom", layer.item.scale()) or 1.0)
+                            rot = float(pt.get("rotation", layer.item.rotation()) or 0.0)
+                            op = float(pt.get("opacity", layer.item.opacity()) or 1.0)
+                            if zoom > 0:
+                                layer.item.setScale(float(zoom))
+                            layer.item.setRotation(float(rot))
+                            layer.item.setOpacity(max(0.0, min(1.0, float(op))))
+                            self._apply_overlay_xy_to_item(layer.item, x, y, float(zoom))
+                        except Exception:
+                            pass
+
                     # If we have a pending center (from project load), apply once
                     # now that we know the real frame size.
                     if layer.pending_center is not None:
@@ -653,6 +826,11 @@ class ImageEditorDialog(QWidget):
                         except Exception:
                             pass
                         layer.pending_center = None
+
+                    try:
+                        self._ensure_item_visible(layer.item)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 
@@ -662,7 +840,7 @@ class ImageEditorDialog(QWidget):
             player.setSource(QUrl.fromLocalFile(os.path.abspath(file_path)))
             player.play()
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to add video: {str(e)}")
+            QMessageBox.warning(self, tr_lit("Error"), f"{tr_lit('Failed to add video:')} {str(e)}")
     
     def reset_image(self):
         """Reset selected layers (or all layers if none selected)."""
@@ -695,7 +873,7 @@ class ImageEditorDialog(QWidget):
         """
 
         if not self._layers:
-            QMessageBox.information(self, "No Content", "Add images/videos first.")
+            QMessageBox.information(self, tr_lit("No Content"), tr_lit("Add images/videos first."))
             return
 
         # Single element editing mode (from Art Manager): persist transform instead
@@ -709,10 +887,7 @@ class ImageEditorDialog(QWidget):
                 rot = float(it.rotation() or 0.0)
                 op = float(it.opacity() if it.opacity() is not None else 1.0)
 
-                # Coordinates are already in screen space because we set the
-                # editor canvas to the primary screen size.
-                x = float(pos.x())
-                y = float(pos.y())
+                x, y = self._overlay_xy_from_item(it, zoom)
 
                 try:
                     self._overlay_controller.set_transform(self._asset_key, {"x": x, "y": y, "zoom": zoom, "rotation": rot})
@@ -723,38 +898,38 @@ class ImageEditorDialog(QWidget):
                 except Exception:
                     pass
 
-                QMessageBox.information(self, "Saved", "Saved position for this element.")
+                QMessageBox.information(self, tr_lit("Saved"), tr_lit("Saved position for this element."))
                 try:
                     self.close()
                 except Exception:
                     pass
                 return
             except Exception as e:
-                QMessageBox.warning(self, "Error", f"Failed to save position: {e}")
+                QMessageBox.warning(self, tr_lit("Error"), f"{tr_lit('Failed to save position:')} {e}")
                 return
 
         has_video = any(l.is_video for l in self._layers)
         if has_video and (cv2 is None or np is None):
             QMessageBox.warning(
                 self,
-                "Missing Dependency",
-                "MP4 export requires opencv-python (and numpy). Install it and restart the app."
+                tr_lit("Missing Dependency"),
+                tr_lit("MP4 export requires opencv-python (and numpy). Install it and restart the app.")
             )
             return
 
         if has_video:
             file_path, _ = QFileDialog.getSaveFileName(
                 self,
-                "Save Video",
+                tr_lit("Save Video"),
                 "display_images/edited_composite.mp4",
-                "MP4 Video (*.mp4)",
+                tr_lit("MP4 Video (*.mp4)"),
             )
         else:
             file_path, _ = QFileDialog.getSaveFileName(
                 self,
-                "Save Image",
+                tr_lit("Save Image"),
                 "display_images/edited_composite.png",
-                "PNG Image (*.png)",
+                tr_lit("PNG Image (*.png)"),
             )
 
         if not file_path:
@@ -776,14 +951,14 @@ class ImageEditorDialog(QWidget):
                 pass
 
             if not has_video:
-                QMessageBox.information(self, "Saved", f"Saved to:\n{file_path}")
+                QMessageBox.information(self, tr_lit("Saved"), f"{tr_lit('Saved to:')}\n{file_path}")
                 self.image_saved.emit(file_path)
                 try:
                     self.close()
                 except Exception:
                     pass
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to save: {str(e)}")
+            QMessageBox.warning(self, tr_lit("Error"), f"{tr_lit('Failed to save:')} {str(e)}")
 
     def _apply_overlay_state_to_single_layer(self) -> None:
         if self._overlay_controller is None or not self._asset_key:
@@ -825,10 +1000,6 @@ class ImageEditorDialog(QWidget):
             op = 1.0
 
         try:
-            it.setPos(float(x), float(y))
-        except Exception:
-            pass
-        try:
             if zoom > 0:
                 it.setScale(float(zoom))
         except Exception:
@@ -842,8 +1013,81 @@ class ImageEditorDialog(QWidget):
         except Exception:
             pass
 
+        # Apply x/y after zoom so the origin compensation is correct.
+        try:
+            pm = it.pixmap()
+            if pm is not None and pm.width() > 1 and pm.height() > 1:
+                self._apply_overlay_xy_to_item(it, float(x), float(y), float(zoom))
+            else:
+                # Video placeholder: defer until first real frame arrives.
+                self._layers[0].pending_overlay_transform = {
+                    "x": float(x),
+                    "y": float(y),
+                    "zoom": float(zoom),
+                    "rotation": float(rot),
+                    "opacity": float(op),
+                }
+        except Exception:
+            pass
+
+        try:
+            self._ensure_item_visible(it)
+        except Exception:
+            pass
+
+        try:
+            fit = getattr(self.canvas, "_fit_scene", None)
+            if callable(fit):
+                fit()
+        except Exception:
+            pass
+
         try:
             self._sync_controls_from_selection()
+        except Exception:
+            pass
+
+    def _overlay_xy_from_item(self, it: QGraphicsPixmapItem, zoom: float) -> tuple[float, float]:
+        """Convert QGraphicsItem position to overlay transform x/y.
+
+        Overlay x/y are defined as the top-left of the scaled asset when rotation=0.
+        With a center origin, QGraphicsItem pos is offset by (zoom-1)*origin.
+        """
+        try:
+            z = float(zoom or 1.0)
+        except Exception:
+            z = 1.0
+        try:
+            origin = it.transformOriginPoint()
+            ox = float(origin.x())
+            oy = float(origin.y())
+        except Exception:
+            ox = 0.0
+            oy = 0.0
+        try:
+            p = it.pos()
+            px = float(p.x())
+            py = float(p.y())
+        except Exception:
+            px = 0.0
+            py = 0.0
+        return (px - (z - 1.0) * ox, py - (z - 1.0) * oy)
+
+    def _apply_overlay_xy_to_item(self, it: QGraphicsPixmapItem, x: float, y: float, zoom: float) -> None:
+        """Apply overlay x/y to QGraphicsItem position, compensating for origin+zoom."""
+        try:
+            z = float(zoom or 1.0)
+        except Exception:
+            z = 1.0
+        try:
+            origin = it.transformOriginPoint()
+            ox = float(origin.x())
+            oy = float(origin.y())
+        except Exception:
+            ox = 0.0
+            oy = 0.0
+        try:
+            it.setPos(float(x) + (z - 1.0) * ox, float(y) + (z - 1.0) * oy)
         except Exception:
             pass
 
@@ -1009,7 +1253,7 @@ class ImageEditorDialog(QWidget):
                     pass
 
                 try:
-                    QMessageBox.information(self, "Saved", f"Saved to:\n{state['output_path']}")
+                    QMessageBox.information(self, tr_lit("Saved"), f"{tr_lit('Saved to:')}\n{state['output_path']}")
                 except Exception:
                     pass
                 try:
@@ -1108,7 +1352,7 @@ class ImageEditorDialog(QWidget):
             with open(project_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception as e:
-            QMessageBox.warning(self, "Project", f"Failed to load project: {str(e)}")
+            QMessageBox.warning(self, tr_lit("Project"), f"{tr_lit('Failed to load project:')} {str(e)}")
             return
 
         layers = data.get("layers") if isinstance(data, dict) else None
@@ -1196,9 +1440,12 @@ class ImageEditorDialog(QWidget):
         if self._updating_controls:
             return
         zoom = value / 100.0
-        for it in self.canvas.scene.selectedItems():
+        for it in self._selected_items_or_single():
             try:
+                origin = it.transformOriginPoint()
+                center_scene = it.mapToScene(origin)
                 it.setScale(float(zoom))
+                it.setPos(float(center_scene.x()) - float(origin.x()), float(center_scene.y()) - float(origin.y()))
             except Exception:
                 pass
         self.zoom_value_label.setText(f"{value}%")
@@ -1207,7 +1454,7 @@ class ImageEditorDialog(QWidget):
         """Handle rotation slider change."""
         if self._updating_controls:
             return
-        for it in self.canvas.scene.selectedItems():
+        for it in self._selected_items_or_single():
             try:
                 it.setRotation(float(value))
             except Exception:
@@ -1219,7 +1466,7 @@ class ImageEditorDialog(QWidget):
         if self._updating_controls:
             return
         op = max(0.0, min(1.0, float(value) / 100.0))
-        for it in self.canvas.scene.selectedItems():
+        for it in self._selected_items_or_single():
             try:
                 it.setOpacity(op)
             except Exception:
@@ -1232,7 +1479,7 @@ class ImageEditorDialog(QWidget):
     def rename_asset(self) -> None:
         layer = self._selected_layer()
         if layer is None or not layer.source_path or not os.path.exists(layer.source_path):
-            QMessageBox.information(self, "No Selection", "Select an element to rename.")
+            QMessageBox.information(self, tr_lit("No Selection"), tr_lit("Select an element to rename."))
             return
 
         # Stop that layer's video playback so Windows doesn't lock the file.
@@ -1253,7 +1500,7 @@ class ImageEditorDialog(QWidget):
 
         # Let the user edit the full filename (without forcing extension), but
         # keep the old extension if they omit one.
-        new_name, ok = QInputDialog.getText(self, "Rename", "New file name:", text=old_name)
+        new_name, ok = QInputDialog.getText(self, tr_lit("Rename"), tr_lit("New file name:"), text=old_name)
         if not ok:
             return
         new_name = str(new_name or "").strip()
@@ -1268,14 +1515,14 @@ class ImageEditorDialog(QWidget):
         if os.path.abspath(new_path) == os.path.abspath(layer.source_path):
             return
         if os.path.exists(new_path):
-            QMessageBox.warning(self, "Rename", "A file with that name already exists.")
+            QMessageBox.warning(self, tr_lit("Rename"), tr_lit("A file with that name already exists."))
             return
 
         old_path = layer.source_path
         try:
             os.rename(old_path, new_path)
         except Exception as e:
-            QMessageBox.warning(self, "Rename", f"Failed to rename: {str(e)}")
+            QMessageBox.warning(self, tr_lit("Rename"), f"{tr_lit('Failed to rename:')} {str(e)}")
             return
 
         layer.source_path = new_path
@@ -1286,15 +1533,15 @@ class ImageEditorDialog(QWidget):
             self._restart_layer_video(layer)
 
     def delete_asset(self) -> None:
-        selected = list(self.canvas.scene.selectedItems())
+        selected = list(self._selected_items_or_single())
         if not selected:
-            QMessageBox.information(self, "No Selection", "Select element(s) to delete.")
+            QMessageBox.information(self, tr_lit("No Selection"), tr_lit("Select element(s) to delete."))
             return
 
         reply = QMessageBox.question(
             self,
-            "Remove Element",
-            "Remove selected element(s) from the editor? (Files will NOT be deleted)",
+            tr_lit("Remove Element"),
+            tr_lit("Remove selected element(s) from the editor? (Files will NOT be deleted)"),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
@@ -1356,8 +1603,8 @@ class ImageEditorDialog(QWidget):
                 if os.path.exists(dst):
                     reply = QMessageBox.question(
                         self,
-                        "File Exists",
-                        f"{name} already exists in display_images. Overwrite?",
+                        tr_lit("File Exists"),
+                        f"{name} {tr_lit('already exists in display_images. Overwrite?')}",
                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     )
                     if reply != QMessageBox.StandardButton.Yes:
@@ -1380,11 +1627,38 @@ class ImageEditorDialog(QWidget):
         return None
 
     def _selected_layer(self) -> Optional[_Layer]:
+        # Single-asset mode: act on the only layer without selection.
+        if bool(getattr(self, "_single_asset_mode", False)) and len(self._layers) == 1:
+            return self._layers[0]
+
         items = list(self.canvas.scene.selectedItems())
         if not items:
             return None
-        # Prefer the last selected in Qt's ordering (top-most), but any is fine.
         return self._layer_for_item(items[-1])
+
+    def _selected_items_or_single(self):
+        # Single-asset mode: act on the only layer without selection.
+        if bool(getattr(self, "_single_asset_mode", False)) and len(self._layers) == 1:
+            return [self._layers[0].item]
+
+        try:
+            return list(self.canvas.scene.selectedItems())
+        except Exception:
+            return []
+
+    def _ensure_item_visible(self, it) -> None:
+        # Bring an item back into view if it's fully off-canvas.
+        try:
+            scene_rect = self.canvas.sceneRect()
+            br = it.sceneBoundingRect()
+            # Consider a small margin so near-edge items don't get snapped.
+            margin = 20.0
+            if br.intersects(scene_rect.adjusted(-margin, -margin, margin, margin)):
+                return
+            delta = scene_rect.center() - br.center()
+            it.setPos(it.pos() + delta)
+        except Exception:
+            return
 
     def _stop_layer_video(self, layer: _Layer) -> None:
         try:
@@ -1461,10 +1735,14 @@ class ImageEditorDialog(QWidget):
                 self.rotation_value_label.setText("0°")
                 return
 
-            items = list(self.canvas.scene.selectedItems())
-            if not items:
-                return
-            it = items[-1]
+            it = None
+            if bool(getattr(self, "_single_asset_mode", False)) and len(self._layers) == 1:
+                it = self._layers[0].item
+            else:
+                items = list(self.canvas.scene.selectedItems())
+                if not items:
+                    return
+                it = items[-1]
             try:
                 zv = int(round(float(it.scale()) * 100))
                 zv = max(self.zoom_slider.minimum(), min(self.zoom_slider.maximum(), zv))

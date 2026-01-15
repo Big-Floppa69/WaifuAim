@@ -1,4 +1,4 @@
-# Copilot Instructions for Zenless Zone Zero Crosshair
+# Copilot Instructions for WaifuAim
 
 ## Architecture Overview
 
@@ -48,13 +48,13 @@ pip install -r requirements.txt  # PyQt6, keyboard
 
 ### Build Executable (PyInstaller)
 ```bash
-pyinstaller "Zenless Zone Zero Crosshair.spec"
+pyinstaller "WaifuAim.spec"
 ```
 - Bundles `display_images/`, `hotkey_config.json`, `readme.media/` into executable
 - Icon: `astra_yao_tray.ico` (referenced in .spec)
 
 ### Installer (Inno Setup)
-- Script: `ZenlessZoneZeroCrosshair.iss`
+- Script: `WaifuAim.iss`
 - Builds `.exe` installer for end-users
 
 ## Project-Specific Conventions

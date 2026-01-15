@@ -1,13 +1,13 @@
-"""
-Zenless Zone Zero Crosshair Application
+"""WaifuAim application.
 
 A customizable crosshair overlay with control panel and system tray integration.
 """
 import sys
 import time
-from PyQt6.QtWidgets import QApplication, QLabel
-from PyQt6.QtGui import QPixmap
-from PyQt6.QtCore import Qt
+
+from PyQt6.QtCore import Qt, QPointF, QRectF
+from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
+from PyQt6.QtWidgets import QApplication, QLabel, QProxyStyle, QStyle
 
 from control_panel import DarkControlPanel
 from tray_icon import create_tray_icon
@@ -15,6 +15,79 @@ from hotkeys import setup_hotkeys
 from standard_crosshair import initialize_standard_crosshair
 from utils import read_app_settings, set_label_art_from_path
 from art_overlay import ArtOverlayController
+
+
+APP_NAME = "WaifuAim"
+
+
+class _PurpleCheckBoxStyle(QProxyStyle):
+    """Draw a real purple checkmark for all QCheckBox indicators.
+
+    This avoids stylesheet/SVG inconsistencies where the checked state only looks
+    slightly brighter with no visible mark.
+    """
+
+    _BORDER_UNCHECKED = QColor(230, 225, 255, 90)
+    _BORDER_CHECKED = QColor(124, 92, 255, 200)
+    _CHECK = QColor(124, 92, 255)
+
+    def pixelMetric(self, metric, option=None, widget=None):  # type: ignore[override]
+        if metric in (
+            QStyle.PixelMetric.PM_IndicatorWidth,
+            QStyle.PixelMetric.PM_IndicatorHeight,
+        ):
+            return 16
+        return super().pixelMetric(metric, option, widget)
+
+    def drawPrimitive(self, element, option, painter, widget=None):  # type: ignore[override]
+        if element != QStyle.PrimitiveElement.PE_IndicatorCheckBox or option is None or painter is None:
+            return super().drawPrimitive(element, option, painter, widget)
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        r = QRectF(option.rect)
+        # Make room for pen width.
+        r = r.adjusted(1.0, 1.0, -1.0, -1.0)
+        radius = min(4.0, r.width() / 3.5, r.height() / 3.5)
+
+        state = option.state
+        checked = bool(state & QStyle.StateFlag.State_On)
+        indeterminate = bool(state & QStyle.StateFlag.State_NoChange)
+
+        border = self._BORDER_CHECKED if checked else self._BORDER_UNCHECKED
+        painter.setPen(QPen(border, 1.0))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(r, radius, radius)
+
+        if indeterminate and not checked:
+            pen = QPen(QColor(230, 225, 255, 170), 2.0)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            y = r.y() + r.height() * 0.5
+            painter.drawLine(
+                QPointF(r.x() + r.width() * 0.22, y),
+                QPointF(r.x() + r.width() * 0.78, y),
+            )
+
+        if checked:
+            pen = QPen(self._CHECK, max(2.0, r.width() * 0.16))
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+
+            x = r.x()
+            y = r.y()
+            w = r.width()
+            h = r.height()
+            path = QPainterPath()
+            path.moveTo(x + w * 0.22, y + h * 0.56)
+            path.lineTo(x + w * 0.42, y + h * 0.76)
+            path.lineTo(x + w * 0.80, y + h * 0.30)
+            painter.drawPath(path)
+
+        painter.restore()
+        return
 
 
 def create_crosshair_label(app, image_path: str | None = None):
@@ -55,6 +128,22 @@ def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # Important for tray applications
 
+    # App identity (Windows task switcher/tray/tooltips).
+    try:
+        app.setApplicationName(APP_NAME)
+    except Exception:
+        pass
+    try:
+        app.setApplicationDisplayName(APP_NAME)
+    except Exception:
+        pass
+
+    # Ensure checkboxes have a visible checkmark (✔) when active.
+    try:
+        app.setStyle(_PurpleCheckBoxStyle(app.style()))
+    except Exception:
+        pass
+
     settings = {}
     try:
         settings = read_app_settings()
@@ -65,8 +154,6 @@ def main():
     # Base image label: keep transparent by default; art overlays are managed
     # as separate elements via the Art Manager.
     image_label = create_crosshair_label(app, image_path=None)
-    if not autostart_enabled:
-        image_label.show()
 
     # Create separate label for generated crosshair overlay and load saved settings
     crosshair_label = create_crosshair_label(app, image_path=None)
@@ -103,7 +190,7 @@ def main():
     tray_icon = create_tray_icon(app, image_label, control_panel)
 
     # Setup keyboard hotkeys
-    setup_hotkeys(image_label, overlay_controller=art_overlay)
+    setup_hotkeys(image_label, crosshair_label=crosshair_label, overlay_controller=art_overlay)
 
     sys.exit(app.exec())
 

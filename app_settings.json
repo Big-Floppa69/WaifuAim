@@ -31,11 +31,11 @@
   ],
   "art_overlays": {
     "display_images/miyabi-hoshimi-miyabi.mp4": {
-      "enabled": true,
+      "enabled": false,
       "opacity": 1.0,
       "transform": {
-        "x": -124.45454545454538,
-        "y": 648.4545454545454,
+        "x": 1595.1818181818173,
+        "y": 32.09090909090901,
         "zoom": 0.65,
         "rotation": 0.0
       }
@@ -48,26 +48,152 @@
     "display_images/nagatoro.png": {
       "enabled": false,
       "opacity": 1.0,
-      "transform": {}
+      "transform": {
+        "x": -50.0,
+        "y": 39.0
+      }
     },
     "display_images/astolfo2.png": {
       "enabled": false,
       "opacity": 1.0,
-      "transform": {}
+      "transform": {
+        "x": 1.1818181818181301,
+        "y": -4.454545454545041,
+        "zoom": 1.0,
+        "rotation": 0.0
+      }
     },
     "display_images/astra_yao.png": {
-      "enabled": true,
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {
+        "x": 0.0,
+        "y": 0.0,
+        "zoom": 1.0,
+        "rotation": 0.0
+      }
+    },
+    "display_images/jane_doe.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {
+        "x": 0.0,
+        "y": 0.0,
+        "zoom": 1.0,
+        "rotation": 0.0
+      }
+    },
+    "display_images/astolfo3.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {
+        "x": 406.9999999999997,
+        "y": 462.90909090909076,
+        "zoom": 0.4,
+        "rotation": 0.0
+      }
+    },
+    "display_images/astolfo4.png": {
+      "enabled": false,
       "opacity": 1.0,
       "transform": {}
+    },
+    "display_images/ellen_joe.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {}
+    },
+    "display_images/frickmeme.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {}
+    },
+    "display_images/jane_doe2.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {
+        "x": 1294.272727272727,
+        "y": 37.454545454545155,
+        "zoom": 0.38,
+        "rotation": 0.0
+      }
+    },
+    "display_images/Дизайн без назви (4).png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {
+        "x": -39.727272727272634,
+        "y": -369.18181818181836,
+        "zoom": 0.28,
+        "rotation": 0.0
+      }
+    },
+    "display_images/3b8cfa5fe8b80acff7edf3d465958bd2.jpg": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {}
+    },
+    "display_images/mitsuri_kanroji.png": {
+      "enabled": true,
+      "opacity": 1.0,
+      "transform": {
+        "x": 673.6581818181819,
+        "y": 415.090909090909,
+        "zoom": 0.28,
+        "rotation": 0.0
+      }
     }
   },
-  "art_combos": [
+  "art_combos": [],
+  "art_cycle_sequence": [
     {
-      "name": "AstraYao+Miaby",
-      "keys": [
-        "display_images/astra_yao.png",
-        "display_images/miyabi-hoshimi-miyabi.mp4"
-      ]
+      "type": "file",
+      "key": "display_images/astolfo1.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/astolfo2.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/astolfo3.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/astolfo4.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/astra_yao.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/ellen_joe.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/frickmeme.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/jane_doe.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/jane_doe2.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/miyabi-hoshimi-miyabi.mp4"
+    },
+    {
+      "type": "file",
+      "key": "display_images/nagatoro.png"
+    },
+    {
+      "type": "combo",
+      "name": "Combo"
     }
-  ]
+  ],
+  "language": "en"
 }

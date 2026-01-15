@@ -30,9 +30,17 @@ from utils import (
     mirror_horizontal,
     get_art_list,
     set_label_art_from_path,
+    clear_label_art,
     refresh_label_pixmap_for_colorblind_mode,
     transparent,
     UI_THEME,
+    get_art_cycle_entries,
+    get_app_language_from_disk,
+    set_app_language_on_disk,
+    SUPPORTED_LANGUAGES,
+    tr,
+    tr_lit,
+    apply_language_to_object_tree,
 )
 from image_manager import ImageManagerDialog
 from hotkey_manager import HotkeyManagerDialog
@@ -131,6 +139,12 @@ class DarkControlPanel(QWidget):
         self._resize_start_geom = None
         self._size_grip = None
         self.init_ui()
+
+        # Apply initial language across the whole panel.
+        try:
+            apply_language_to_object_tree(self)
+        except Exception:
+            pass
         # Dragging helpers
         self._maybe_drag = False
         self._press_pos = None
@@ -333,7 +347,7 @@ class DarkControlPanel(QWidget):
         self._back_btn.setVisible(False)
         title_bar_layout.addWidget(self._back_btn)
 
-        self._title_label = QLabel("Crosshair Control")
+        self._title_label = QLabel(tr_lit("Crosshair Control"))
         self._title_label.setStyleSheet(
             f"""
             QLabel {{
@@ -367,7 +381,7 @@ class DarkControlPanel(QWidget):
             if self._back_btn is not None:
                 self._back_btn.setVisible(False)
             if self._title_label is not None:
-                self._title_label.setText("Standard Crosshair")
+                self._title_label.setText("WaifuAim")
                 self._title_label.setVisible(True)
         except Exception:
             pass
@@ -427,13 +441,23 @@ class DarkControlPanel(QWidget):
 
     def _format_colorblind_mode_label(self, mode: str) -> str:
         mode = str(mode or "default").strip().lower() or "default"
-        mapping = {
-            "default": "Default",
-            "protanopia": "Protanopia",
-            "deuteranopia": "Deuteranopia",
-            "tritanopia": "Tritanopia",
-            "achromatopsia": "Achromatopsia",
-        }
+        lang = get_app_language_from_disk("en")
+        if lang == "ru":
+            mapping = {
+                "default": "По умолчанию",
+                "protanopia": "Протанопия",
+                "deuteranopia": "Дейтеранопия",
+                "tritanopia": "Тританопия",
+                "achromatopsia": "Ахроматопсия",
+            }
+        else:
+            mapping = {
+                "default": "Default",
+                "protanopia": "Protanopia",
+                "deuteranopia": "Deuteranopia",
+                "tritanopia": "Tritanopia",
+                "achromatopsia": "Achromatopsia",
+            }
         return mapping.get(mode, mode.capitalize())
 
     def _update_opacity_accordion_title(self) -> None:
@@ -442,7 +466,183 @@ class DarkControlPanel(QWidget):
             return
         data = self._read_app_settings()
         mode = str(data.get("colorblind_mode", "default") or "default").strip().lower()
-        header.setText(f"Opacity (Colorblind: {self._format_colorblind_mode_label(mode)})")
+        title = tr("opacity_language_title")
+        prefix = tr("colorblind_prefix")
+        header.setText(f"{title} ({prefix}: {self._format_colorblind_mode_label(mode)})")
+
+    def _apply_language_from_disk(self) -> None:
+        combo = getattr(self, "language_combo", None)
+        if combo is None:
+            return
+        lang = get_app_language_from_disk("en")
+        idx = combo.findData(lang)
+        if idx < 0:
+            idx = combo.findData("en")
+        combo.blockSignals(True)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+        combo.blockSignals(False)
+
+    def _on_language_changed(self, _index: int) -> None:
+        combo = getattr(self, "language_combo", None)
+        if combo is None:
+            return
+        lang = str(combo.currentData() or "en").strip().lower() or "en"
+        set_app_language_on_disk(lang)
+        self._update_opacity_accordion_texts()
+        self._update_opacity_accordion_title()
+
+        # Preserve actual crosshair visibility while we rebuild UI.
+        try:
+            was_visible = bool(self.crosshair_label.isVisible())
+        except Exception:
+            was_visible = None
+
+        # Preserve expanded/collapsed accordion state in the embedded crosshair UI.
+        accordion_state = None
+        try:
+            old = getattr(self, "crosshair_dialog", None)
+            fn = getattr(old, "get_accordion_state", None)
+            if callable(fn):
+                accordion_state = fn()
+        except Exception:
+            accordion_state = None
+
+        # Rebuild embedded crosshair settings so its UI strings update.
+        try:
+            self._rebuild_embedded_crosshair_dialog()
+        except Exception:
+            pass
+
+        # Restore accordion expanded/collapsed state after rebuild.
+        try:
+            new = getattr(self, "crosshair_dialog", None)
+            fn = getattr(new, "set_accordion_state", None)
+            if callable(fn):
+                fn(accordion_state)
+        except Exception:
+            pass
+
+        # Restore visibility (language switching must not force-show/hide).
+        try:
+            if was_visible is not None:
+                self.crosshair_label.setVisible(bool(was_visible))
+                if self.crosshair_label.isVisible():
+                    self.crosshair_label.raise_()
+        except Exception:
+            pass
+
+        # Refresh control panel titles/tooltips.
+        try:
+            self._apply_language_to_control_panel()
+        except Exception:
+            pass
+
+        # Apply the language to all currently open windows/dialogs.
+        try:
+            from PyQt6.QtWidgets import QApplication
+
+            for w in QApplication.topLevelWidgets():
+                apply_language_to_object_tree(w)
+                fn = getattr(w, "retranslate_dynamic_texts", None)
+                if callable(fn):
+                    fn()
+        except Exception:
+            pass
+
+    def _rebuild_embedded_crosshair_dialog(self) -> None:
+        below = getattr(self, "_below_layout", None)
+        if below is None:
+            return
+        old = getattr(self, "crosshair_dialog", None)
+        if old is None:
+            return
+
+        try:
+            below.removeWidget(old)
+        except Exception:
+            pass
+        try:
+            old.setParent(None)
+            old.deleteLater()
+        except Exception:
+            pass
+
+        self.crosshair_dialog = StandardCrosshairDialog(
+            self.crosshair_label,
+            self,
+            embedded=True,
+            on_request_close=None,
+        )
+        self.crosshair_dialog.visibility_changed.connect(self._on_crosshair_dialog_visibility)
+        if hasattr(self.crosshair_dialog, "presets_changed"):
+            self.crosshair_dialog.presets_changed.connect(self._refresh_crosshair_presets_ui)
+
+        below.addWidget(self.crosshair_dialog, 1)
+
+    def _apply_language_to_control_panel(self) -> None:
+        # Main title (top-left)
+        lbl = getattr(self, "_title_label", None)
+        if lbl is not None:
+            # The title changes depending on tab; keep it simple here.
+            cur = str(lbl.text() or "")
+            if cur in ("Crosshair Control", tr_lit("Crosshair Control")):
+                lbl.setText(tr_lit("Crosshair Control"))
+            elif cur in ("WaifuAim", tr_lit("WaifuAim")):
+                lbl.setText("WaifuAim")
+
+        # Tooltips/state labels.
+        self._sync_action_bar_state()
+
+        # Best-effort: translate any remaining literal strings in the widget tree.
+        try:
+            apply_language_to_object_tree(self)
+        except Exception:
+            pass
+
+    def _update_opacity_accordion_texts(self) -> None:
+        # Update the visible strings inside the opacity/language accordion.
+        lbl = getattr(self, "_opacity_crosshair_label", None)
+        if lbl is not None:
+            lbl.setText(tr("crosshair_opacity"))
+        lbl = getattr(self, "_opacity_window_label", None)
+        if lbl is not None:
+            lbl.setText(tr("window_opacity"))
+        lbl = getattr(self, "_opacity_mode_label", None)
+        if lbl is not None:
+            lbl.setText(tr("colorblind_mode"))
+        lbl = getattr(self, "_opacity_language_label", None)
+        if lbl is not None:
+            lbl.setText(tr("language"))
+
+        # Update language combo texts.
+        combo = getattr(self, "language_combo", None)
+        if combo is not None:
+            cur = combo.currentData()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem(tr("english"), "en")
+            combo.addItem(tr("russian"), "ru")
+            idx = combo.findData(cur)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            combo.blockSignals(False)
+
+        # Update colorblind option labels.
+        cb = getattr(self, "colorblind_mode_combo", None)
+        if cb is not None:
+            cur = cb.currentData()
+            cb.blockSignals(True)
+            cb.clear()
+            cb.addItem(self._format_colorblind_mode_label("default"), "default")
+            cb.addItem(self._format_colorblind_mode_label("protanopia"), "protanopia")
+            cb.addItem(self._format_colorblind_mode_label("deuteranopia"), "deuteranopia")
+            cb.addItem(self._format_colorblind_mode_label("tritanopia"), "tritanopia")
+            cb.addItem(self._format_colorblind_mode_label("achromatopsia"), "achromatopsia")
+            idx = cb.findData(cur)
+            if idx >= 0:
+                cb.setCurrentIndex(idx)
+            cb.blockSignals(False)
 
     def _apply_colorblind_mode_from_disk(self) -> None:
         combo = getattr(self, "colorblind_mode_combo", None)
@@ -486,6 +686,7 @@ class DarkControlPanel(QWidget):
         below = QVBoxLayout(self._below_action_container)
         below.setContentsMargins(0, 0, 0, 0)
         below.setSpacing(10)
+        self._below_layout = below
 
         below.addWidget(self._create_opacity_accordion())
 
@@ -625,8 +826,8 @@ class DarkControlPanel(QWidget):
         bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         bar.setFixedHeight(64)
 
-        self._btn_toggle_image = self._create_icon_button("🖼️", "Show/Hide Image", self.toggle_image_visibility, checkable=True)
-        self._btn_toggle_crosshair = self._create_icon_button("🎯", "Show/Hide Crosshair", self.toggle_crosshair_visibility, checkable=True)
+        self._btn_toggle_image = self._create_icon_button("🖼️", tr_lit("Show/Hide Image"), self.toggle_image_visibility, checkable=True)
+        self._btn_toggle_crosshair = self._create_icon_button("🎯", tr_lit("Show/Hide Crosshair"), self.toggle_crosshair_visibility, checkable=True)
         self._btn_next_image = self._create_icon_button("⏭️", "Next Image", self.switch_image)
         self._btn_manage_images = self._create_icon_button("🎨", "Art Manager", self.open_image_manager)
         self._btn_hotkeys = self._create_icon_button("⌨️", "Customize Hotkeys", self.open_hotkey_manager)
@@ -695,9 +896,13 @@ class DarkControlPanel(QWidget):
         crosshair_layout = QHBoxLayout(crosshair_row)
         crosshair_layout.setContentsMargins(12, 10, 12, 10)
         crosshair_layout.setSpacing(10)
-        crosshair_label = QLabel("Crosshair Opacity")
+        crosshair_label = QLabel(tr("crosshair_opacity"))
         crosshair_label.setStyleSheet(f"color: {UI_THEME['muted']}; font-size: 11px; font-weight: 700;")
         crosshair_layout.addWidget(crosshair_label)
+        try:
+            self._opacity_crosshair_label = crosshair_label
+        except Exception:
+            pass
 
         self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
         self.opacity_slider.setMinimum(0)
@@ -734,9 +939,13 @@ class DarkControlPanel(QWidget):
         window_layout = QHBoxLayout(window_row)
         window_layout.setContentsMargins(12, 10, 12, 10)
         window_layout.setSpacing(10)
-        window_label = QLabel("Window Opacity")
+        window_label = QLabel(tr("window_opacity"))
         window_label.setStyleSheet(f"color: {UI_THEME['muted']}; font-size: 11px; font-weight: 700;")
         window_layout.addWidget(window_label)
+        try:
+            self._opacity_window_label = window_label
+        except Exception:
+            pass
 
         self.window_opacity_slider = QSlider(Qt.Orientation.Horizontal)
         self.window_opacity_slider.setMinimum(30)
@@ -764,9 +973,13 @@ class DarkControlPanel(QWidget):
         mode_layout = QHBoxLayout(mode_row)
         mode_layout.setContentsMargins(12, 10, 12, 10)
         mode_layout.setSpacing(10)
-        mode_label = QLabel("Colorblind Mode")
+        mode_label = QLabel(tr("colorblind_mode"))
         mode_label.setStyleSheet(f"color: {UI_THEME['muted']}; font-size: 11px; font-weight: 700;")
         mode_layout.addWidget(mode_label)
+        try:
+            self._opacity_mode_label = mode_label
+        except Exception:
+            pass
 
         self.colorblind_mode_combo = QComboBox()
         self.colorblind_mode_combo.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -777,16 +990,42 @@ class DarkControlPanel(QWidget):
             f"QComboBox::drop-down {{ border: none; width: 18px; }}"
             f"QComboBox QAbstractItemView {{ background-color: {UI_THEME['surface']}; color: {UI_THEME['text']}; border: 1px solid {UI_THEME['border']}; selection-background-color: {UI_THEME['accent']}; }}"
         )
-        self.colorblind_mode_combo.addItem("Default", "default")
-        self.colorblind_mode_combo.addItem("Protanopia", "protanopia")
-        self.colorblind_mode_combo.addItem("Deuteranopia", "deuteranopia")
-        self.colorblind_mode_combo.addItem("Tritanopia", "tritanopia")
-        self.colorblind_mode_combo.addItem("Achromatopsia", "achromatopsia")
+        self.colorblind_mode_combo.addItem(self._format_colorblind_mode_label("default"), "default")
+        self.colorblind_mode_combo.addItem(self._format_colorblind_mode_label("protanopia"), "protanopia")
+        self.colorblind_mode_combo.addItem(self._format_colorblind_mode_label("deuteranopia"), "deuteranopia")
+        self.colorblind_mode_combo.addItem(self._format_colorblind_mode_label("tritanopia"), "tritanopia")
+        self.colorblind_mode_combo.addItem(self._format_colorblind_mode_label("achromatopsia"), "achromatopsia")
         self.colorblind_mode_combo.currentIndexChanged.connect(
             lambda _: self._persist_colorblind_mode(self.colorblind_mode_combo.currentData())
         )
         mode_layout.addWidget(self.colorblind_mode_combo, 1)
         layout.addWidget(mode_row)
+
+        # Language
+        lang_row = QFrame()
+        lang_row.setStyleSheet(
+            f"QFrame {{ background-color: {UI_THEME['surface2']}; border-radius: 12px; border: 1px solid {UI_THEME['border']}; }}"
+        )
+        lang_layout = QHBoxLayout(lang_row)
+        lang_layout.setContentsMargins(12, 10, 12, 10)
+        lang_layout.setSpacing(10)
+        lang_label = QLabel(tr("language"))
+        lang_label.setStyleSheet(f"color: {UI_THEME['muted']}; font-size: 11px; font-weight: 700;")
+        lang_layout.addWidget(lang_label)
+        try:
+            self._opacity_language_label = lang_label
+        except Exception:
+            pass
+
+        self.language_combo = QComboBox()
+        self.language_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.language_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.language_combo.setStyleSheet(self.colorblind_mode_combo.styleSheet())
+        self.language_combo.addItem(tr("english"), "en")
+        self.language_combo.addItem(tr("russian"), "ru")
+        self.language_combo.currentIndexChanged.connect(self._on_language_changed)
+        lang_layout.addWidget(self.language_combo, 1)
+        layout.addWidget(lang_row)
 
         # Apply persisted window opacity now that controls exist.
         try:
@@ -800,7 +1039,13 @@ class DarkControlPanel(QWidget):
         except Exception:
             pass
 
-        wrapper = self._create_accordion("Opacity", content, expanded=False)
+        # Apply persisted language now that the combo exists.
+        try:
+            self._apply_language_from_disk()
+        except Exception:
+            pass
+
+        wrapper = self._create_accordion(tr("opacity_language_title"), content, expanded=False)
         try:
             self._opacity_accordion_header = getattr(wrapper, "_header_btn", None)
             self._update_opacity_accordion_title()
@@ -814,12 +1059,12 @@ class DarkControlPanel(QWidget):
                 self._btn_toggle_image.blockSignals(True)
                 self._btn_toggle_image.setChecked(bool(self.image_label.isVisible()))
                 self._btn_toggle_image.blockSignals(False)
-                self._btn_toggle_image.setToolTip("Hide Image" if self.image_label.isVisible() else "Show Image")
+                self._btn_toggle_image.setToolTip(tr_lit("Hide Image") if self.image_label.isVisible() else tr_lit("Show Image"))
             if self._btn_toggle_crosshair is not None:
                 self._btn_toggle_crosshair.blockSignals(True)
                 self._btn_toggle_crosshair.setChecked(bool(self.crosshair_label.isVisible()))
                 self._btn_toggle_crosshair.blockSignals(False)
-                self._btn_toggle_crosshair.setToolTip("Hide Crosshair" if self.crosshair_label.isVisible() else "Show Crosshair")
+                self._btn_toggle_crosshair.setToolTip(tr_lit("Hide Crosshair") if self.crosshair_label.isVisible() else tr_lit("Show Crosshair"))
         except Exception:
             return
 
@@ -950,14 +1195,14 @@ class DarkControlPanel(QWidget):
         content_layout.addWidget(standard_btn)
         
         # Visibility toggle buttons
-        self.image_toggle_btn = self.create_button("🖼️ Hide Image", role="neutral")
+        self.image_toggle_btn = self.create_button(tr_lit("🖼️ Hide Image"), role="neutral")
         self.image_toggle_btn.clicked.connect(self.toggle_image_visibility)
-        self._register_collapsible_button(self.image_toggle_btn, "🖼️ Hide Image")
+        self._register_collapsible_button(self.image_toggle_btn, tr_lit("🖼️ Hide Image"))
         content_layout.addWidget(self.image_toggle_btn)
 
-        self.crosshair_toggle_btn = self.create_button("🎯 Show Crosshair", role="neutral")
+        self.crosshair_toggle_btn = self.create_button(tr_lit("🎯 Show Crosshair"), role="neutral")
         self.crosshair_toggle_btn.clicked.connect(self.toggle_crosshair_visibility)
-        self._register_collapsible_button(self.crosshair_toggle_btn, "🎯 Show Crosshair")
+        self._register_collapsible_button(self.crosshair_toggle_btn, tr_lit("🎯 Show Crosshair"))
         content_layout.addWidget(self.crosshair_toggle_btn)
         self._update_image_toggle_text()
         self._update_crosshair_toggle_text()
@@ -977,7 +1222,7 @@ class DarkControlPanel(QWidget):
         preset_layout.setContentsMargins(14, 14, 14, 14)
         preset_layout.setSpacing(12)
 
-        preset_label = QLabel("Preset")
+        preset_label = QLabel(tr_lit("Preset"))
         preset_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         preset_label.setFixedHeight(38)
         preset_label.setStyleSheet(
@@ -1220,13 +1465,13 @@ class DarkControlPanel(QWidget):
         # Preset/profile icon button shown only when collapsed.
         self._drawer_preset_icon_btn = QPushButton("👤")
         self._drawer_preset_icon_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._drawer_preset_icon_btn.setToolTip("Preset")
+        self._drawer_preset_icon_btn.setToolTip(tr_lit("Preset"))
         self._drawer_preset_icon_btn.clicked.connect(self._toggle_drawer)
         _apply_sidebar_button_style(self._drawer_preset_icon_btn, True)
         sidebar_layout.addWidget(self._drawer_preset_icon_btn)
 
-        self._drawer_image_toggle_btn = _mk_sidebar_btn("🖼️ Hide Image", self.toggle_image_visibility)
-        self._drawer_crosshair_toggle_btn = _mk_sidebar_btn("🎯 Show Crosshair", self.toggle_crosshair_visibility)
+        self._drawer_image_toggle_btn = _mk_sidebar_btn(tr_lit("🖼️ Hide Image"), self.toggle_image_visibility)
+        self._drawer_crosshair_toggle_btn = _mk_sidebar_btn(tr_lit("🎯 Show Crosshair"), self.toggle_crosshair_visibility)
 
         self._sidebar_preset_frame = QFrame()
         self._sidebar_preset_frame.setStyleSheet(
@@ -1242,7 +1487,7 @@ class DarkControlPanel(QWidget):
         preset_layout.setContentsMargins(10, 8, 10, 8)
         preset_layout.setSpacing(8)
 
-        preset_label = QLabel("Preset")
+        preset_label = QLabel(tr_lit("Preset"))
         preset_label.setStyleSheet(f"color: {UI_THEME['muted']}; font-size: 12px; background: transparent; min-width: 46px;")
         self._drawer_preset_combo = QComboBox()
         self._drawer_preset_combo.setFixedHeight(28)
@@ -1597,7 +1842,7 @@ class DarkControlPanel(QWidget):
         wrapper_layout.setSpacing(8)
 
         # Opacity label
-        opacity_label = QLabel("Opacity")
+        opacity_label = QLabel(tr_lit("Opacity"))
         opacity_label.setStyleSheet(
             f"""
             QLabel {{
@@ -1790,7 +2035,7 @@ class DarkControlPanel(QWidget):
         return color.name()
     
     def _update_image_toggle_text(self):
-        text = "🖼️ Hide Image" if self.image_label.isVisible() else "🖼️ Show Image"
+        text = tr_lit("🖼️ Hide Image") if self.image_label.isVisible() else tr_lit("🖼️ Show Image")
         if hasattr(self, "image_toggle_btn"):
             try:
                 self.image_toggle_btn.setProperty("fullText", text)
@@ -1813,7 +2058,7 @@ class DarkControlPanel(QWidget):
                 pass
 
     def _update_crosshair_toggle_text(self):
-        text = "🎯 Hide Crosshair" if self.crosshair_label.isVisible() else "🎯 Show Crosshair"
+        text = tr_lit("🎯 Hide Crosshair") if self.crosshair_label.isVisible() else tr_lit("🎯 Show Crosshair")
         if hasattr(self, "crosshair_toggle_btn"):
             try:
                 self.crosshair_toggle_btn.setProperty("fullText", text)
@@ -1856,36 +2101,48 @@ class DarkControlPanel(QWidget):
             except Exception:
                 pass
         else:
-            # Show selection overlays if any; otherwise show single art as before.
+            # Show selection overlays if any. If nothing is selected, keep the
+            # base label transparent (do NOT auto-select a file), otherwise the
+            # user's unchecked state gets overridden when toggling visibility.
             try:
                 self.image_label.show()
             except Exception:
                 pass
 
-            if selected:
+            # Always clear base label when using the overlay pipeline.
+            try:
+                clear_label_art(self.image_label)
+            except Exception:
+                pass
+
+            if self.art_overlay_controller is not None:
+                # Render whatever is currently checked (may be empty).
                 try:
-                    if self.art_overlay_controller is not None:
-                        self.art_overlay_controller.render_selected_from_folder("display_images")
-                        self.art_overlay_controller.set_all_visible(True)
-                    # Keep the base label transparent in multi-art mode.
-                    try:
-                        pm = QPixmap(self.image_label.width(), self.image_label.height())
-                        pm.fill(Qt.GlobalColor.transparent)
-                        self.image_label.setPixmap(pm)
-                    except Exception:
-                        pass
+                    self.art_overlay_controller.request_render_selected_atomic(
+                        "display_images",
+                        visible=True,
+                    )
                 except Exception:
                     pass
             else:
-                # Single-art mode: if nothing loaded yet, load first.
-                try:
-                    arts = get_art_list()
-                    if arts:
-                        if self.current_image_index < 0 or self.current_image_index >= len(arts):
-                            self.current_image_index = 0
-                        set_label_art_from_path(self.image_label, arts[self.current_image_index])
-                except Exception:
-                    pass
+                # Legacy mode (no overlay controller): keep the old behavior.
+                if not selected:
+                    try:
+                        arts = get_art_list()
+                        if arts:
+                            if self.current_image_index < 0 or self.current_image_index >= len(arts):
+                                self.current_image_index = 0
+                            path = arts[self.current_image_index]
+                            try:
+                                set_label_art_from_path(self.image_label, path)
+                            except Exception:
+                                try:
+                                    pix = QPixmap(path)
+                                    self.image_label.setPixmap(pix)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
 
         self._update_image_toggle_text()
         self._sync_action_bar_state()
@@ -1927,22 +2184,8 @@ class DarkControlPanel(QWidget):
     
     def switch_image(self):
         """Switch to the next crosshair image."""
-        # Build cycle list: files + saved combos.
-        files = get_art_list()
-        data = self._read_app_settings()
-        combos = data.get("art_combos")
-        combo_entries = []
-        if isinstance(combos, list):
-            for c in combos:
-                if not isinstance(c, dict):
-                    continue
-                name = str(c.get("name") or "").strip()
-                keys = c.get("keys")
-                if not name or not isinstance(keys, list) or not keys:
-                    continue
-                combo_entries.append({"type": "combo", "name": name, "keys": [str(k) for k in keys if str(k).strip()]})
-
-        entries = ([{"type": "file", "path": p} for p in files] + combo_entries)
+        # Build cycle list: user-defined order (Art Manager), including combos.
+        entries = get_art_cycle_entries("display_images")
         if not entries:
             return
 
@@ -1954,30 +2197,68 @@ class DarkControlPanel(QWidget):
             keys = entry.get("keys") or []
             try:
                 if self.art_overlay_controller is not None:
+                    # Clear base label BEFORE any overlay render/show.
+                    clear_label_art(self.image_label)
                     self.art_overlay_controller.set_selection_keys(keys)
-                    if self.image_label.isVisible():
-                        self.art_overlay_controller.render_selected_from_folder("display_images")
-                        self.art_overlay_controller.set_all_visible(True)
-                    # Keep base label transparent.
-                    pm = QPixmap(self.image_label.width(), self.image_label.height())
-                    pm.fill(Qt.GlobalColor.transparent)
-                    self.image_label.setPixmap(pm)
+                    self.art_overlay_controller.request_render_selected_atomic(
+                        "display_images",
+                        visible=bool(self.image_label.isVisible()),
+                    )
             except Exception:
                 pass
             return
 
-        # File entry: clear selection (no checkmarks) and behave as usual.
-        try:
-            if self.art_overlay_controller is not None:
-                self.art_overlay_controller.clear_selection()
-                self.art_overlay_controller.set_all_visible(False)
-        except Exception:
-            pass
-
         path = str(entry.get("path") or "").strip()
         if not path:
             return
+        def _key_for_path(p: str) -> str:
+            try:
+                root = os.path.dirname(os.path.abspath(__file__))
+                return os.path.relpath(os.path.abspath(p), root).replace("\\", "/")
+            except Exception:
+                return os.path.abspath(p).replace("\\", "/")
+
+        # Prefer overlay pipeline so single-file display is editable like combos.
+        if self.art_overlay_controller is not None:
+            key = _key_for_path(path)
+            try:
+                clear_label_art(self.image_label)
+                self.art_overlay_controller.set_selection_keys([key])
+
+                def _fallback(_e=None):
+                    try:
+                        self.art_overlay_controller.clear_selection()
+                        self.art_overlay_controller.set_all_visible(False)
+                    except Exception:
+                        pass
+                    try:
+                        set_label_art_from_path(self.image_label, path)
+                    except Exception:
+                        try:
+                            pix = QPixmap(path)
+                            self.image_label.setPixmap(pix)
+                        except Exception:
+                            pass
+
+                self.art_overlay_controller.request_render_selected_atomic(
+                    "display_images",
+                    visible=bool(self.image_label.isVisible()),
+                    on_error=_fallback,
+                )
+                return
+            except Exception:
+                # Fall through to legacy rendering.
+                pass
+
+        # Fallback to legacy rendering into the base label.
         try:
+            # Ensure overlay selection doesn't remain visible over the base label.
+            if self.art_overlay_controller is not None:
+                try:
+                    self.art_overlay_controller.clear_selection()
+                    self.art_overlay_controller.set_all_visible(False)
+                except Exception:
+                    pass
             set_label_art_from_path(self.image_label, path)
         except Exception:
             try:
@@ -2035,6 +2316,15 @@ class DarkControlPanel(QWidget):
                 self._hotkey_info_label.setText(get_current_hotkeys())
         except Exception:
             return
+
+        # Keep in-menu hotkey fields in sync with Hotkey Manager.
+        try:
+            dlg = getattr(self, "crosshair_dialog", None)
+            fn = getattr(dlg, "sync_hotkeys_from_config", None)
+            if callable(fn):
+                fn()
+        except Exception:
+            pass
     
     def toggle_panel(self):
         """Toggle the control panel visibility."""
