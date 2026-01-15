@@ -47,7 +47,11 @@ The generated crosshair editor lets you save and switch presets. The Randomize b
 
 ## Installer (recommended)
 
-If you have the installer, just run it and follow the steps. It includes everything needed to start the app (no Python setup required).
+Download the latest installer from GitHub Releases:
+
+- https://github.com/Big-Floppa69/WaifuAim/releases/latest
+
+Then run the `WaifuAim_Setup_*.exe` file and follow the steps. It includes everything needed to start the app (no Python setup required).
 
 ## 🚀 Installing (for development)
 
