@@ -40,11 +40,11 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QColor, QPainter, QPixmap, QPainterPath, QPen, QKeySequence, QShortcut, QRegion
 from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal, QTimer
 
-from utils import UI_THEME, tr_lit, apply_language_to_object_tree
+from utils import UI_THEME, tr_lit, apply_language_to_object_tree, get_app_config_path
 
-CONFIG_PATH = Path(__file__).resolve().with_name("standard_crosshair_settings.json")
+CONFIG_PATH = get_app_config_path("standard_crosshair_settings.json")
 PROFILES_IMPORT_PATH = Path(__file__).resolve().with_name("crosshair_profiles.json")
-HOTKEY_CONFIG_PATH = Path(__file__).resolve().with_name("hotkey_config.json")
+HOTKEY_CONFIG_PATH = get_app_config_path("hotkey_config.json")
 MAX_CUSTOM_COLORS = 16
 ALLOWED_DOT_SHAPES = {"circle", "square", "diamond"}
 ALLOWED_CROSSHAIR_STYLES = {"plus", "x"}
@@ -761,6 +761,12 @@ class HoldKeyCaptureEdit(QLineEdit):
         if not key_name:
             return
 
+        # Reset any pending finalize; we'll schedule again below.
+        try:
+            self._finalize_timer.stop()
+        except Exception:
+            pass
+
         # Track modifiers separately so we can support multi-key chords like "q+w".
         try:
             m = event.modifiers()
@@ -782,17 +788,42 @@ class HoldKeyCaptureEdit(QLineEdit):
             except Exception:
                 pass
 
-            # Don't finalize on modifiers alone; wait for a non-modifier key.
+            # Allow modifier-only bindings (e.g. "alt") for hotkeys.
+            # We finalize after a short delay so users can still press a non-mod
+            # key to form e.g. "alt+f".
             try:
-                self._finalize_timer.stop()
+                order = ["ctrl", "alt", "shift", "windows"]
+                mod_list = [m for m in order if m in self._captured_mods]
+                preview = "+".join([*mod_list, *self._captured_keys])
+                preview = _normalize_hotkey_chord(preview)
+                if preview:
+                    self.setText(preview)
             except Exception:
                 pass
+
+            if not self._captured_keys:
+                try:
+                    self._finalize_timer.setInterval(650)
+                    self._finalize_timer.start()
+                except Exception:
+                    pass
         else:
             if key_name not in self._captured_keys:
                 self._captured_keys.append(key_name)
 
+            try:
+                order = ["ctrl", "alt", "shift", "windows"]
+                mod_list = [m for m in order if m in self._captured_mods]
+                preview = "+".join([*mod_list, *self._captured_keys])
+                preview = _normalize_hotkey_chord(preview)
+                if preview:
+                    self.setText(preview)
+            except Exception:
+                pass
+
             # Finalize shortly after the last keypress.
             try:
+                self._finalize_timer.setInterval(450)
                 self._finalize_timer.start()
             except Exception:
                 pass
@@ -830,7 +861,11 @@ def _ensure_hold_fade_timer(label: QLabel) -> QTimer:
                     held = True
                     break
         else:
-            key = str(getattr(settings, "hold_fade_key", "mouse_left") or "mouse_left")
+            raw_single = getattr(settings, "hold_fade_key", None)
+            if raw_single is None:
+                key = "mouse_left"
+            else:
+                key = str(raw_single or "")
             held = _is_hold_key_pressed(key)
         target = 0.0 if held else 1.0
 
@@ -903,10 +938,14 @@ def load_settings_from_disk() -> StandardCrosshairSettings:
     except Exception:
         settings.hold_fade_keys = []
 
-    # Back-compat: ensure single key is normalized.
+    # Back-compat: normalize single key, but allow an explicit empty string
+    # (user cleared the binding).
     try:
-        single = str(getattr(settings, "hold_fade_key", "mouse_left") or "mouse_left").strip().lower()
-        settings.hold_fade_key = single or "mouse_left"
+        raw_single = getattr(settings, "hold_fade_key", None)
+        if raw_single is None:
+            settings.hold_fade_key = "mouse_left"
+        else:
+            settings.hold_fade_key = str(raw_single or "").strip().lower()
     except Exception:
         settings.hold_fade_key = "mouse_left"
 
@@ -2578,10 +2617,16 @@ class StandardCrosshairDialog(QWidget):
             f"QLineEdit:hover {{ border: 1px solid {UI_THEME['border_strong']}; }}"
         )
         self.hold_fade_key_edit.setToolTip(tr_lit("Click, then press a key or mouse button"))
-        self.hold_fade_key_edit.setText(str(getattr(self.settings, "hold_fade_key", "mouse_left") or "mouse_left"))
+        self.hold_fade_key_edit.setPlaceholderText(tr_lit("Not set"))
+        self.hold_fade_key_edit.setText(str(getattr(self.settings, "hold_fade_key", "mouse_left") or "").strip().lower())
         self.hold_fade_key_edit.key_captured.connect(self._on_hold_fade_key_captured)
+
+        self.hold_fade_clear_btn = self._create_button("×", UI_THEME["danger"], size=26)
+        self.hold_fade_clear_btn.setToolTip(tr_lit("Clear"))
+        self.hold_fade_clear_btn.clicked.connect(self._on_hold_fade_key_cleared)
         fade_row.addStretch()
         fade_row.addWidget(self.hold_fade_key_edit)
+        fade_row.addWidget(self.hold_fade_clear_btn)
         layout.addLayout(fade_row)
 
         # Randomize
@@ -2628,10 +2673,15 @@ class StandardCrosshairDialog(QWidget):
             f"QLineEdit:hover {{ border: 1px solid {UI_THEME['border_strong']}; }}"
         )
         self.randomize_hotkey_key_edit.setToolTip(tr_lit("Click, then press a key or mouse button"))
+        self.randomize_hotkey_key_edit.setPlaceholderText(tr_lit("Not set"))
         self.randomize_hotkey_key_edit.setText(_get_single_hotkey_binding_normalized("randomize_crosshair"))
         self.randomize_hotkey_key_edit.key_captured.connect(self._on_randomize_hotkey_key_captured)
+        self.randomize_hotkey_clear_btn = self._create_button("×", UI_THEME["danger"], size=26)
+        self.randomize_hotkey_clear_btn.setToolTip(tr_lit("Clear"))
+        self.randomize_hotkey_clear_btn.clicked.connect(self._on_randomize_hotkey_key_cleared)
         rand_hotkey_row.addStretch()
         rand_hotkey_row.addWidget(self.randomize_hotkey_key_edit)
+        rand_hotkey_row.addWidget(self.randomize_hotkey_clear_btn)
         layout.addLayout(rand_hotkey_row)
 
         return frame
@@ -3113,10 +3163,11 @@ class StandardCrosshairDialog(QWidget):
             self.hold_fade_checkbox.setChecked(bool(getattr(self.settings, "hold_fade_enabled", False)))
             self.hold_fade_checkbox.blockSignals(False)
         if hasattr(self, "hold_fade_key_edit"):
-            key = str(getattr(self.settings, "hold_fade_key", "mouse_left") or "mouse_left")
+            raw_single = getattr(self.settings, "hold_fade_key", None)
+            key = "mouse_left" if raw_single is None else str(raw_single or "")
             try:
                 self.hold_fade_key_edit.blockSignals(True)
-                self.hold_fade_key_edit.setText(key)
+                self.hold_fade_key_edit.setText(str(key).strip().lower())
                 self.hold_fade_key_edit.blockSignals(False)
             except Exception:
                 pass
@@ -3393,10 +3444,32 @@ class StandardCrosshairDialog(QWidget):
         if not key:
             return
         self.settings.hold_fade_key = key
+        try:
+            self.settings.hold_fade_keys = []
+        except Exception:
+            pass
         edit = getattr(self, "hold_fade_key_edit", None)
         if isinstance(edit, QLineEdit):
             try:
                 edit.setText(key)
+            except Exception:
+                pass
+        _sync_hold_fade_timer_state(self.label, self.settings)
+        self._persist_and_render()
+
+    def _on_hold_fade_key_cleared(self) -> None:
+        try:
+            self.settings.hold_fade_key = ""
+        except Exception:
+            return
+        try:
+            self.settings.hold_fade_keys = []
+        except Exception:
+            pass
+        edit = getattr(self, "hold_fade_key_edit", None)
+        if isinstance(edit, QLineEdit):
+            try:
+                edit.setText("")
             except Exception:
                 pass
         _sync_hold_fade_timer_state(self.label, self.settings)
@@ -3428,6 +3501,21 @@ class StandardCrosshairDialog(QWidget):
         if isinstance(edit, QLineEdit):
             try:
                 edit.setText(key)
+            except Exception:
+                pass
+        try:
+            from hotkeys import reload_hotkeys
+
+            reload_hotkeys()
+        except Exception:
+            pass
+
+    def _on_randomize_hotkey_key_cleared(self) -> None:
+        _set_single_hotkey_binding("randomize_crosshair", "")
+        edit = getattr(self, "randomize_hotkey_key_edit", None)
+        if isinstance(edit, QLineEdit):
+            try:
+                edit.setText("")
             except Exception:
                 pass
         try:

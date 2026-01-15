@@ -25,7 +25,6 @@ This directory contains the complete Inno Setup installer script and supporting 
    - `requirements.txt`
    - All image files (`.png`, `.ico`)
    - `display_images/` directory
-   - `readme.media/` directory
    - Any other project files
 3. **Open** `WaifuAim.iss` in Inno Setup
 4. **Build** the installer:
@@ -37,7 +36,6 @@ This directory contains the complete Inno Setup installer script and supporting 
 ### Multi-language Support
 - English (default)
 - Russian
-- Ukrainian
 
 ### Installation Options
 - Desktop icon creation
@@ -79,8 +77,8 @@ The uninstaller will:
 ### Version Updates
 Update these constants in the `.iss` file:
 ```pascal
-#define MyAppVersion "1.0.0"
-#define MyAppPublisher "Your Publisher Name"
+#define MyAppVersion "1.0"
+#define MyAppPublisher "FDC Team (Open Source)"
 ```
 
 ### Additional Files

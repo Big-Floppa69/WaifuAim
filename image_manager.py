@@ -13,7 +13,7 @@ from PyQt6.QtGui import QPixmap, QColor, QIcon, QPainter, QPen
 from PyQt6.QtCore import Qt, QSize, QUrl, QPoint, pyqtSignal
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 import json
-from utils import UI_THEME, ART_EXTS, IMAGE_EXTS, is_video_path, tr_lit
+from utils import UI_THEME, ART_EXTS, IMAGE_EXTS, is_video_path, tr_lit, get_app_config_path
 from image_editor import ImageEditorDialog
 
 
@@ -125,7 +125,7 @@ class _DragHandleDelegate(QStyledItemDelegate):
 
 def _read_hotkey_config() -> dict:
     try:
-        with open("hotkey_config.json", "r", encoding="utf-8") as fh:
+        with open(get_app_config_path("hotkey_config.json"), "r", encoding="utf-8") as fh:
             raw = json.load(fh)
             return raw if isinstance(raw, dict) else {}
     except Exception:
@@ -1437,6 +1437,58 @@ class ImageManagerDialog(QWidget):
         except Exception:
             pass
 
+    def sync_checkmarks_from_controller(self) -> None:
+        """Refresh list checkmarks to reflect the current overlay selection.
+
+        This is used when selection is changed externally (e.g. the main menu
+        "Next Image" button or a global hotkey), so the Art Manager list stays
+        visually in sync.
+        """
+        if self.overlay_controller is None:
+            return
+        if getattr(self, "image_list", None) is None:
+            return
+
+        self._updating_checks = True
+        try:
+            for i in range(self.image_list.count()):
+                it = self.image_list.item(i)
+                if it is None:
+                    continue
+                meta = it.data(Qt.ItemDataRole.UserRole)
+
+                # Combo parent: tri-state based on child enabled states.
+                if isinstance(meta, dict) and meta.get("type") == "combo":
+                    keys = meta.get("keys")
+                    if not isinstance(keys, list) or not keys:
+                        continue
+                    enabled_states = [
+                        bool(self.overlay_controller.is_enabled(str(k)))
+                        for k in keys
+                        if str(k).strip()
+                    ]
+                    if not enabled_states:
+                        it.setCheckState(Qt.CheckState.Unchecked)
+                    elif all(enabled_states):
+                        it.setCheckState(Qt.CheckState.Checked)
+                    elif not any(enabled_states):
+                        it.setCheckState(Qt.CheckState.Unchecked)
+                    else:
+                        it.setCheckState(Qt.CheckState.PartiallyChecked)
+                    continue
+
+                # File rows and combo-child rows store the asset key in UserRole.
+                key = str(meta or "").strip()
+                if not key:
+                    continue
+                it.setCheckState(
+                    Qt.CheckState.Checked
+                    if bool(self.overlay_controller.is_enabled(key))
+                    else Qt.CheckState.Unchecked
+                )
+        finally:
+            self._updating_checks = False
+
     def _refresh_combo_parent_checkstate(self, name: str) -> None:
         if self.overlay_controller is None:
             return
@@ -1486,7 +1538,7 @@ class ImageManagerDialog(QWidget):
 
     def _read_app_settings(self) -> dict:
         try:
-            here = Path(__file__).resolve().with_name("app_settings.json")
+            here = get_app_config_path("app_settings.json")
             if here.exists():
                 raw = json.loads(here.read_text(encoding="utf-8"))
                 return raw if isinstance(raw, dict) else {}
@@ -1498,7 +1550,7 @@ class ImageManagerDialog(QWidget):
         try:
             if not isinstance(data, dict):
                 return
-            here = Path(__file__).resolve().with_name("app_settings.json")
+            here = get_app_config_path("app_settings.json")
             here.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception:
             pass

@@ -2,14 +2,23 @@
 ; Created for Inno Setup
 
 #define MyAppName "WaifuAim"
-#define MyAppVersion "1.0.0"
-#define MyAppPublisher "FDDC Team (Open Source)"
-#define MyAppURL "https://github.com/Big-Floppa69/ZenlessZoneZeroCrosshair.git"
+#define MyAppVersion "1.0"
+#define MyAppVersionInfo "1.0.0.0"
+#define MyAppPublisher "FDC Team (Open Source)"
+#define MyAppURL "https://github.com/Big-Floppa69/WaifuAim"
 #define MyAppExeName "main.py"
+
+; Prefer the latest PyInstaller output from WaifuAim.spec.
+; Fallback kept for older builds that produced a differently named exe.
+#if FileExists("dist\\WaifuAim.exe")
+  #define MyBuiltExe "dist\\WaifuAim.exe"
+#else
+  #define MyBuiltExe "dist\\Zenless Zone Zero Crosshair.exe"
+#endif
 
 [Setup]
 ; Basic setup information
-AppId={{B8C9F3A2-4D5E-4F7A-8B9C-1D2E3F4A5B6C7}
+AppId={{B8C9F3A2-4D5E-4F7A-8B9C-1D2E3F4A5B6C7}}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 ;AppVerName={#MyAppName} {#MyAppVersion}
@@ -17,14 +26,17 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
-DefaultDirName={autopf}\{#MyAppName}
+DefaultDirName={autopf}\WaifuAim
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 LicenseFile=LICENSE.txt
-InfoBeforeFile=README.md
+InfoBeforeFile=INSTALLER_INFO.txt
 OutputDir=Output
 OutputBaseFilename=WaifuAim_Setup_v{#MyAppVersion}
 SetupIconFile=astra_yao_tray.ico
+VersionInfoVersion={#MyAppVersionInfo}
+VersionInfoCompany={#MyAppPublisher}
+VersionInfoDescription={#MyAppName} Installer
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
@@ -36,29 +48,26 @@ ArchitecturesInstallIn64BitMode=x64
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
-Name: "ukrainian"; MessagesFile: "compiler:Languages\Ukrainian.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked; OnlyBelowVersion: 6.1
 Name: "startup"; Description: "Run WaifuAim on system startup"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-Name: "pythoncheck"; Description: "Check for Python installation and dependencies"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-; Main application files
-Source: "main.py"; DestDir: "{app}"; Flags: ignoreversion
-Source: "control_panel.py"; DestDir: "{app}"; Flags: ignoreversion
-Source: "tray_icon.py"; DestDir: "{app}"; Flags: ignoreversion
-Source: "hotkey_manager.py"; DestDir: "{app}"; Flags: ignoreversion
-Source: "hotkeys.py"; DestDir: "{app}"; Flags: ignoreversion
-Source: "image_editor.py"; DestDir: "{app}"; Flags: ignoreversion
-Source: "image_manager.py"; DestDir: "{app}"; Flags: ignoreversion
-Source: "utils.py"; DestDir: "{app}"; Flags: ignoreversion
+; Compiled application (PyInstaller)
+; We install it as WaifuAim.exe so the installed folder has the expected name.
+Source: "{#MyBuiltExe}"; DestDir: "{app}"; DestName: "WaifuAim.exe"; Flags: ignoreversion
 
-; Configuration files
-Source: "hotkey_config.json"; DestDir: "{app}"; Flags: ignoreversion
+; Optional dependency installer (uses system Python)
+Source: "install_dependencies.bat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "requirements.txt"; DestDir: "{app}"; Flags: ignoreversion
-Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion
+
+; Runtime configuration files (user-editable defaults)
+Source: "app_settings.json"; DestDir: "{app}"; Flags: ignoreversion
+Source: "hotkey_config.json"; DestDir: "{app}"; Flags: ignoreversion
+Source: "standard_crosshair_settings.json"; DestDir: "{app}"; Flags: ignoreversion
+Source: "art_transforms.json"; DestDir: "{app}"; Flags: ignoreversion
 
 ; Icons and images
 Source: "astra_yao_tray.ico"; DestDir: "{app}"; Flags: ignoreversion
@@ -68,42 +77,34 @@ Source: "astra_yao_tray.png"; DestDir: "{app}"; Flags: ignoreversion
 Source: "display_images\*"; DestDir: "{app}\display_images"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; Documentation
-Source: "readme.media\*"; DestDir: "{app}\readme.media"; Flags: ignoreversion recursesubdirs createallsubdirs
+
 
 ; Installer helper scripts
-Source: "install_dependencies.bat"; DestDir: "{app}"; Flags: ignoreversion
-Source: "run_app.bat"; DestDir: "{app}"; Flags: ignoreversion
-Source: "python_check.py"; DestDir: "{app}"; Flags: ignoreversion
+; (Not installed) Python helper scripts are not needed for the compiled build.
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{cmd}"; Parameters: "/c ""cd /d ""{app}"" && python main.py"""; WorkingDir: "{app}"; IconFilename: "{app}\astra_yao_tray.ico"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\WaifuAim.exe"; WorkingDir: "{app}"; IconFilename: "{app}\astra_yao_tray.ico"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{cmd}"; Parameters: "/c ""cd /d ""{app}"" && python main.py"""; WorkingDir: "{app}"; IconFilename: "{app}\astra_yao_tray.ico"; Tasks: desktopicon
-Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\{#MyAppName}"; Filename: "{cmd}"; Parameters: "/c ""cd /d ""{app}"" && python main.py"""; WorkingDir: "{app}"; IconFilename: "{app}\astra_yao_tray.ico"; Tasks: quicklaunchicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\WaifuAim.exe"; WorkingDir: "{app}"; IconFilename: "{app}\astra_yao_tray.ico"; Tasks: desktopicon
+Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\{#MyAppName}"; Filename: "{app}\WaifuAim.exe"; WorkingDir: "{app}"; IconFilename: "{app}\astra_yao_tray.ico"; Tasks: quicklaunchicon
 
 
 [Registry]
 ; Add registry entries for the application
 Root: HKCU; Subkey: "Software\WaifuAim"; ValueType: string; ValueName: "InstallPath"; ValueData: "{app}"
 Root: HKCU; Subkey: "Software\WaifuAim"; ValueType: string; ValueName: "Version"; ValueData: "{#MyAppVersion}"
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "WaifuAim"; ValueData: "cmd /c ""cd /d ""{app}"" && python main.py"""; Tasks: startup; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "WaifuAim"; ValueData: """{app}\WaifuAim.exe"""; Tasks: startup; Flags: uninsdeletevalue
 
 [Run]
-Filename: "{cmd}"; Parameters: "/c ""cd /d ""{app}"" && python --version"""; Flags: runascurrentuser; StatusMsg: "Checking Python installation..."; Tasks: pythoncheck
-Filename: "{cmd}"; Parameters: "/c ""cd /d ""{app}"" && python -m pip install --upgrade pip"""; Flags: runascurrentuser; StatusMsg: "Upgrading pip..."; Tasks: pythoncheck
-Filename: "{cmd}"; Parameters: "/c ""cd /d ""{app}"" && python -m pip install -r requirements.txt"""; Flags: runascurrentuser; StatusMsg: "Installing Python dependencies..."; Tasks: pythoncheck
-
-Filename: "{app}\install_dependencies.bat"; Flags: runascurrentuser; StatusMsg: "Installing application dependencies..."
-Filename: "{cmd}"; Parameters: "/c ""cd /d ""{app}"" && python main.py"""; Flags: runascurrentuser; StatusMsg: "Launching {#MyAppName}..."; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"
+Filename: "{app}\install_dependencies.bat"; Flags: runascurrentuser postinstall waituntilterminated skipifsilent; StatusMsg: "Installing Python dependencies..."; Description: "Install Python dependencies"
+Filename: "{app}\WaifuAim.exe"; Flags: runascurrentuser postinstall skipifsilent; StatusMsg: "Launching {#MyAppName}..."; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"
 
 [UninstallRun]
-Filename: "{cmd}"; Parameters: "/c ""taskkill /f /im python.exe 2>nul"""; Flags: runascurrentuser
+Filename: "{cmd}"; Parameters: "/c ""taskkill /f /im WaifuAim.exe 2>nul"""; Flags: runascurrentuser
 Filename: "{cmd}"; Parameters: "/c ""reg delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Run"" /v ""WaifuAim"" /f 2>nul"""; Flags: runascurrentuser
-Filename: "{cmd}"; Parameters: "/c ""reg delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Run"" /v ""ZenlessZoneZeroCrosshair"" /f 2>nul"""; Flags: runascurrentuser
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\display_images"
-Type: filesandordirs; Name: "{app}\readme.media"
 
 [Code]
 function GetUninstallString(): String;
@@ -125,32 +126,40 @@ end;
 
 function InitializeSetup(): Boolean;
 var
-  iResultCode: Integer;
-  sUnInstallString: String;
+  sExistingInstallPath: String;
+  sDefaultInstallPath: String;
 begin
   Result := True;
   
   // Python installation check will be handled in the [Run] section
   
     // Check if this is an upgrade
-    if RegQueryStringValue(HKCU, 'Software\WaifuAim', 'InstallPath', sUnInstallString) or
-      RegQueryStringValue(HKCU, 'Software\Zenless Zone Zero Crosshair', 'InstallPath', sUnInstallString) then
+    if RegQueryStringValue(HKCU, 'Software\WaifuAim', 'InstallPath', sExistingInstallPath) or
+      RegQueryStringValue(HKCU, 'Software\Zenless Zone Zero Crosshair', 'InstallPath', sExistingInstallPath) then
   begin
-    sUnInstallString := RemoveBackslashUnlessRoot(sUnInstallString);
-    if sUnInstallString = ExpandConstant('{app}') then
+    sExistingInstallPath := RemoveBackslashUnlessRoot(sExistingInstallPath);
+    // {app} isn't initialized yet during InitializeSetup, so compare against the
+    // default install directory instead.
+    sDefaultInstallPath := RemoveBackslashUnlessRoot(ExpandConstant('{autopf}\\WaifuAim'));
+
+    if sExistingInstallPath = sDefaultInstallPath then
     begin
       if IsUpgrade() then
       begin
-        Result := MsgBox(ExpandConstant('This will upgrade the existing installation. Do you want to continue?'), mbConfirmation, MB_YESNO) = IDYES;
+        Result := MsgBox('This will upgrade the existing installation. Do you want to continue?', mbConfirmation, MB_YESNO) = IDYES;
       end
       else
       begin
-        Result := MsgBox(ExpandConstant('An existing installation was detected. This will overwrite the existing installation. Do you want to continue?'), mbConfirmation, MB_YESNO) = IDYES;
+        Result := MsgBox('An existing installation was detected. This will overwrite the existing installation. Do you want to continue?', mbConfirmation, MB_YESNO) = IDYES;
       end;
     end
     else
     begin
-      Result := MsgBox(ExpandConstant('An existing installation was detected in a different directory. This will install to {app}. Continue?'), mbConfirmation, MB_YESNO) = IDYES;
+      Result := MsgBox(
+        Format('An existing installation was detected in a different directory (%s). This will install to %s. Continue?', [sExistingInstallPath, sDefaultInstallPath]),
+        mbConfirmation,
+        MB_YESNO
+      ) = IDYES;
     end;
   end;
 end;

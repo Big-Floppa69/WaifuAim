@@ -1,0 +1,17 @@
+WaifuAim 1.0
+FDC Team (Open Source)
+
+WaifuAim is a lightweight, always-on-top crosshair overlay for Windows.
+
+What you get
+- Image-based crosshair overlays (PNG/JPG/WEBP) from the display_images folder
+- Generated crosshair editor with presets and randomize
+- Global hotkeys (work without focus)
+- System tray icon and tray menu
+
+Notes
+- Global hotkeys can require elevated privileges on some Windows setups.
+- Modifier-only hotkeys like ALT can be unreliable; prefer e.g. ALT+F2.
+
+Project page
+https://github.com/Big-Floppa69/WaifuAim

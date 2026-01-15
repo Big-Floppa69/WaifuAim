@@ -22,6 +22,7 @@ from utils import (
     clear_label_art,
     get_art_list,
     get_art_cycle_entries,
+    get_app_config_path,
     mirror_horizontal,
     mirror_vertical,
     set_label_art_from_path,
@@ -33,6 +34,7 @@ from standard_crosshair import randomize_standard_crosshair
 _label_ref = None
 _overlay_controller_ref = None
 _crosshair_label_ref = None
+_control_panel_ref = None
 _hotkeys_paused = False
 
 _win32_hotkey_lock = threading.Lock()
@@ -94,7 +96,7 @@ def _on_ui_thread(fn) -> None:
 
 def load_hotkey_config() -> dict:
     """Load hotkey configuration from file."""
-    config_file = "hotkey_config.json"
+    config_file = get_app_config_path("hotkey_config.json")
     default_config = {
         "toggle_visibility": ["f1"],
         "mirror_vertical": ["f3"],
@@ -143,7 +145,7 @@ def load_hotkey_config() -> dict:
         s = _normalize_chord(value)
         return [s] if s else []
 
-    if os.path.exists(config_file):
+    if config_file.exists():
         try:
             with open(config_file, "r", encoding="utf-8") as f:
                 raw = json.load(f)
@@ -341,10 +343,46 @@ def reload_hotkeys() -> None:
 
     index = [0]
 
+    def _sync_image_manager_checkmarks() -> None:
+        """If the Art Manager window is open, refresh its checkmarks."""
+        try:
+            cp = _control_panel_ref
+            if cp is None:
+                return
+            mgr = getattr(cp, "image_manager", None)
+            if mgr is None:
+                return
+            fn = getattr(mgr, "sync_checkmarks_from_controller", None)
+            if callable(fn):
+                fn()
+        except Exception:
+            return
+
     def switch_image() -> None:
         def _do():
             if _label_ref is None:
                 return
+
+            # Prefer using the main UI's switching logic so the order/index is
+            # consistent across the Next Image button and the hotkey.
+            try:
+                cp = _control_panel_ref
+                fn = getattr(cp, "switch_image", None) if cp is not None else None
+                if callable(fn):
+                    fn()
+                    return
+            except Exception:
+                pass
+
+            # Switching images via hotkey should always advance *and* show the
+            # newly selected art. If the base label is hidden, the previous
+            # selection can appear to "turn off" because rendering is requested
+            # with visible=False.
+            try:
+                if not _label_ref.isVisible():
+                    _label_ref.show()
+            except Exception:
+                pass
 
             entries = get_art_cycle_entries("display_images")
             if not entries:
@@ -356,9 +394,9 @@ def reload_hotkeys() -> None:
             def _key_for_path(p: str) -> str:
                 try:
                     root = os.path.dirname(os.path.abspath(__file__))
-                    return os.path.relpath(os.path.abspath(p), root).replace("\\\\", "/")
+                    return os.path.relpath(os.path.abspath(p), root).replace("\\", "/")
                 except Exception:
-                    return os.path.abspath(p).replace("\\\\", "/")
+                    return os.path.abspath(p).replace("\\", "/")
 
             if entry.get("type") == "combo":
                 if _overlay_controller_ref is None:
@@ -367,9 +405,10 @@ def reload_hotkeys() -> None:
                 clear_label_art(_label_ref)
                 try:
                     _overlay_controller_ref.set_selection_keys(keys)
+                    _sync_image_manager_checkmarks()
                     _overlay_controller_ref.request_render_selected_atomic(
                         "display_images",
-                        visible=bool(_label_ref.isVisible()),
+                        visible=True,
                     )
                 except Exception:
                     pass
@@ -400,9 +439,10 @@ def reload_hotkeys() -> None:
 
                 try:
                     _overlay_controller_ref.set_selection_keys([key])
+                    _sync_image_manager_checkmarks()
                     _overlay_controller_ref.request_render_selected_atomic(
                         "display_images",
-                        visible=bool(_label_ref.isVisible()),
+                        visible=True,
                         on_error=_fallback,
                     )
                 except Exception:
@@ -546,14 +586,16 @@ def _is_pressed_win32(key_name: str) -> bool:
         return False
 
 
-def setup_hotkeys(label, *, crosshair_label=None, overlay_controller=None) -> None:
+def setup_hotkeys(label, *, crosshair_label=None, overlay_controller=None, control_panel=None) -> None:
     """Initialize all hotkeys."""
     global _label_ref
     global _overlay_controller_ref
     global _crosshair_label_ref
+    global _control_panel_ref
     _label_ref = label
     _overlay_controller_ref = overlay_controller
     _crosshair_label_ref = crosshair_label
+    _control_panel_ref = control_panel
     _ensure_ui_invoker()
     reload_hotkeys()
 
