@@ -51,6 +51,7 @@ pip install -r requirements.txt  # PyQt6, keyboard
 pyinstaller "WaifuAim.spec"
 ```
 - Bundles `display_images/`, `hotkey_config.json`, `readme.media/` into executable
+- Bundles `display_images/`, `hotkey_config.json` into executable
 - Icon: `astra_yao_tray.ico` (referenced in .spec)
 
 ### Installer (Inno Setup)

@@ -38,10 +38,6 @@ Note: while the **Hotkey Manager** window is open, global hotkeys are paused to 
 - Supported formats: PNG, JPG/JPEG, WEBP.
 - Use the configured `switch_image` hotkey (default is commonly `f2`) to cycle.
 
-<div align="center">
-  <img src="readme.media/tray_menu.png" />
-</div>
-
 ## Generated crosshair presets
 
 The generated crosshair editor lets you save and switch presets. The Randomize button and Randomize hotkey both use the selected Randomize mode:

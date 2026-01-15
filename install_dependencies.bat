@@ -2,9 +2,22 @@
 echo Installing WaifuAim dependencies...
 echo.
 
+set "PY_CMD="
+
+REM Prefer the Windows Python Launcher if available
+py -3 --version >nul 2>&1
+if %errorlevel% equ 0 (
+    set "PY_CMD=py -3"
+) else (
+    REM Fall back to python on PATH
+    python --version >nul 2>&1
+    if %errorlevel% equ 0 (
+        set "PY_CMD=python"
+    )
+)
+
 REM Check if Python is installed
-python --version >nul 2>&1
-if %errorlevel% neq 0 (
+if "%PY_CMD%"=="" (
     echo Python is not installed or not in PATH!
     echo Please install Python 3.8+ from https://python.org
     pause
@@ -13,11 +26,11 @@ if %errorlevel% neq 0 (
 
 REM Upgrade pip
 echo Upgrading pip...
-python -m pip install --upgrade pip
+%PY_CMD% -m pip install --upgrade pip
 
 REM Install dependencies
 echo Installing dependencies from requirements.txt...
-python -m pip install -r requirements.txt
+%PY_CMD% -m pip install -r requirements.txt
 
 if %errorlevel% equ 0 (
     echo.
