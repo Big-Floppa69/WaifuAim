@@ -28,7 +28,7 @@ Hotkeys are configured in `hotkey_config.json` and can also be changed via the i
 - `shift+mouse_x1`
 - `windows+f3`
 
-Note: modifier-only hotkeys like `alt` / `ctrl+alt` may not work reliably as global hotkeys on Windows. Prefer including a non-modifier key (for example `alt+f2`).
+Note: modifier-only hotkeys like `alt` / `ctrl+alt` may not work reliably as global hotkeys on Windows. Prefer including a non-modifier key (for example `alt+f2`). But they still work pretty nice, personally, didn't have issues.
 
 Note: while the **Hotkey Manager** window is open, global hotkeys are paused to prevent accidental triggers.
 
@@ -36,7 +36,7 @@ Note: while the **Hotkey Manager** window is open, global hotkeys are paused to 
 
 - Put your crosshair images into `display_images/`.
 - Supported formats: PNG, JPG/JPEG, WEBP.
-- Use the configured `switch_image` hotkey (default is commonly `f2`) to cycle.
+- Use the configured `switch_image` hotkey to cycle.
 
 ## Generated crosshair presets
 

@@ -35,6 +35,7 @@ from utils import (
     transparent,
     UI_THEME,
     get_art_cycle_entries,
+    get_app_config_path,
     get_app_language_from_disk,
     set_app_language_on_disk,
     SUPPORTED_LANGUAGES,
@@ -59,7 +60,7 @@ from standard_crosshair import (
 class DarkControlPanel(QWidget):
     """A dark-themed control panel for managing crosshair settings."""
 
-    APP_SETTINGS_PATH = Path(__file__).resolve().with_name("app_settings.json")
+    APP_SETTINGS_PATH = get_app_config_path("app_settings.json")
     
     def __init__(self, image_label, crosshair_label, parent=None, *, art_overlay_controller=None):
         super().__init__(parent)
@@ -111,6 +112,7 @@ class DarkControlPanel(QWidget):
 
         # Opacity accordion header (to show current colorblind mode in title).
         self._opacity_accordion_header = None
+        self._opacity_accordion = None
 
         # Action bar buttons
         self._btn_toggle_image = None
@@ -273,7 +275,47 @@ class DarkControlPanel(QWidget):
         if compact == bool(getattr(self, "_is_compact_mode", False)):
             return
         self._is_compact_mode = bool(compact)
-        container.setVisible(not compact)
+
+        # Keep the opacity/colorblind/language accordion reachable even in
+        # compact mode; only hide the heavy embedded crosshair editor.
+        try:
+            container.setVisible(True)
+        except Exception:
+            pass
+        try:
+            if self.crosshair_dialog is not None:
+                self.crosshair_dialog.setVisible(not compact)
+        except Exception:
+            pass
+        try:
+            if self._opacity_accordion is not None:
+                self._opacity_accordion.setVisible(True)
+                # In compact mode, default the accordion content closed to keep
+                # the panel short, but still allow the user to open it.
+                if compact:
+                    header = getattr(self._opacity_accordion, "_header_btn", None)
+                    if header is not None and getattr(header, "isChecked", None) and header.isChecked():
+                        header.setChecked(False)
+        except Exception:
+            pass
+
+    def _should_expand_opacity_accordion_by_default(self) -> bool:
+        """Expand the opacity/colorblind/language accordion on first run.
+
+        If the user already has persisted settings, keep it collapsed.
+        """
+        try:
+            data = self._read_app_settings()
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            return True
+        # If user hasn't configured any of these app-level settings yet, make
+        # them visible so the feature isn't "missing".
+        for key in ("colorblind_mode", "window_opacity", "language"):
+            if key not in data:
+                return True
+        return False
 
     def _hit_test_edges(self, pos) -> set[str]:
         """Return a set of edges (left/right/top/bottom) if pos is near them."""
@@ -436,6 +478,15 @@ class DarkControlPanel(QWidget):
         # Apply immediately to the currently displayed image overlay.
         try:
             refresh_label_pixmap_for_colorblind_mode(self.image_label)
+        except Exception:
+            pass
+
+        # Also refresh any active Art Manager overlays.
+        try:
+            if self.art_overlay_controller is not None:
+                fn = getattr(self.art_overlay_controller, "refresh_colorblind_mode", None)
+                if callable(fn):
+                    fn()
         except Exception:
             pass
 
@@ -688,7 +739,8 @@ class DarkControlPanel(QWidget):
         below.setSpacing(10)
         self._below_layout = below
 
-        below.addWidget(self._create_opacity_accordion())
+        self._opacity_accordion = self._create_opacity_accordion()
+        below.addWidget(self._opacity_accordion)
 
         # Embedded Standard Crosshair settings.
         self.crosshair_dialog = StandardCrosshairDialog(
@@ -1045,7 +1097,11 @@ class DarkControlPanel(QWidget):
         except Exception:
             pass
 
-        wrapper = self._create_accordion(tr("opacity_language_title"), content, expanded=False)
+        wrapper = self._create_accordion(
+            tr("opacity_language_title"),
+            content,
+            expanded=self._should_expand_opacity_accordion_by_default(),
+        )
         try:
             self._opacity_accordion_header = getattr(wrapper, "_header_btn", None)
             self._update_opacity_accordion_title()
@@ -2184,6 +2240,13 @@ class DarkControlPanel(QWidget):
     
     def switch_image(self):
         """Switch to the next crosshair image."""
+        # Switching images implies we want to see the newly selected art.
+        try:
+            if not self.image_label.isVisible():
+                self.image_label.show()
+        except Exception:
+            pass
+
         # Build cycle list: user-defined order (Art Manager), including combos.
         entries = get_art_cycle_entries("display_images")
         if not entries:
@@ -2200,9 +2263,17 @@ class DarkControlPanel(QWidget):
                     # Clear base label BEFORE any overlay render/show.
                     clear_label_art(self.image_label)
                     self.art_overlay_controller.set_selection_keys(keys)
+
+                    # Keep Art Manager UI in sync if it's open.
+                    try:
+                        if self.image_manager is not None:
+                            self.image_manager.sync_checkmarks_from_controller()
+                    except Exception:
+                        pass
+
                     self.art_overlay_controller.request_render_selected_atomic(
                         "display_images",
-                        visible=bool(self.image_label.isVisible()),
+                        visible=True,
                     )
             except Exception:
                 pass
@@ -2225,6 +2296,13 @@ class DarkControlPanel(QWidget):
                 clear_label_art(self.image_label)
                 self.art_overlay_controller.set_selection_keys([key])
 
+                # Keep Art Manager UI in sync if it's open.
+                try:
+                    if self.image_manager is not None:
+                        self.image_manager.sync_checkmarks_from_controller()
+                except Exception:
+                    pass
+
                 def _fallback(_e=None):
                     try:
                         self.art_overlay_controller.clear_selection()
@@ -2242,7 +2320,7 @@ class DarkControlPanel(QWidget):
 
                 self.art_overlay_controller.request_render_selected_atomic(
                     "display_images",
-                    visible=bool(self.image_label.isVisible()),
+                    visible=True,
                     on_error=_fallback,
                 )
                 return

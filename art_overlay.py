@@ -19,7 +19,7 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QApplication, QLabel
 
-from utils import APP_SETTINGS_PATH, set_label_art_from_path
+from utils import APP_SETTINGS_PATH, refresh_label_pixmap_for_colorblind_mode, set_label_art_from_path
 
 
 @dataclass
@@ -205,6 +205,14 @@ class ArtOverlayController:
                 continue
             self._ensure_label(key)
             self._apply_label(key, p)
+
+    def refresh_colorblind_mode(self) -> None:
+        """Re-render image overlays according to the current colorblind mode."""
+        for _k, lbl in list(self._labels.items()):
+            try:
+                refresh_label_pixmap_for_colorblind_mode(lbl)
+            except Exception:
+                pass
 
     def request_render_selected_atomic(
         self,

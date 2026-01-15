@@ -41,7 +41,7 @@
       }
     },
     "display_images/astolfo1.png": {
-      "enabled": false,
+      "enabled": true,
       "opacity": 1.0,
       "transform": {}
     },
@@ -134,12 +134,147 @@
       "transform": {}
     },
     "display_images/mitsuri_kanroji.png": {
-      "enabled": true,
+      "enabled": false,
       "opacity": 1.0,
       "transform": {
         "x": 673.6581818181819,
         "y": 415.090909090909,
         "zoom": 0.28,
+        "rotation": 0.0
+      }
+    },
+    "display_images\\astolfo2.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {}
+    },
+    "display_images\\astolfo3.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {}
+    },
+    "display_images\\astolfo4.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {}
+    },
+    "display_images\\astra_yao.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {}
+    },
+    "display_images\\ellen_joe.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {}
+    },
+    "display_images\\frickmeme.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {}
+    },
+    "display_images\\jane_doe.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {}
+    },
+    "display_images\\jane_doe2.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {}
+    },
+    "display_images\\miyabi-hoshimi-miyabi.mp4": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {}
+    },
+    "display_images\\nagatoro.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {}
+    },
+    "display_images\\astolfo1.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {}
+    },
+    "display_images/shinobu_kocho.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {
+        "x": 351.4472727272724,
+        "y": -144.29454545454564,
+        "zoom": 0.48,
+        "rotation": 0.0
+      }
+    },
+    "display_images/nezuko_kamado.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {
+        "x": 751.9418181818182,
+        "y": 366.06818181818176,
+        "zoom": 0.51,
+        "rotation": 0.0
+      }
+    },
+    "display_images/hoshimi_miyabi.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {
+        "x": 454.52,
+        "y": 458.0,
+        "zoom": 0.26,
+        "rotation": 0.0
+      }
+    },
+    "display_images/hoshimi_miyabi2.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {
+        "x": 423.14909090909146,
+        "y": -32.954545454545496,
+        "zoom": 0.37,
+        "rotation": 0.0
+      }
+    },
+    "display_images/burnice_white.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {
+        "x": 141.02909090909134,
+        "y": 464.22727272727263,
+        "zoom": 0.31,
+        "rotation": 0.0
+      }
+    },
+    "display_images/burnice_white2.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {
+        "x": 134.5090909090909,
+        "y": 329.45454545454515,
+        "zoom": 0.3,
+        "rotation": 0.0
+      }
+    },
+    "display_images/jane_doe3.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {
+        "x": 446.2727272727273,
+        "y": -23.083636363636515,
+        "zoom": 0.32,
+        "rotation": 0.0
+      }
+    },
+    "display_images/jufufu.png": {
+      "enabled": false,
+      "opacity": 1.0,
+      "transform": {
+        "x": 118.93818181818187,
+        "y": 314.4999999999998,
+        "zoom": 0.31,
         "rotation": 0.0
       }
     }
@@ -193,6 +328,42 @@
     {
       "type": "combo",
       "name": "Combo"
+    },
+    {
+      "type": "file",
+      "key": "display_images/mitsuri_kanroji.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/shinobu_kocho.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/burnice_white.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/burnice_white2.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/hoshimi_miyabi.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/hoshimi_miyabi2.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/jane_doe3.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/jufufu.png"
+    },
+    {
+      "type": "file",
+      "key": "display_images/nezuko_kamado.png"
     }
   ],
   "language": "en"

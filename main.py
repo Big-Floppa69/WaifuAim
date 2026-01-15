@@ -190,7 +190,12 @@ def main():
     tray_icon = create_tray_icon(app, image_label, control_panel)
 
     # Setup keyboard hotkeys
-    setup_hotkeys(image_label, crosshair_label=crosshair_label, overlay_controller=art_overlay)
+    setup_hotkeys(
+        image_label,
+        crosshair_label=crosshair_label,
+        overlay_controller=art_overlay,
+        control_panel=control_panel,
+    )
 
     sys.exit(app.exec())
 

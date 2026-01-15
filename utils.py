@@ -161,6 +161,8 @@ def get_art_cycle_entries(folder: str = "display_images") -> list[dict]:
         return _default_entries()
 
     out: list[dict] = []
+    included_file_keys: set[str] = set()
+    included_combo_names: set[str] = set()
     for entry in seq:
         if not isinstance(entry, dict):
             continue
@@ -172,11 +174,54 @@ def get_art_cycle_entries(folder: str = "display_images") -> list[dict]:
             path = key_to_path.get(key)
             if path:
                 out.append({"type": "file", "path": path})
+                included_file_keys.add(key)
         elif t == "combo":
             name = str(entry.get("name") or "").strip()
             keys = combo_name_to_keys.get(name)
             if name and keys:
                 out.append({"type": "combo", "name": name, "keys": keys})
+                included_combo_names.add(name)
+
+    # Auto-append any newly discovered files/combos that are not yet in the
+    # saved sequence, so switching always reaches new art without requiring the
+    # user to open/reorder the Art Manager.
+    modified_seq = False
+
+    missing_files = [k for k in key_to_path.keys() if k and k not in included_file_keys]
+    if missing_files:
+        # Keep new items stable and user-friendly: sort by filename.
+        missing_files.sort(key=lambda k: os.path.basename(key_to_path.get(k, k)).lower())
+        for k in missing_files:
+            p = key_to_path.get(k)
+            if not p:
+                continue
+            out.append({"type": "file", "path": p})
+            try:
+                seq.append({"type": "file", "key": k})
+                modified_seq = True
+            except Exception:
+                pass
+
+    missing_combos = [n for n in combo_name_to_keys.keys() if n and n not in included_combo_names]
+    if missing_combos:
+        missing_combos.sort(key=lambda n: str(n).lower())
+        for n in missing_combos:
+            keys = combo_name_to_keys.get(n)
+            if not keys:
+                continue
+            out.append({"type": "combo", "name": n, "keys": keys})
+            try:
+                seq.append({"type": "combo", "name": n})
+                modified_seq = True
+            except Exception:
+                pass
+
+    if modified_seq:
+        try:
+            data["art_cycle_sequence"] = seq
+            write_app_settings(data)
+        except Exception:
+            pass
 
     # If everything got filtered out (e.g., deleted files), fall back.
     return out if out else _default_entries()
@@ -668,10 +713,17 @@ def set_label_art_from_path(
         painter.restore()
         painter.end()
 
+        # IMPORTANT: store the unfiltered canvas as the source image so the
+        # persisted colorblind mode can be applied (and toggled later).
         try:
-            label.setPixmap(QPixmap.fromImage(canvas))
+            _set_label_source_image(label, canvas)
+            refresh_label_pixmap_for_colorblind_mode(label)
         except Exception:
-            pass
+            # Fallback: at least show the image.
+            try:
+                label.setPixmap(QPixmap.fromImage(canvas))
+            except Exception:
+                pass
         return
 
     # If this label is already playing the same video, just update transform.
@@ -722,9 +774,56 @@ def transparent(label, percent):
     label.setWindowOpacity(percent)
 
 
+# --- Config paths --------------------------------------------------------------------
+
+APP_NAME = "WaifuAim"
+
+
+def get_app_config_dir() -> Path:
+    """Return a writable per-user config directory.
+
+    Using AppData avoids:
+    - writing into Program Files (often read-only)
+    - losing settings in PyInstaller one-file builds
+    """
+
+    base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
+    if base:
+        path = Path(base) / APP_NAME
+    else:
+        path = Path.home() / ".config" / APP_NAME
+
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        path = Path.cwd()
+    return path
+
+
+def get_app_config_path(filename: str) -> Path:
+    """Return a config file path under the per-user config directory.
+
+    Also does a best-effort one-time migration from a legacy file in the current
+    working directory.
+    """
+
+    filename = str(filename or "").strip()
+    if not filename:
+        return get_app_config_dir()
+
+    target = get_app_config_dir() / filename
+    legacy = Path.cwd() / filename
+    try:
+        if not target.exists() and legacy.exists() and legacy.is_file():
+            target.write_bytes(legacy.read_bytes())
+    except Exception:
+        pass
+    return target
+
+
 # --- Colorblindness (image filtering) -------------------------------------------------
 
-APP_SETTINGS_PATH = Path(__file__).resolve().with_name("app_settings.json")
+APP_SETTINGS_PATH = get_app_config_path("app_settings.json")
 
 _LABEL_SOURCE_IMAGE_PROP = "_zzz_source_image"
 
@@ -786,7 +885,7 @@ SUPPORTED_LANGUAGES: dict[str, str] = {
 
 _TRANSLATIONS: dict[str, dict[str, str]] = {
     "en": {
-        "opacity_language_title": "Opacity, Language",
+        "opacity_language_title": "Opacity, Colorblind, Language",
         "crosshair_opacity": "Crosshair Opacity",
         "window_opacity": "Window Opacity",
         "colorblind_mode": "Colorblind Mode",
@@ -796,7 +895,7 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
         "colorblind_prefix": "Colorblind",
     },
     "ru": {
-        "opacity_language_title": "Прозрачность, Язык",
+        "opacity_language_title": "Прозрачность, Дальтонизм, Язык",
         "crosshair_opacity": "Прозрачность прицела",
         "window_opacity": "Прозрачность окна",
         "colorblind_mode": "Режим дальтонизма",

@@ -11,7 +11,8 @@ from typing import Optional
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QLabel, QFrame, QGraphicsDropShadowEffect, 
                              QMessageBox, QApplication, QSlider, QFileDialog,
-                             QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QProgressDialog)
+                             QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QProgressDialog,
+                             QSpinBox, QAbstractSpinBox)
 from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QPen
 from PyQt6.QtCore import Qt, QRectF, QUrl, pyqtSignal, QTimer
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
@@ -425,6 +426,20 @@ class ImageEditorDialog(QWidget):
         controls_layout = QVBoxLayout(controls_frame)
         controls_layout.setSpacing(10)
         
+        def _spin_style() -> str:
+            return (
+                "QSpinBox {"
+                f" background-color: {UI_THEME['surface2']};"
+                f" color: {UI_THEME['text']};"
+                f" border: 1px solid {UI_THEME['border']};"
+                " border-radius: 10px;"
+                " padding: 4px 8px;"
+                " font-size: 12px;"
+                " min-width: 72px;"
+                " }"
+                f"QSpinBox:focus {{ border: 1px solid {UI_THEME['border_strong']}; }}"
+            )
+
         # Zoom control
         zoom_layout = QHBoxLayout()
         zoom_label = QLabel("Zoom:")
@@ -439,12 +454,15 @@ class ImageEditorDialog(QWidget):
         self.zoom_slider.setStyleSheet(self._get_slider_style())
         self.zoom_slider.valueChanged.connect(self.on_zoom_changed)
         zoom_layout.addWidget(self.zoom_slider)
-        
-        self.zoom_value_label = QLabel("100%")
-        self.zoom_value_label.setStyleSheet(
-            "color: " + UI_THEME["text"] + "; font-size: 12px; min-width: 45px;"
-        )
-        zoom_layout.addWidget(self.zoom_value_label)
+
+        self.zoom_value_input = QSpinBox()
+        self.zoom_value_input.setRange(self.zoom_slider.minimum(), self.zoom_slider.maximum())
+        self.zoom_value_input.setValue(self.zoom_slider.value())
+        self.zoom_value_input.setSuffix("%")
+        self.zoom_value_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.zoom_value_input.setStyleSheet(_spin_style())
+        self.zoom_value_input.valueChanged.connect(self._on_zoom_input_changed)
+        zoom_layout.addWidget(self.zoom_value_input)
         
         controls_layout.addLayout(zoom_layout)
         
@@ -462,12 +480,15 @@ class ImageEditorDialog(QWidget):
         self.rotation_slider.setStyleSheet(self._get_slider_style())
         self.rotation_slider.valueChanged.connect(self.on_rotation_changed)
         rotation_layout.addWidget(self.rotation_slider)
-        
-        self.rotation_value_label = QLabel("0°")
-        self.rotation_value_label.setStyleSheet(
-            "color: " + UI_THEME["text"] + "; font-size: 12px; min-width: 45px;"
-        )
-        rotation_layout.addWidget(self.rotation_value_label)
+
+        self.rotation_value_input = QSpinBox()
+        self.rotation_value_input.setRange(self.rotation_slider.minimum(), self.rotation_slider.maximum())
+        self.rotation_value_input.setValue(self.rotation_slider.value())
+        self.rotation_value_input.setSuffix("°")
+        self.rotation_value_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rotation_value_input.setStyleSheet(_spin_style())
+        self.rotation_value_input.valueChanged.connect(self._on_rotation_input_changed)
+        rotation_layout.addWidget(self.rotation_value_input)
         
         controls_layout.addLayout(rotation_layout)
 
@@ -486,15 +507,42 @@ class ImageEditorDialog(QWidget):
         self.opacity_slider.valueChanged.connect(self.on_opacity_changed)
         opacity_layout.addWidget(self.opacity_slider)
 
-        self.opacity_value_label = QLabel("100%")
-        self.opacity_value_label.setStyleSheet(
-            "color: " + UI_THEME["text"] + "; font-size: 12px; min-width: 45px;"
-        )
-        opacity_layout.addWidget(self.opacity_value_label)
+        self.opacity_value_input = QSpinBox()
+        self.opacity_value_input.setRange(self.opacity_slider.minimum(), self.opacity_slider.maximum())
+        self.opacity_value_input.setValue(self.opacity_slider.value())
+        self.opacity_value_input.setSuffix("%")
+        self.opacity_value_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.opacity_value_input.setStyleSheet(_spin_style())
+        self.opacity_value_input.valueChanged.connect(self._on_opacity_input_changed)
+        opacity_layout.addWidget(self.opacity_value_input)
 
         controls_layout.addLayout(opacity_layout)
         
         return controls_frame
+
+    def _on_zoom_input_changed(self, value: int) -> None:
+        if self._updating_controls:
+            return
+        try:
+            self.zoom_slider.setValue(int(value))
+        except Exception:
+            pass
+
+    def _on_rotation_input_changed(self, value: int) -> None:
+        if self._updating_controls:
+            return
+        try:
+            self.rotation_slider.setValue(int(value))
+        except Exception:
+            pass
+
+    def _on_opacity_input_changed(self, value: int) -> None:
+        if self._updating_controls:
+            return
+        try:
+            self.opacity_slider.setValue(int(value))
+        except Exception:
+            pass
     
     def _get_slider_style(self):
         """Get slider stylesheet."""
@@ -1448,7 +1496,14 @@ class ImageEditorDialog(QWidget):
                 it.setPos(float(center_scene.x()) - float(origin.x()), float(center_scene.y()) - float(origin.y()))
             except Exception:
                 pass
-        self.zoom_value_label.setText(f"{value}%")
+        try:
+            self._updating_controls = True
+            if getattr(self, "zoom_value_input", None) is not None:
+                self.zoom_value_input.setValue(int(value))
+        except Exception:
+            pass
+        finally:
+            self._updating_controls = False
     
     def on_rotation_changed(self, value):
         """Handle rotation slider change."""
@@ -1459,7 +1514,14 @@ class ImageEditorDialog(QWidget):
                 it.setRotation(float(value))
             except Exception:
                 pass
-        self.rotation_value_label.setText(f"{value}°")
+        try:
+            self._updating_controls = True
+            if getattr(self, "rotation_value_input", None) is not None:
+                self.rotation_value_input.setValue(int(value))
+        except Exception:
+            pass
+        finally:
+            self._updating_controls = False
 
     def on_opacity_changed(self, value):
         """Handle opacity slider change."""
@@ -1472,9 +1534,13 @@ class ImageEditorDialog(QWidget):
             except Exception:
                 pass
         try:
-            self.opacity_value_label.setText(f"{int(value)}%")
+            self._updating_controls = True
+            if getattr(self, "opacity_value_input", None) is not None:
+                self.opacity_value_input.setValue(int(value))
         except Exception:
             pass
+        finally:
+            self._updating_controls = False
 
     def rename_asset(self) -> None:
         layer = self._selected_layer()
@@ -1728,11 +1794,20 @@ class ImageEditorDialog(QWidget):
                 self.rotation_slider.setValue(0)
                 try:
                     self.opacity_slider.setValue(100)
-                    self.opacity_value_label.setText("100%")
+                    if getattr(self, "opacity_value_input", None) is not None:
+                        self.opacity_value_input.setValue(100)
                 except Exception:
                     pass
-                self.zoom_value_label.setText("100%")
-                self.rotation_value_label.setText("0°")
+                try:
+                    if getattr(self, "zoom_value_input", None) is not None:
+                        self.zoom_value_input.setValue(100)
+                except Exception:
+                    pass
+                try:
+                    if getattr(self, "rotation_value_input", None) is not None:
+                        self.rotation_value_input.setValue(0)
+                except Exception:
+                    pass
                 return
 
             it = None
@@ -1747,14 +1822,22 @@ class ImageEditorDialog(QWidget):
                 zv = int(round(float(it.scale()) * 100))
                 zv = max(self.zoom_slider.minimum(), min(self.zoom_slider.maximum(), zv))
                 self.zoom_slider.setValue(zv)
-                self.zoom_value_label.setText(f"{zv}%")
+                try:
+                    if getattr(self, "zoom_value_input", None) is not None:
+                        self.zoom_value_input.setValue(int(zv))
+                except Exception:
+                    pass
             except Exception:
                 pass
             try:
                 rv = int(round(float(it.rotation())))
                 rv = max(self.rotation_slider.minimum(), min(self.rotation_slider.maximum(), rv))
                 self.rotation_slider.setValue(rv)
-                self.rotation_value_label.setText(f"{rv}°")
+                try:
+                    if getattr(self, "rotation_value_input", None) is not None:
+                        self.rotation_value_input.setValue(int(rv))
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -1762,7 +1845,11 @@ class ImageEditorDialog(QWidget):
                 ov = int(round(float(it.opacity()) * 100))
                 ov = max(self.opacity_slider.minimum(), min(self.opacity_slider.maximum(), ov))
                 self.opacity_slider.setValue(ov)
-                self.opacity_value_label.setText(f"{ov}%")
+                try:
+                    if getattr(self, "opacity_value_input", None) is not None:
+                        self.opacity_value_input.setValue(int(ov))
+                except Exception:
+                    pass
             except Exception:
                 pass
         finally:

@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QColor, QKeyEvent
 from PyQt6.QtCore import Qt, pyqtSignal
-from utils import UI_THEME, tr_lit
+from utils import UI_THEME, tr_lit, get_app_config_path
 
 
 class HotkeyLineEdit(QLineEdit):
@@ -233,7 +233,7 @@ class HotkeyManagerDialog(QWidget):
         self._resize_start_geom = None
         self._size_grip = None
 
-        self.config_file = "hotkey_config.json"
+        self.config_file = get_app_config_path("hotkey_config.json")
         # key_name -> list[HotkeyLineEdit] (multiple bindings per action)
         self.hotkey_inputs: dict[str, list[HotkeyLineEdit]] = {}
         # key_name -> list[QWidget] row widgets (edit + delete)
@@ -549,7 +549,8 @@ class HotkeyManagerDialog(QWidget):
                 if isinstance(raw, list):
                     keys = [str(v or "").strip().lower() for v in raw if str(v or "").strip()]
                 if not keys:
-                    key = str(getattr(s, "hold_fade_key", "mouse_left") or "mouse_left").strip().lower()
+                    raw_single = getattr(s, "hold_fade_key", None)
+                    key = "mouse_left" if raw_single is None else str(raw_single or "").strip().lower()
                     keys = [key] if key else []
         except Exception:
             pass
@@ -565,6 +566,7 @@ class HotkeyManagerDialog(QWidget):
 
         # Multi-bindings (+) like other actions.
         self.fade_hold_inputs: list[HotkeyLineEdit] = []
+        self._fade_hold_row_widgets: list[QWidget] = []
 
         inputs_container = QFrame()
         inputs_container.setStyleSheet("QFrame { background: transparent; }")
@@ -587,12 +589,73 @@ class HotkeyManagerDialog(QWidget):
                 + UI_THEME["accent"]
                 + "; }"
             )
-            self.fade_hold_inputs.append(e)
             return e
+
+        def _remove_row(edit: HotkeyLineEdit) -> None:
+            if edit not in self.fade_hold_inputs:
+                return
+            # Keep at least one row.
+            if len(self.fade_hold_inputs) <= 1:
+                try:
+                    edit.current_key = ""
+                    edit.setText("")
+                except Exception:
+                    pass
+                return
+
+            idx = self.fade_hold_inputs.index(edit)
+            self.fade_hold_inputs.pop(idx)
+            roww = self._fade_hold_row_widgets.pop(idx) if idx < len(self._fade_hold_row_widgets) else None
+            if roww is not None:
+                try:
+                    roww.setParent(None)
+                    roww.deleteLater()
+                except Exception:
+                    pass
+            else:
+                try:
+                    edit.setParent(None)
+                    edit.deleteLater()
+                except Exception:
+                    pass
 
         def _add_row(initial: str = "") -> None:
             e = _mk_edit(initial)
-            inputs_layout.insertWidget(max(0, inputs_layout.count() - 1), e)
+
+            roww = QFrame()
+            roww.setStyleSheet("QFrame { background: transparent; }")
+            roww_layout = QHBoxLayout(roww)
+            roww_layout.setContentsMargins(0, 0, 0, 0)
+            roww_layout.setSpacing(8)
+            roww_layout.addWidget(e, 1)
+
+            del_btn = QPushButton("×")
+            del_btn.setFixedSize(28, 28)
+            del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            del_btn.setToolTip(tr_lit("Remove this hotkey"))
+            del_btn.setStyleSheet(
+                "QPushButton { background-color: "
+                + UI_THEME["surface2"]
+                + "; color: "
+                + UI_THEME["text"]
+                + "; border: 1px solid "
+                + UI_THEME["border"]
+                + "; border-radius: 10px; font-size: 18px; font-weight: 900; }"
+                "QPushButton:hover { background-color: "
+                + UI_THEME["danger"]
+                + "; border: 1px solid "
+                + UI_THEME["danger"]
+                + "; }"
+                "QPushButton:pressed { background-color: "
+                + UI_THEME["surface"]
+                + "; }"
+            )
+            del_btn.clicked.connect(lambda: _remove_row(e))
+            roww_layout.addWidget(del_btn)
+
+            self.fade_hold_inputs.append(e)
+            self._fade_hold_row_widgets.append(roww)
+            inputs_layout.insertWidget(max(0, inputs_layout.count() - 1), roww)
 
         add_row = QFrame()
         add_row.setStyleSheet("QFrame { background: transparent; }")
@@ -938,7 +1001,7 @@ class HotkeyManagerDialog(QWidget):
         
         # Save to file
         try:
-            with open(self.config_file, 'w') as f:
+            with open(self.config_file, "w", encoding="utf-8") as f:
                 json.dump(new_hotkeys, f, indent=4)
 
             # Persist crosshair hold-fade settings (best-effort).
@@ -953,8 +1016,7 @@ class HotkeyManagerDialog(QWidget):
                                 keys.append(hk)
                     except Exception:
                         keys = []
-                    if enabled and not keys:
-                        keys = ["mouse_left"]
+                    # Allow clearing all bindings (no forced default).
 
                     from standard_crosshair import load_settings_from_disk, save_settings_to_disk, StandardCrosshairSettings, _sync_hold_fade_timer_state
 
@@ -962,7 +1024,7 @@ class HotkeyManagerDialog(QWidget):
                     if isinstance(s, StandardCrosshairSettings):
                         s.hold_fade_enabled = enabled
                         s.hold_fade_keys = list(keys)
-                        s.hold_fade_key = (keys[0] if keys else "mouse_left")
+                        s.hold_fade_key = (keys[0] if keys else "")
                         save_settings_to_disk(s)
 
                         # Update the running label immediately if available.
@@ -975,7 +1037,7 @@ class HotkeyManagerDialog(QWidget):
                                 if isinstance(cur, StandardCrosshairSettings):
                                     cur.hold_fade_enabled = enabled
                                     cur.hold_fade_keys = list(keys)
-                                    cur.hold_fade_key = (keys[0] if keys else "mouse_left")
+                                    cur.hold_fade_key = (keys[0] if keys else "")
                                     _sync_hold_fade_timer_state(lbl, cur)
                         except Exception:
                             pass
@@ -1040,9 +1102,9 @@ class HotkeyManagerDialog(QWidget):
     
     def load_hotkeys(self):
         """Load hotkeys from config file."""
-        if os.path.exists(self.config_file):
+        if self.config_file.exists():
             try:
-                with open(self.config_file, 'r') as f:
+                with open(self.config_file, "r", encoding="utf-8") as f:
                     raw = json.load(f)
                     if not isinstance(raw, dict):
                         return self.default_hotkeys.copy()
