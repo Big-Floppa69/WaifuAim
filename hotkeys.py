@@ -327,6 +327,17 @@ def reload_hotkeys() -> None:
 
     def mirror_v() -> None:
         def _do():
+            # Prefer mirroring selected art overlays (new pipeline).
+            try:
+                if _overlay_controller_ref is not None:
+                    fn = getattr(_overlay_controller_ref, "toggle_mirror_vertical", None)
+                    if callable(fn):
+                        fn()
+                        return
+            except Exception:
+                pass
+
+            # Fallback: mirror the legacy base image label.
             if _label_ref is None:
                 return
             mirror_vertical(_label_ref, _label_ref.pixmap())
@@ -335,6 +346,17 @@ def reload_hotkeys() -> None:
 
     def mirror_h() -> None:
         def _do():
+            # Prefer mirroring selected art overlays (new pipeline).
+            try:
+                if _overlay_controller_ref is not None:
+                    fn = getattr(_overlay_controller_ref, "toggle_mirror_horizontal", None)
+                    if callable(fn):
+                        fn()
+                        return
+            except Exception:
+                pass
+
+            # Fallback: mirror the legacy base image label.
             if _label_ref is None:
                 return
             mirror_horizontal(_label_ref, _label_ref.pixmap())

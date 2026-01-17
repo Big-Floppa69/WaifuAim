@@ -851,18 +851,52 @@ class DarkControlPanel(QWidget):
             self._btn_mirror_v.setIconSize(QSize(44, 44))
         except Exception:
             self._btn_mirror_v.setText("↔️")
-        self._btn_mirror_v.clicked.connect(lambda: mirror_vertical(self.image_label, self.image_label.pixmap()))
+        self._btn_mirror_v.clicked.connect(self._mirror_vertical_action)
 
         self._btn_mirror_h = QPushButton("↔️")
         self._btn_mirror_h.setFixedSize(44, 44)
         self._btn_mirror_h.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_mirror_h.setToolTip("Mirror Horizontal")
         self._btn_mirror_h.setStyleSheet(seg_style("right"))
-        self._btn_mirror_h.clicked.connect(lambda: mirror_horizontal(self.image_label, self.image_label.pixmap()))
+        self._btn_mirror_h.clicked.connect(self._mirror_horizontal_action)
 
         layout.addWidget(self._btn_mirror_v)
         layout.addWidget(self._btn_mirror_h)
         return wrapper
+
+    def _mirror_vertical_action(self) -> None:
+        # Prefer art overlays (new pipeline).
+        try:
+            if self.art_overlay_controller is not None:
+                fn = getattr(self.art_overlay_controller, "toggle_mirror_vertical", None)
+                if callable(fn):
+                    fn()
+                    return
+        except Exception:
+            pass
+
+        # Fallback: mirror base image label.
+        try:
+            mirror_vertical(self.image_label, self.image_label.pixmap())
+        except Exception:
+            pass
+
+    def _mirror_horizontal_action(self) -> None:
+        # Prefer art overlays (new pipeline).
+        try:
+            if self.art_overlay_controller is not None:
+                fn = getattr(self.art_overlay_controller, "toggle_mirror_horizontal", None)
+                if callable(fn):
+                    fn()
+                    return
+        except Exception:
+            pass
+
+        # Fallback: mirror base image label.
+        try:
+            mirror_horizontal(self.image_label, self.image_label.pixmap())
+        except Exception:
+            pass
 
     def _create_top_action_bar(self) -> QFrame:
         bar = QFrame()

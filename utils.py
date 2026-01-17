@@ -416,6 +416,7 @@ class _LabelVideoPlayer(QObject):
         self._key_threshold = int(key_threshold)
 
         self._latest_frame = None
+        self._latest_frame_size: tuple[int, int] | None = None
         self._update_timer = QTimer(self)
         self._update_timer.timeout.connect(self._update_display)
         self._update_timer.start(1000 // 30)  # 30 fps
@@ -436,6 +437,13 @@ class _LabelVideoPlayer(QObject):
 
     def set_transform(self, transform: Optional[dict]) -> None:
         self._transform = transform or {}
+
+    def get_source_size(self) -> tuple[int, int] | None:
+        """Return the most recently observed frame size (w, h) if available."""
+        try:
+            return tuple(self._latest_frame_size) if self._latest_frame_size is not None else None
+        except Exception:
+            return None
 
     def start(self) -> None:
         try:
@@ -480,6 +488,11 @@ class _LabelVideoPlayer(QObject):
         if img is None or getattr(img, "isNull", lambda: True)():
             return
 
+        try:
+            self._latest_frame_size = (int(img.width()), int(img.height()))
+        except Exception:
+            self._latest_frame_size = None
+
         self._latest_frame = img
 
     def _update_display(self) -> None:
@@ -514,6 +527,15 @@ class _LabelVideoPlayer(QObject):
             rotation = float(self._transform.get("rotation", 0.0) or 0.0)
         except Exception:
             rotation = 0.0
+
+        try:
+            flip_x = bool(self._transform.get("flip_x", False))
+        except Exception:
+            flip_x = False
+        try:
+            flip_y = bool(self._transform.get("flip_y", False))
+        except Exception:
+            flip_y = False
         try:
             pos_x = float(self._transform.get("x", (self._canvas_w - img.width()) / 2.0) or 0.0)
         except Exception:
@@ -562,8 +584,10 @@ class _LabelVideoPlayer(QObject):
         painter.save()
         painter.translate(pos_x + (w * zoom) / 2.0, pos_y + (h * zoom) / 2.0)
         painter.rotate(rotation)
-        if zoom != 1.0:
-            painter.scale(zoom, zoom)
+        sx = float(zoom) * (-1.0 if flip_x else 1.0)
+        sy = float(zoom) * (-1.0 if flip_y else 1.0)
+        if sx != 1.0 or sy != 1.0:
+            painter.scale(sx, sy)
         painter.translate(-w / 2.0, -h / 2.0)
         painter.drawImage(0, 0, img2)
         painter.restore()
@@ -667,6 +691,14 @@ def set_label_art_from_path(
 
         t = dict(transform or {})
         try:
+            flip_x = bool(t.get("flip_x", False))
+        except Exception:
+            flip_x = False
+        try:
+            flip_y = bool(t.get("flip_y", False))
+        except Exception:
+            flip_y = False
+        try:
             zoom = float(t.get("zoom", 1.0) or 1.0)
         except Exception:
             zoom = 1.0
@@ -706,8 +738,10 @@ def set_label_art_from_path(
         painter.save()
         painter.translate(pos_x + (w * zoom) / 2.0, pos_y + (h * zoom) / 2.0)
         painter.rotate(rotation)
-        if zoom != 1.0:
-            painter.scale(zoom, zoom)
+        sx = float(zoom) * (-1.0 if flip_x else 1.0)
+        sy = float(zoom) * (-1.0 if flip_y else 1.0)
+        if sx != 1.0 or sy != 1.0:
+            painter.scale(sx, sy)
         painter.translate(-w / 2.0, -h / 2.0)
         painter.drawImage(0, 0, img2)
         painter.restore()
