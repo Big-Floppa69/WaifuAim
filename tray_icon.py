@@ -8,9 +8,15 @@ from PyQt6.QtWidgets import (
     QMessageBox,
 )
 from PyQt6.QtGui import QIcon, QAction
-from PyQt6.QtCore import QUrl
+from PyQt6.QtCore import QUrl, QTimer
+
+import threading
 
 from utils import APP_VERSION, get_app_config_dir, get_app_config_path, tr_lit, read_app_settings, update_app_settings, is_windows_autostart_enabled, set_windows_autostart
+
+# GitHub repo used for update checks
+_GITHUB_OWNER = "Big-Floppa69"
+_GITHUB_REPO = "WaifuAim"
 
 
 def create_tray_icon(app, label, control_panel, controller=None, icon_path="astra_yao_tray.png"):
@@ -102,6 +108,155 @@ def _create_tray_menu(label, control_panel, controller, app, tray_icon):
 
     open_config_folder_action.triggered.connect(_open_config_folder)
     tray_menu.addAction(open_config_folder_action)
+
+    # ---------- Updates ----------
+
+    updates_action = QAction("Check for Updates", tray_menu)
+
+    update_state = {
+        "checked": False,
+        "available": False,
+        "latest_version": None,
+        "latest_url": None,
+        "asset_name": None,
+        "asset_url": None,
+        "error": None,
+    }
+
+    def _set_updates_action_label() -> None:
+        base = "Check for Updates"
+        if bool(update_state.get("available")):
+            base = f"{base}  ↑"
+        try:
+            updates_action.setText(base)
+        except Exception:
+            pass
+
+    def _run_update_check(*, interactive: bool) -> None:
+        def worker():
+            try:
+                from updates import get_latest_github_release, is_newer_version
+
+                rel = get_latest_github_release(_GITHUB_OWNER, _GITHUB_REPO)
+                update_state["checked"] = True
+                if rel is None:
+                    update_state["available"] = False
+                    update_state["error"] = "No release info"
+                else:
+                    update_state["latest_version"] = rel.version
+                    update_state["latest_url"] = rel.html_url
+                    update_state["asset_name"] = rel.asset_name
+                    update_state["asset_url"] = rel.asset_url
+                    update_state["available"] = bool(is_newer_version(rel.version, str(APP_VERSION)))
+                    update_state["error"] = None
+            except Exception as e:
+                update_state["checked"] = True
+                update_state["available"] = False
+                update_state["error"] = str(e)
+
+            def on_done():
+                _set_updates_action_label()
+
+                if not interactive:
+                    return
+
+                if not update_state.get("checked"):
+                    return
+
+                if update_state.get("available"):
+                    latest = str(update_state.get("latest_version") or "").strip() or "?"
+                    url = str(update_state.get("latest_url") or "").strip()
+                    asset_url = str(update_state.get("asset_url") or "").strip()
+                    asset_name = str(update_state.get("asset_name") or "").strip()
+
+                    text = (
+                        f"A new version is available.\n\n"
+                        f"Current: {APP_VERSION}\n"
+                        f"Latest:  {latest}\n\n"
+                        f"Update now?"
+                    )
+
+                    box = QMessageBox(tray_menu)
+                    box.setWindowTitle("WaifuAim")
+                    box.setText(text)
+                    btn_download = None
+                    if asset_url and asset_name.lower().endswith(".exe"):
+                        btn_download = box.addButton("Download && Install", QMessageBox.ButtonRole.AcceptRole)
+                    btn_open = box.addButton("Open GitHub", QMessageBox.ButtonRole.ActionRole)
+                    btn_later = box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+                    box.setDefaultButton(btn_later)
+                    box.exec()
+                    clicked = box.clickedButton()
+
+                    if clicked == btn_open and url:
+                        try:
+                            from PyQt6.QtGui import QDesktopServices
+                            QDesktopServices.openUrl(QUrl(url))
+                        except Exception:
+                            pass
+
+                    if btn_download is not None and clicked == btn_download and asset_url:
+                        try:
+                            from updates import download_file, launch_installer
+
+                            QMessageBox.information(
+                                tray_menu,
+                                "WaifuAim",
+                                "Downloading the installer...\n\n"
+                                "Your browser may also prompt you depending on Windows security settings.",
+                            )
+                            path = download_file(asset_url, filename=asset_name)
+                            ok = launch_installer(path)
+                            if not ok:
+                                QMessageBox.warning(
+                                    tray_menu,
+                                    "WaifuAim",
+                                    "Download completed, but the installer could not be launched automatically.\n"
+                                    f"File: {path}",
+                                )
+                        except Exception as e:
+                            QMessageBox.warning(
+                                tray_menu,
+                                "WaifuAim",
+                                f"Update failed: {e}",
+                            )
+                else:
+                    # Up to date or error
+                    err = str(update_state.get("error") or "").strip()
+                    if err:
+                        QMessageBox.information(
+                            tray_menu,
+                            "WaifuAim",
+                            "Could not check for updates right now.\n\n"
+                            f"Reason: {err}",
+                        )
+                    else:
+                        QMessageBox.information(
+                            tray_menu,
+                            "WaifuAim",
+                            f"You're up to date.\n\nCurrent version: {APP_VERSION}",
+                        )
+
+            try:
+                QTimer.singleShot(0, on_done)
+            except Exception:
+                pass
+
+        try:
+            t = threading.Thread(target=worker, daemon=True)
+            t.start()
+        except Exception:
+            if interactive:
+                QMessageBox.information(tray_menu, "WaifuAim", "Could not start update check thread.")
+
+    def on_updates_clicked():
+        _run_update_check(interactive=True)
+
+    updates_action.triggered.connect(on_updates_clicked)
+    tray_menu.addAction(updates_action)
+
+    # Automatic update check on every app start (non-blocking)
+    _run_update_check(interactive=False)
 
     about_action = QAction(f"About v{APP_VERSION}", tray_menu)
 
