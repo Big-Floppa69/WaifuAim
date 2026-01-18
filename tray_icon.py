@@ -1,7 +1,6 @@
 """
 System tray icon management for the crosshair application.
 """
-import json
 from PyQt6.QtWidgets import (
     QSystemTrayIcon,
     QMenu,
@@ -9,8 +8,9 @@ from PyQt6.QtWidgets import (
     QMessageBox,
 )
 from PyQt6.QtGui import QIcon, QAction
+from PyQt6.QtCore import QUrl
 
-from utils import tr_lit
+from utils import APP_VERSION, get_app_config_dir, get_app_config_path, tr_lit, read_app_settings, update_app_settings, is_windows_autostart_enabled, set_windows_autostart
 
 
 def create_tray_icon(app, label, control_panel, controller=None, icon_path="astra_yao_tray.png"):
@@ -18,7 +18,7 @@ def create_tray_icon(app, label, control_panel, controller=None, icon_path="astr
     QApplication.setQuitOnLastWindowClosed(False)
 
     tray_icon = QSystemTrayIcon(QIcon(icon_path), parent=app)
-    tray_icon.setToolTip("WaifuAim")
+    tray_icon.setToolTip(f"WaifuAim v{APP_VERSION}")
 
     # Левый / двойной клик по иконке
     def on_tray_activated(reason):
@@ -40,65 +40,36 @@ def create_tray_icon(app, label, control_panel, controller=None, icon_path="astr
 def _create_tray_menu(label, control_panel, controller, app, tray_icon):
     tray_menu = QMenu()
 
-    try:
-        from utils import APP_SETTINGS_PATH
-    except ImportError:
-        APP_SETTINGS_PATH = "app_settings.json"
+    # ---------- settings helpers (AppData) ----------
 
-    # ---------- settings helpers ----------
-
-    def load_settings():
+    def load_settings() -> dict:
         try:
-            with open(APP_SETTINGS_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+            return read_app_settings() or {}
         except Exception:
             return {}
 
-    def save_settings(data):
+    def save_settings_patch(patch: dict) -> dict:
         try:
-            with open(APP_SETTINGS_PATH, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
+            return update_app_settings(patch)
         except Exception:
-            pass
+            return {}
 
     settings = load_settings()
 
-    # ---------- UI visibility control ----------
-
-    def apply_autostart_state(enabled: bool):
-        if enabled:
-            label.hide()
-            if hasattr(control_panel, "crosshair_label"):
-                control_panel.crosshair_label.hide()
-            try:
-                if hasattr(control_panel, "art_overlay_controller") and control_panel.art_overlay_controller is not None:
-                    control_panel.art_overlay_controller.set_all_visible(False)
-            except Exception:
-                pass
-            control_panel.hide()
-        else:
-            label.show()
-            if hasattr(control_panel, "crosshair_label"):
-                control_panel.crosshair_label.show()
-            try:
-                if hasattr(control_panel, "art_overlay_controller") and control_panel.art_overlay_controller is not None:
-                    control_panel.art_overlay_controller.set_all_visible(True)
-            except Exception:
-                pass
-
-        # Keep control panel toggle buttons in sync with actual visibility.
-        try:
-            if hasattr(control_panel, "_update_image_toggle_text"):
-                control_panel._update_image_toggle_text()
-            if hasattr(control_panel, "_update_crosshair_toggle_text"):
-                control_panel._update_crosshair_toggle_text()
-            if hasattr(control_panel, "_sync_action_bar_state"):
-                control_panel._sync_action_bar_state()
-        except Exception:
-            pass
-
-    # 🔥 КЛЮЧЕВО: применяем состояние СРАЗУ при создании tray
-    apply_autostart_state(settings.get("autostart_enabled", False))
+    # Ensure defaults exist (so toggles always have a source of truth in JSON).
+    # User request: autostart default ON.
+    try:
+        patch = {}
+        if "autostart_enabled" not in settings:
+            patch["autostart_enabled"] = True
+            settings["autostart_enabled"] = True
+        if "hotkeys_enabled" not in settings:
+            patch["hotkeys_enabled"] = True
+            settings["hotkeys_enabled"] = True
+        if patch:
+            save_settings_patch(patch)
+    except Exception:
+        pass
 
     # ---------- Open Settings ----------
 
@@ -106,17 +77,99 @@ def _create_tray_menu(label, control_panel, controller, app, tray_icon):
     open_settings_action.triggered.connect(control_panel.toggle_panel)
     tray_menu.addAction(open_settings_action)
 
+    open_settings_file_action = QAction("Open Settings File", tray_menu)
+
+    def _open_settings_file():
+        try:
+            from PyQt6.QtGui import QDesktopServices
+            p = get_app_config_path("app_settings.json")
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
+        except Exception:
+            pass
+
+    open_settings_file_action.triggered.connect(_open_settings_file)
+    tray_menu.addAction(open_settings_file_action)
+
+    open_config_folder_action = QAction("Open Config Folder", tray_menu)
+
+    def _open_config_folder():
+        try:
+            from PyQt6.QtGui import QDesktopServices
+            p = get_app_config_dir()
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
+        except Exception:
+            pass
+
+    open_config_folder_action.triggered.connect(_open_config_folder)
+    tray_menu.addAction(open_config_folder_action)
+
+    about_action = QAction(f"About v{APP_VERSION}", tray_menu)
+
+    def _show_about():
+        try:
+            cfg = str(get_app_config_dir())
+            s = str(get_app_config_path("app_settings.json"))
+            hk = str(get_app_config_path("hotkey_config.json"))
+            QMessageBox.information(
+                tray_menu,
+                "WaifuAim",
+                f"Version: {APP_VERSION}\n\nConfig dir:\n{cfg}\n\nSettings:\n{s}\n\nHotkeys:\n{hk}\n\nTray state (loaded):\n"
+                f"autostart_enabled={bool(settings.get('autostart_enabled', False))}\n"
+                f"hotkeys_enabled={bool(settings.get('hotkeys_enabled', True))}",
+            )
+        except Exception:
+            pass
+
+    about_action.triggered.connect(_show_about)
+    tray_menu.addAction(about_action)
+
     # ---------- Autostart ----------
 
     autostart_action = QAction("Start on System Launch", tray_menu)
     autostart_action.setCheckable(True)
-    autostart_action.setChecked(settings.get("autostart_enabled", False))
+    autostart_action.setChecked(bool(settings.get("autostart_enabled", False)))
 
     def on_autostart_toggled(checked):
-        s = load_settings()
-        s["autostart_enabled"] = checked
-        save_settings(s)
-        apply_autostart_state(checked)
+        checked = bool(checked)
+
+        # Best effort: try to apply the requested state to the registry.
+        try:
+            set_windows_autostart(checked)
+        except Exception:
+            pass
+
+        # Persist the *actual* state after the attempt.
+        actual = checked
+        try:
+            actual = bool(is_windows_autostart_enabled())
+        except Exception:
+            actual = checked
+
+        save_settings_patch({"autostart_enabled": actual})
+
+        # If registry didn't match the requested state, revert the checkmark.
+        if actual != checked:
+            try:
+                autostart_action.blockSignals(True)
+                autostart_action.setChecked(actual)
+            finally:
+                try:
+                    autostart_action.blockSignals(False)
+                except Exception:
+                    pass
+
+        # Verify persistence (installed builds can run under odd contexts).
+        try:
+            cur = bool((read_app_settings() or {}).get("autostart_enabled", False))
+            if cur != actual:
+                QMessageBox.warning(
+                    tray_menu,
+                    "WaifuAim",
+                    "Failed to save 'Start on System Launch' setting.\n"
+                    "This usually means the config folder is not writable or another instance overwrote settings.",
+                )
+        except Exception:
+            pass
 
     autostart_action.toggled.connect(on_autostart_toggled)
     tray_menu.addAction(autostart_action)
@@ -128,9 +181,21 @@ def _create_tray_menu(label, control_panel, controller, app, tray_icon):
     hotkeys_action.setChecked(settings.get("hotkeys_enabled", True))
 
     def on_hotkeys_toggled(checked):
-        s = load_settings()
-        s["hotkeys_enabled"] = checked
-        save_settings(s)
+        desired = bool(checked)
+        save_settings_patch({"hotkeys_enabled": desired})
+
+        # Verify persistence.
+        try:
+            cur = bool((read_app_settings() or {}).get("hotkeys_enabled", True))
+            if cur != desired:
+                QMessageBox.warning(
+                    tray_menu,
+                    "WaifuAim",
+                    "Failed to save 'Enable Hotkeys' setting.\n"
+                    "This usually means the config folder is not writable or another instance overwrote settings.",
+                )
+        except Exception:
+            pass
         try:
             from hotkeys import pause_hotkeys, resume_hotkeys
             if checked:

@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import shutil
+import tempfile
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -84,21 +88,123 @@ def mirror_horizontal(label, pixmap):
     refresh_label_pixmap_for_colorblind_mode(label)
 
 
+def get_display_images_dir() -> Path:
+    """Return a stable, writable folder for user art assets.
+
+    Why: in installer/autostart scenarios the process working directory can be
+    `C:\\Windows\\System32` (or the install directory can be read-only), so
+    using a relative `display_images` path can crash with PermissionError.
+    """
+
+    # Frozen (PyInstaller) builds should always use AppData.
+    try:
+        frozen = bool(getattr(sys, "frozen", False))
+    except Exception:
+        frozen = False
+
+    if frozen:
+        target = get_app_config_dir() / "display_images"
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        # Best-effort migration from bundled display_images (one-time).
+        try:
+            existing = [p for p in target.iterdir() if p.is_file()]
+        except Exception:
+            existing = []
+
+        try:
+            if len(existing) == 0:
+                candidates: list[Path] = []
+                try:
+                    meipass = getattr(sys, "_MEIPASS", None)
+                    if meipass:
+                        candidates.append(Path(str(meipass)) / "display_images")
+                except Exception:
+                    pass
+                try:
+                    candidates.append(Path(sys.executable).resolve().parent / "display_images")
+                except Exception:
+                    pass
+
+                src = None
+                for c in candidates:
+                    try:
+                        if c.exists() and c.is_dir():
+                            src = c
+                            break
+                    except Exception:
+                        continue
+
+                if src is not None:
+                    for p in src.iterdir():
+                        try:
+                            if p.is_file():
+                                shutil.copy2(str(p), str(target / p.name))
+                        except Exception:
+                            continue
+        except Exception:
+            pass
+
+        return target
+
+    # Dev/source mode: keep assets next to the repo.
+    return Path(__file__).resolve().parent / "display_images"
+
+
+def resolve_art_folder(folder: str | None) -> str:
+    """Resolve an art folder name into an absolute, stable path."""
+    folder = str(folder or "").strip() or "display_images"
+    norm = folder.replace("\\", "/")
+    if norm in ("display_images", "./display_images"):
+        p = get_display_images_dir()
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return str(p)
+
+    try:
+        if os.path.isabs(folder):
+            return folder
+    except Exception:
+        pass
+
+    # Relative custom folder => anchor to config dir in frozen, script dir in dev.
+    try:
+        frozen = bool(getattr(sys, "frozen", False))
+    except Exception:
+        frozen = False
+    base = get_app_config_dir() if frozen else Path(__file__).resolve().parent
+    p = (base / folder).resolve()
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return str(p)
+
+
 def get_art_list(folder="display_images"):
     """Get list of art files (images + videos) in the display_images folder."""
 
     exts = ART_EXTS
-    files = []
-    
-    # Ensure folder exists
-    if not os.path.exists(folder):
-        os.makedirs(folder)
+    files: list[str] = []
+
+    folder_abs = resolve_art_folder(folder)
+    try:
+        os.makedirs(folder_abs, exist_ok=True)
+    except Exception:
         return files
-    
-    # Get images from the folder
-    for f in os.listdir(folder):
-        if f.lower().endswith(exts):
-            files.append(os.path.join(folder, f))
+
+    try:
+        for f in os.listdir(folder_abs):
+            if str(f).lower().endswith(exts):
+                files.append(os.path.join(folder_abs, f))
+    except Exception:
+        return files
+
     return files
 
 
@@ -218,8 +324,7 @@ def get_art_cycle_entries(folder: str = "display_images") -> list[dict]:
 
     if modified_seq:
         try:
-            data["art_cycle_sequence"] = seq
-            write_app_settings(data)
+            update_app_settings({"art_cycle_sequence": seq})
         except Exception:
             pass
 
@@ -811,6 +916,107 @@ def transparent(label, percent):
 # --- Config paths --------------------------------------------------------------------
 
 APP_NAME = "WaifuAim"
+APP_VERSION = "1.1"
+
+
+def _autostart_command() -> str:
+    """Return the command used for Windows autostart (quoted where needed)."""
+    try:
+        frozen = bool(getattr(sys, "frozen", False))
+    except Exception:
+        frozen = False
+
+    if frozen:
+        exe = str(Path(sys.executable).resolve())
+        return f'"{exe}" --autostart'
+
+    # Dev mode: run via pythonw if available, otherwise python.
+    py = Path(sys.executable)
+    pyw = py.with_name("pythonw.exe")
+    runner = str(pyw if pyw.exists() else py)
+    main_py = str((Path(__file__).resolve().parent / "main.py").resolve())
+    return f'"{runner}" "{main_py}" --autostart'
+
+
+def set_windows_autostart(enabled: bool, *, name: str | None = None) -> bool:
+    """Enable/disable app autostart for current user.
+
+    Uses HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run.
+    Returns True on success.
+    """
+
+    if os.name != "nt":
+        return False
+
+    try:
+        import winreg  # type: ignore
+    except Exception:
+        return False
+
+    value_name = str(name or APP_NAME).strip() or APP_NAME
+    try:
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            0,
+            winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE,
+        )
+    except Exception:
+        try:
+            key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run")
+        except Exception:
+            return False
+
+    try:
+        if enabled:
+            cmd = _autostart_command()
+            winreg.SetValueEx(key, value_name, 0, winreg.REG_SZ, cmd)
+        else:
+            try:
+                winreg.DeleteValue(key, value_name)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            winreg.CloseKey(key)
+        except Exception:
+            pass
+
+
+def is_windows_autostart_enabled(*, name: str | None = None) -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        import winreg  # type: ignore
+    except Exception:
+        return False
+
+    value_name = str(name or APP_NAME).strip() or APP_NAME
+    try:
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            0,
+            winreg.KEY_QUERY_VALUE,
+        )
+    except Exception:
+        return False
+
+    try:
+        v, _t = winreg.QueryValueEx(key, value_name)
+        return bool(str(v or "").strip())
+    except Exception:
+        return False
+    finally:
+        try:
+            winreg.CloseKey(key)
+        except Exception:
+            pass
 
 
 def get_app_config_dir() -> Path:
@@ -821,17 +1027,54 @@ def get_app_config_dir() -> Path:
     - losing settings in PyInstaller one-file builds
     """
 
-    base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
-    if base:
-        path = Path(base) / APP_NAME
-    else:
-        path = Path.home() / ".config" / APP_NAME
+    candidates: list[Path] = []
 
+    # Prefer standard Windows locations, but be resilient to missing env vars
+    # in some installer/autostart contexts.
+    appdata = os.environ.get("APPDATA")
+    localappdata = os.environ.get("LOCALAPPDATA")
+    if appdata:
+        candidates.append(Path(appdata) / APP_NAME)
+    if localappdata:
+        candidates.append(Path(localappdata) / APP_NAME)
+
+    if os.name == "nt":
+        try:
+            home = Path.home()
+            candidates.append(home / "AppData" / "Roaming" / APP_NAME)
+            candidates.append(home / "AppData" / "Local" / APP_NAME)
+        except Exception:
+            pass
+
+    # Cross-platform fallback.
     try:
-        path.mkdir(parents=True, exist_ok=True)
+        candidates.append(Path.home() / ".config" / APP_NAME)
     except Exception:
-        path = Path.cwd()
-    return path
+        pass
+
+    # Last-resort stable temp folder (never CWD).
+    try:
+        candidates.append(Path(tempfile.gettempdir()) / APP_NAME)
+    except Exception:
+        pass
+
+    # If settings already exist somewhere, stick to that directory.
+    for p in candidates:
+        try:
+            if (p / "app_settings.json").exists() or (p / "hotkey_config.json").exists() or (p / "standard_crosshair_settings.json").exists():
+                return p
+        except Exception:
+            continue
+
+    # Otherwise pick the first directory we can create.
+    for p in candidates:
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            return p
+        except Exception:
+            continue
+
+    return Path.home()
 
 
 def get_app_config_path(filename: str) -> Path:
@@ -858,6 +1101,8 @@ def get_app_config_path(filename: str) -> Path:
 # --- Colorblindness (image filtering) -------------------------------------------------
 
 APP_SETTINGS_PATH = get_app_config_path("app_settings.json")
+
+_APP_SETTINGS_LOCK = threading.Lock()
 
 _LABEL_SOURCE_IMAGE_PROP = "_zzz_source_image"
 
@@ -894,21 +1139,92 @@ def _set_attr(obj, name: str, value) -> None:
 
 def read_app_settings() -> dict:
     try:
-        if APP_SETTINGS_PATH.exists():
-            raw = json.loads(APP_SETTINGS_PATH.read_text(encoding="utf-8"))
-            return raw if isinstance(raw, dict) else {}
+        with _APP_SETTINGS_LOCK:
+            if APP_SETTINGS_PATH.exists():
+                raw = json.loads(APP_SETTINGS_PATH.read_text(encoding="utf-8"))
+                return raw if isinstance(raw, dict) else {}
     except Exception:
         return {}
     return {}
 
 
 def write_app_settings(data: dict) -> None:
+    """Write app settings atomically.
+
+    Prevents truncated/partial JSON and reduces key-loss when multiple features
+    write different settings keys.
+    """
     try:
         if not isinstance(data, dict):
             return
-        APP_SETTINGS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+        try:
+            APP_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        payload = json.dumps(data, indent=2, ensure_ascii=False)
+        tmp = APP_SETTINGS_PATH.with_suffix(APP_SETTINGS_PATH.suffix + ".tmp")
+
+        with _APP_SETTINGS_LOCK:
+            tmp.write_text(payload, encoding="utf-8")
+            tmp.replace(APP_SETTINGS_PATH)
     except Exception:
-        pass
+        # Best-effort fallback (non-atomic)
+        try:
+            with _APP_SETTINGS_LOCK:
+                APP_SETTINGS_PATH.write_text(
+                    json.dumps(data, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+        except Exception:
+            pass
+
+
+def update_app_settings(patch: dict | None = None, *, update_fn=None) -> dict:
+    """Safely read-modify-write app_settings.json.
+
+    Use this instead of manual read+write to avoid races where one writer
+    accidentally drops keys written by another.
+    """
+    with _APP_SETTINGS_LOCK:
+        data: dict = {}
+        try:
+            if APP_SETTINGS_PATH.exists():
+                raw = json.loads(APP_SETTINGS_PATH.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    data = raw
+        except Exception:
+            data = {}
+
+        if isinstance(patch, dict):
+            data.update(patch)
+
+        if callable(update_fn):
+            try:
+                out = update_fn(dict(data))
+                if isinstance(out, dict):
+                    data = out
+            except Exception:
+                pass
+
+        try:
+            APP_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        try:
+            payload = json.dumps(data, indent=2, ensure_ascii=False)
+            tmp = APP_SETTINGS_PATH.with_suffix(APP_SETTINGS_PATH.suffix + ".tmp")
+            tmp.write_text(payload, encoding="utf-8")
+            tmp.replace(APP_SETTINGS_PATH)
+        except Exception:
+            try:
+                APP_SETTINGS_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
+
+        return data
 
 
 SUPPORTED_LANGUAGES: dict[str, str] = {
@@ -954,9 +1270,10 @@ def set_app_language_on_disk(lang: str) -> str:
     lang = str(lang or "en").strip().lower() or "en"
     if lang not in SUPPORTED_LANGUAGES:
         lang = "en"
-    data = read_app_settings()
-    data["language"] = lang
-    write_app_settings(data)
+    try:
+        update_app_settings({"language": lang})
+    except Exception:
+        pass
     return lang
 
 

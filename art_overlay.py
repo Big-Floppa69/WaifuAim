@@ -19,7 +19,7 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QApplication, QLabel
 
-from utils import APP_SETTINGS_PATH, refresh_label_pixmap_for_colorblind_mode, set_label_art_from_path
+from utils import read_app_settings, update_app_settings, refresh_label_pixmap_for_colorblind_mode, resolve_art_folder, set_label_art_from_path
 
 
 @dataclass
@@ -135,15 +135,20 @@ class ArtOverlayController:
 
     def clear_selection(self) -> None:
         """Clear all checkmarks (selection) and hide any existing overlay labels."""
-        data = self._read_settings()
-        raw = data.get("art_overlays")
-        overlays = raw if isinstance(raw, dict) else {}
-        for k, v in list(overlays.items()):
-            if isinstance(v, dict):
-                v["enabled"] = False
-                overlays[k] = v
-        data["art_overlays"] = overlays
-        self._write_settings(data)
+        def _upd(data: dict) -> dict:
+            raw = data.get("art_overlays")
+            overlays = raw if isinstance(raw, dict) else {}
+            for k, v in list(overlays.items()):
+                if isinstance(v, dict):
+                    v["enabled"] = False
+                    overlays[k] = v
+            data["art_overlays"] = overlays
+            return data
+
+        try:
+            update_app_settings(update_fn=_upd)
+        except Exception:
+            pass
         for _k, lbl in list(self._labels.items()):
             try:
                 lbl.hide()
@@ -154,31 +159,36 @@ class ArtOverlayController:
     def set_selection_keys(self, keys: list[str]) -> None:
         """Set checkmarks to exactly `keys` (others become unchecked)."""
         wanted = {str(k) for k in (keys or []) if str(k).strip()}
-        data = self._read_settings()
-        raw = data.get("art_overlays")
-        overlays = raw if isinstance(raw, dict) else {}
+        def _upd(data: dict) -> dict:
+            raw = data.get("art_overlays")
+            overlays = raw if isinstance(raw, dict) else {}
 
-        # Flip existing entries.
-        for k, v in list(overlays.items()):
-            if not isinstance(v, dict):
-                v = {}
-            v["enabled"] = (k in wanted)
-            overlays[k] = v
+            # Flip existing entries.
+            for k, v in list(overlays.items()):
+                if not isinstance(v, dict):
+                    v = {}
+                v["enabled"] = (k in wanted)
+                overlays[k] = v
 
-        # Add missing entries.
-        for k in wanted:
-            v = overlays.get(k)
-            if not isinstance(v, dict):
-                v = {}
-            v["enabled"] = True
-            if "opacity" not in v:
-                v["opacity"] = 1.0
-            if "transform" not in v:
-                v["transform"] = {}
-            overlays[k] = v
+            # Add missing entries.
+            for k in wanted:
+                v = overlays.get(k)
+                if not isinstance(v, dict):
+                    v = {}
+                v["enabled"] = True
+                if "opacity" not in v:
+                    v["opacity"] = 1.0
+                if "transform" not in v:
+                    v["transform"] = {}
+                overlays[k] = v
 
-        data["art_overlays"] = overlays
-        self._write_settings(data)
+            data["art_overlays"] = overlays
+            return data
+
+        try:
+            update_app_settings(update_fn=_upd)
+        except Exception:
+            pass
         self._sync_interactivity()
 
     def render_selected_from_folder(self, folder: str = "display_images") -> None:
@@ -188,7 +198,7 @@ class ArtOverlayController:
         state to the on-screen overlays.
         """
         folder = str(folder or "").strip() or "display_images"
-        abs_folder = os.path.abspath(folder)
+        abs_folder = resolve_art_folder(folder)
         if not os.path.exists(abs_folder):
             return
 
@@ -266,7 +276,7 @@ class ArtOverlayController:
     def _render_selected_from_folder_hidden(self, folder: str = "display_images") -> None:
         """Like render_selected_from_folder(), but keeps overlays hidden until caller shows them."""
         folder = str(folder or "").strip() or "display_images"
-        abs_folder = os.path.abspath(folder)
+        abs_folder = resolve_art_folder(folder)
         if not os.path.exists(abs_folder):
             return
 
@@ -292,18 +302,15 @@ class ArtOverlayController:
 
     def _read_settings(self) -> dict:
         try:
-            if APP_SETTINGS_PATH.exists():
-                raw = json.loads(APP_SETTINGS_PATH.read_text(encoding="utf-8"))
-                return raw if isinstance(raw, dict) else {}
+            return read_app_settings() or {}
         except Exception:
             return {}
-        return {}
 
     def _write_settings(self, data: dict) -> None:
         try:
             if not isinstance(data, dict):
                 return
-            APP_SETTINGS_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            update_app_settings(update_fn=lambda _old: dict(data))
         except Exception:
             pass
 
@@ -327,17 +334,22 @@ class ArtOverlayController:
         return ArtOverlayState(enabled=enabled, opacity=opacity, transform=t)
 
     def _set_state(self, key: str, state: ArtOverlayState) -> None:
-        data = self._read_settings()
-        overlays = data.get("art_overlays")
-        if not isinstance(overlays, dict):
-            overlays = {}
-        overlays[key] = {
-            "enabled": bool(state.enabled),
-            "opacity": float(state.opacity),
-            "transform": dict(state.transform or {}),
-        }
-        data["art_overlays"] = overlays
-        self._write_settings(data)
+        def _upd(data: dict) -> dict:
+            overlays = data.get("art_overlays")
+            if not isinstance(overlays, dict):
+                overlays = {}
+            overlays[key] = {
+                "enabled": bool(state.enabled),
+                "opacity": float(state.opacity),
+                "transform": dict(state.transform or {}),
+            }
+            data["art_overlays"] = overlays
+            return data
+
+        try:
+            update_app_settings(update_fn=_upd)
+        except Exception:
+            pass
 
     # --- public API ------------------------------------------------------------------
 

@@ -2,18 +2,25 @@
 ; Created for Inno Setup
 
 #define MyAppName "WaifuAim"
-#define MyAppVersion "1.0"
-#define MyAppVersionInfo "1.0.0.0"
+#define MyAppVersion "1.1"
+#define MyAppVersionInfo "1.1.0.0"
 #define MyAppPublisher "FDC Team (Open Source)"
 #define MyAppURL "https://github.com/Big-Floppa69/WaifuAim"
 #define MyAppExeName "main.py"
 
 ; Prefer the latest PyInstaller output from WaifuAim.spec.
-; Fallback kept for older builds that produced a differently named exe.
+; Support both onefile and onedir outputs. Fail fast if nothing is found
+; to avoid accidentally packaging a stale/old exe.
 #if FileExists("dist\\WaifuAim.exe")
   #define MyBuiltExe "dist\\WaifuAim.exe"
-#else
+#elif FileExists("dist\\WaifuAim\\WaifuAim.exe")
+  #define MyBuiltExe "dist\\WaifuAim\\WaifuAim.exe"
+#elif FileExists("dist\\Zenless Zone Zero Crosshair.exe")
   #define MyBuiltExe "dist\\Zenless Zone Zero Crosshair.exe"
+#elif FileExists("dist\\Zenless Zone Zero Crosshair\\Zenless Zone Zero Crosshair.exe")
+  #define MyBuiltExe "dist\\Zenless Zone Zero Crosshair\\Zenless Zone Zero Crosshair.exe"
+#else
+  #error "Built exe not found. Run: pyinstaller WaifuAim.spec"
 #endif
 
 [Setup]
@@ -93,7 +100,7 @@ Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\{#MyAppName}"; Fil
 ; Add registry entries for the application
 Root: HKCU; Subkey: "Software\WaifuAim"; ValueType: string; ValueName: "InstallPath"; ValueData: "{app}"
 Root: HKCU; Subkey: "Software\WaifuAim"; ValueType: string; ValueName: "Version"; ValueData: "{#MyAppVersion}"
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "WaifuAim"; ValueData: """{app}\WaifuAim.exe"""; Tasks: startup; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "WaifuAim"; ValueData: """{app}\WaifuAim.exe"" --autostart"; Tasks: startup; Flags: uninsdeletevalue
 
 [Run]
 Filename: "{app}\install_dependencies.bat"; Flags: runascurrentuser postinstall waituntilterminated skipifsilent; StatusMsg: "Installing Python dependencies..."; Description: "Install Python dependencies"

@@ -13,7 +13,7 @@ from control_panel import DarkControlPanel
 from tray_icon import create_tray_icon
 from hotkeys import setup_hotkeys
 from standard_crosshair import initialize_standard_crosshair
-from utils import read_app_settings, set_label_art_from_path
+from utils import APP_VERSION, read_app_settings, update_app_settings, set_label_art_from_path, is_windows_autostart_enabled, set_windows_autostart
 from art_overlay import ArtOverlayController
 
 
@@ -137,6 +137,10 @@ def main():
         app.setApplicationDisplayName(APP_NAME)
     except Exception:
         pass
+    try:
+        app.setApplicationVersion(str(APP_VERSION))
+    except Exception:
+        pass
 
     # Ensure checkboxes have a visible checkmark (✔) when active.
     try:
@@ -149,7 +153,44 @@ def main():
         settings = read_app_settings()
     except Exception:
         settings = {}
-    autostart_enabled = bool(settings.get("autostart_enabled", False))
+
+    # Persist defaults and keep Windows autostart registry in sync.
+    # User request: autostart should be enabled by default on first run.
+    try:
+        if not isinstance(settings, dict):
+            settings = {}
+
+        # Seed defaults once.
+        seeded_patch: dict = {}
+        if "hotkeys_enabled" not in settings:
+            seeded_patch["hotkeys_enabled"] = True
+            settings["hotkeys_enabled"] = True
+        if "autostart_enabled" not in settings:
+            seeded_patch["autostart_enabled"] = True
+            settings["autostart_enabled"] = True
+
+        if seeded_patch:
+            update_app_settings(seeded_patch)
+
+        # Apply the saved preference to the registry (including disable).
+        desired_autostart = bool(settings.get("autostart_enabled", False))
+        try:
+            set_windows_autostart(desired_autostart)
+        except Exception:
+            pass
+
+        # Persist the actual registry state back to settings (so tray matches reality).
+        try:
+            actual = bool(is_windows_autostart_enabled())
+            if actual != desired_autostart:
+                settings["autostart_enabled"] = actual
+                update_app_settings({"autostart_enabled": actual})
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    started_via_autostart = any(str(a).strip().lower() == "--autostart" for a in sys.argv[1:])
 
     # Base image label: keep transparent by default; art overlays are managed
     # as separate elements via the Art Manager.
@@ -158,14 +199,11 @@ def main():
     # Create separate label for generated crosshair overlay and load saved settings
     crosshair_label = create_crosshair_label(app, image_path=None)
     initialize_standard_crosshair(crosshair_label)
-    if autostart_enabled:
+
+    # If launched by Windows autostart, start fully hidden (tray only).
+    if started_via_autostart:
         try:
             crosshair_label.hide()
-        except Exception:
-            pass
-    else:
-        try:
-            crosshair_label.show()
         except Exception:
             pass
 
@@ -181,7 +219,12 @@ def main():
     time.sleep(0.1)
 
     # Create control panel
-    control_panel = DarkControlPanel(image_label, crosshair_label, art_overlay_controller=art_overlay)
+    control_panel = DarkControlPanel(
+        image_label,
+        crosshair_label,
+        art_overlay_controller=art_overlay,
+        startup_hidden=started_via_autostart,
+    )
 
     # Add additional delay before creating tray icon
     time.sleep(0.5)
@@ -196,6 +239,15 @@ def main():
         overlay_controller=art_overlay,
         control_panel=control_panel,
     )
+
+    # Apply persisted hotkeys enabled state.
+    try:
+        hotkeys_enabled = bool(settings.get("hotkeys_enabled", True))
+        if not hotkeys_enabled:
+            from hotkeys import pause_hotkeys
+            pause_hotkeys()
+    except Exception:
+        pass
 
     sys.exit(app.exec())
 

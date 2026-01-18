@@ -36,6 +36,8 @@ from utils import (
     UI_THEME,
     get_art_cycle_entries,
     get_app_config_path,
+    read_app_settings,
+    update_app_settings,
     get_app_language_from_disk,
     set_app_language_on_disk,
     SUPPORTED_LANGUAGES,
@@ -62,7 +64,7 @@ class DarkControlPanel(QWidget):
 
     APP_SETTINGS_PATH = get_app_config_path("app_settings.json")
     
-    def __init__(self, image_label, crosshair_label, parent=None, *, art_overlay_controller=None):
+    def __init__(self, image_label, crosshair_label, parent=None, *, art_overlay_controller=None, startup_hidden: bool = False):
         super().__init__(parent)
         self.image_label = image_label
         self.crosshair_label = crosshair_label
@@ -76,6 +78,11 @@ class DarkControlPanel(QWidget):
         self.hotkey_manager = None
         self.crosshair_dialog = None
         self.crosshair_preset_combo = None
+
+        # If started via Windows autostart, we begin with everything hidden.
+        # When the user opens the panel for the first time, restore the overlays.
+        self._startup_hidden = bool(startup_hidden)
+        self._startup_hidden_restored = False
 
         # Side panel behavior
         self._collapsed = False
@@ -430,18 +437,16 @@ class DarkControlPanel(QWidget):
 
     def _read_app_settings(self) -> dict:
         try:
-            if self.APP_SETTINGS_PATH.exists():
-                raw = json.loads(self.APP_SETTINGS_PATH.read_text(encoding="utf-8"))
-                return raw if isinstance(raw, dict) else {}
+            return read_app_settings() or {}
         except Exception:
             return {}
-        return {}
 
     def _write_app_settings(self, data: dict) -> None:
         try:
             if not isinstance(data, dict):
                 return
-            self.APP_SETTINGS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            # Merge update to avoid dropping keys written by other parts of the app.
+            update_app_settings(update_fn=lambda old: {**(old or {}), **data})
         except Exception:
             return
 
@@ -2468,6 +2473,36 @@ class DarkControlPanel(QWidget):
                 pass
             self.show()
             self.is_visible = True
+
+            # One-time restore after autostart hidden launch.
+            if self._startup_hidden and not self._startup_hidden_restored:
+                self._startup_hidden_restored = True
+                try:
+                    # Restore crosshair visibility from persisted settings.
+                    s = load_settings_from_disk()
+                    render_crosshair_on_label(self.crosshair_label, s)
+                    try:
+                        self.crosshair_label.setVisible(bool(getattr(s, "visible", True)))
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                try:
+                    # Restore art overlays that are enabled in app_settings.
+                    if self.art_overlay_controller is not None:
+                        self.image_label.show()
+                        clear_label_art(self.image_label)
+                        self.art_overlay_controller.request_render_selected_atomic(
+                            "display_images",
+                            visible=True,
+                        )
+                except Exception:
+                    pass
+                # Leave base image label transparent unless user chooses otherwise.
+                try:
+                    clear_label_art(self.image_label)
+                except Exception:
+                    pass
     
     def mousePressEvent(self, event):
         """Handle mouse press events for dragging."""

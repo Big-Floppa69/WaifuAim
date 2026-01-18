@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 import ctypes
 import threading
@@ -262,15 +263,20 @@ def reload_hotkeys() -> None:
 
         state = {"armed": True, "last": 0.0}
 
-        if _any_mouse(parts) or _all_modifiers(parts):
-            # Mouse-based chords: poll via Win32 (keyboard lib doesn't support mouse buttons).
-            # Modifier-only chords (e.g. "alt") are also unreliable via keyboard hooks on some systems,
-            # so we poll them as well.
+        # Windows installed/frozen builds frequently cannot rely on low-level
+        # keyboard hooks (the `keyboard` lib may require elevation or be blocked).
+        # Use Win32 polling for reliability.
+        try:
+            is_windows = (os.name == "nt")
+        except Exception:
+            is_windows = False
+
+        if is_windows:
+            # If all parts are recognized, handle via Win32 polling.
             if any(_vk_from_key_name(p) is None for p in parts):
                 return
             with _win32_hotkey_lock:
                 _win32_hotkey_bindings.append({"parts": parts, "state": state, "callback": callback})
-
             _ensure_win32_hotkey_thread()
             return
 

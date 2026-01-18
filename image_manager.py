@@ -13,7 +13,7 @@ from PyQt6.QtGui import QPixmap, QColor, QIcon, QPainter, QPen
 from PyQt6.QtCore import Qt, QSize, QUrl, QPoint, pyqtSignal
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 import json
-from utils import UI_THEME, ART_EXTS, IMAGE_EXTS, is_video_path, tr_lit, get_app_config_path
+from utils import UI_THEME, ART_EXTS, IMAGE_EXTS, is_video_path, tr_lit, get_app_config_path, resolve_art_folder, read_app_settings, update_app_settings
 from image_editor import ImageEditorDialog
 
 
@@ -137,8 +137,8 @@ class ImageManagerDialog(QWidget):
     
     def __init__(self, parent=None, images_folder="display_images", *, overlay_controller=None):
         super().__init__(parent)
-        # Use absolute path to ensure we have proper path handling
-        self.images_folder = os.path.abspath(images_folder)
+        # Resolve to a stable absolute path (AppData in frozen builds).
+        self.images_folder = resolve_art_folder(images_folder)
         self.drag_position = None
         self.overlay_controller = overlay_controller
         self._updating_checks = False
@@ -1538,20 +1538,15 @@ class ImageManagerDialog(QWidget):
 
     def _read_app_settings(self) -> dict:
         try:
-            here = get_app_config_path("app_settings.json")
-            if here.exists():
-                raw = json.loads(here.read_text(encoding="utf-8"))
-                return raw if isinstance(raw, dict) else {}
+            return read_app_settings() or {}
         except Exception:
             return {}
-        return {}
 
     def _write_app_settings(self, data: dict) -> None:
         try:
             if not isinstance(data, dict):
                 return
-            here = get_app_config_path("app_settings.json")
-            here.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            update_app_settings(update_fn=lambda old: {**(old or {}), **data})
         except Exception:
             pass
 
