@@ -19,7 +19,7 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QApplication, QLabel
 
-from utils import APP_SETTINGS_PATH, refresh_label_pixmap_for_colorblind_mode, set_label_art_from_path
+from utils import read_app_settings, update_app_settings, refresh_label_pixmap_for_colorblind_mode, resolve_art_folder, set_label_art_from_path
 
 
 @dataclass
@@ -89,6 +89,10 @@ class ArtOverlayController:
         self._labels: dict[str, MovableOverlayLabel] = {}
         self._global_opacity = 1.0
 
+        # Runtime-only visual transforms (never persisted).
+        # Key -> {"flip_x": bool, "flip_y": bool}
+        self._runtime_flips: dict[str, dict[str, bool]] = {}
+
         # Monotonic counter to cancel stale deferred renders.
         self._render_generation = 0
 
@@ -131,15 +135,20 @@ class ArtOverlayController:
 
     def clear_selection(self) -> None:
         """Clear all checkmarks (selection) and hide any existing overlay labels."""
-        data = self._read_settings()
-        raw = data.get("art_overlays")
-        overlays = raw if isinstance(raw, dict) else {}
-        for k, v in list(overlays.items()):
-            if isinstance(v, dict):
-                v["enabled"] = False
-                overlays[k] = v
-        data["art_overlays"] = overlays
-        self._write_settings(data)
+        def _upd(data: dict) -> dict:
+            raw = data.get("art_overlays")
+            overlays = raw if isinstance(raw, dict) else {}
+            for k, v in list(overlays.items()):
+                if isinstance(v, dict):
+                    v["enabled"] = False
+                    overlays[k] = v
+            data["art_overlays"] = overlays
+            return data
+
+        try:
+            update_app_settings(update_fn=_upd)
+        except Exception:
+            pass
         for _k, lbl in list(self._labels.items()):
             try:
                 lbl.hide()
@@ -150,31 +159,36 @@ class ArtOverlayController:
     def set_selection_keys(self, keys: list[str]) -> None:
         """Set checkmarks to exactly `keys` (others become unchecked)."""
         wanted = {str(k) for k in (keys or []) if str(k).strip()}
-        data = self._read_settings()
-        raw = data.get("art_overlays")
-        overlays = raw if isinstance(raw, dict) else {}
+        def _upd(data: dict) -> dict:
+            raw = data.get("art_overlays")
+            overlays = raw if isinstance(raw, dict) else {}
 
-        # Flip existing entries.
-        for k, v in list(overlays.items()):
-            if not isinstance(v, dict):
-                v = {}
-            v["enabled"] = (k in wanted)
-            overlays[k] = v
+            # Flip existing entries.
+            for k, v in list(overlays.items()):
+                if not isinstance(v, dict):
+                    v = {}
+                v["enabled"] = (k in wanted)
+                overlays[k] = v
 
-        # Add missing entries.
-        for k in wanted:
-            v = overlays.get(k)
-            if not isinstance(v, dict):
-                v = {}
-            v["enabled"] = True
-            if "opacity" not in v:
-                v["opacity"] = 1.0
-            if "transform" not in v:
-                v["transform"] = {}
-            overlays[k] = v
+            # Add missing entries.
+            for k in wanted:
+                v = overlays.get(k)
+                if not isinstance(v, dict):
+                    v = {}
+                v["enabled"] = True
+                if "opacity" not in v:
+                    v["opacity"] = 1.0
+                if "transform" not in v:
+                    v["transform"] = {}
+                overlays[k] = v
 
-        data["art_overlays"] = overlays
-        self._write_settings(data)
+            data["art_overlays"] = overlays
+            return data
+
+        try:
+            update_app_settings(update_fn=_upd)
+        except Exception:
+            pass
         self._sync_interactivity()
 
     def render_selected_from_folder(self, folder: str = "display_images") -> None:
@@ -184,7 +198,7 @@ class ArtOverlayController:
         state to the on-screen overlays.
         """
         folder = str(folder or "").strip() or "display_images"
-        abs_folder = os.path.abspath(folder)
+        abs_folder = resolve_art_folder(folder)
         if not os.path.exists(abs_folder):
             return
 
@@ -262,7 +276,7 @@ class ArtOverlayController:
     def _render_selected_from_folder_hidden(self, folder: str = "display_images") -> None:
         """Like render_selected_from_folder(), but keeps overlays hidden until caller shows them."""
         folder = str(folder or "").strip() or "display_images"
-        abs_folder = os.path.abspath(folder)
+        abs_folder = resolve_art_folder(folder)
         if not os.path.exists(abs_folder):
             return
 
@@ -288,18 +302,15 @@ class ArtOverlayController:
 
     def _read_settings(self) -> dict:
         try:
-            if APP_SETTINGS_PATH.exists():
-                raw = json.loads(APP_SETTINGS_PATH.read_text(encoding="utf-8"))
-                return raw if isinstance(raw, dict) else {}
+            return read_app_settings() or {}
         except Exception:
             return {}
-        return {}
 
     def _write_settings(self, data: dict) -> None:
         try:
             if not isinstance(data, dict):
                 return
-            APP_SETTINGS_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            update_app_settings(update_fn=lambda _old: dict(data))
         except Exception:
             pass
 
@@ -323,17 +334,22 @@ class ArtOverlayController:
         return ArtOverlayState(enabled=enabled, opacity=opacity, transform=t)
 
     def _set_state(self, key: str, state: ArtOverlayState) -> None:
-        data = self._read_settings()
-        overlays = data.get("art_overlays")
-        if not isinstance(overlays, dict):
-            overlays = {}
-        overlays[key] = {
-            "enabled": bool(state.enabled),
-            "opacity": float(state.opacity),
-            "transform": dict(state.transform or {}),
-        }
-        data["art_overlays"] = overlays
-        self._write_settings(data)
+        def _upd(data: dict) -> dict:
+            overlays = data.get("art_overlays")
+            if not isinstance(overlays, dict):
+                overlays = {}
+            overlays[key] = {
+                "enabled": bool(state.enabled),
+                "opacity": float(state.opacity),
+                "transform": dict(state.transform or {}),
+            }
+            data["art_overlays"] = overlays
+            return data
+
+        try:
+            update_app_settings(update_fn=_upd)
+        except Exception:
+            pass
 
     # --- public API ------------------------------------------------------------------
 
@@ -408,6 +424,165 @@ class ArtOverlayController:
 
     def get_transform(self, key: str) -> dict:
         return dict(self._get_state(key).transform or {})
+
+    def toggle_mirror_horizontal(self) -> None:
+        """Mirror horizontally around the screen center (left-right).
+
+        This mirrors the overlay *position* around the canvas center and also
+        flips the rendered content.
+        """
+        self._toggle_runtime_flip_for_targets("flip_x")
+
+    def toggle_mirror_vertical(self) -> None:
+        """Mirror vertically around the screen center (top-bottom).
+
+        This mirrors the overlay *position* around the canvas center and also
+        flips the rendered content.
+        """
+        self._toggle_runtime_flip_for_targets("flip_y")
+
+    def _toggle_runtime_flip_for_targets(self, flip_key: str) -> None:
+        """Toggle runtime flip for selected or enabled overlays.
+
+        This is intentionally NOT persisted; it resets on app restart.
+        """
+        flip_key = str(flip_key or "").strip()
+        if flip_key not in ("flip_x", "flip_y"):
+            return
+
+        targets: list[str] = []
+        try:
+            if self._selected_key and self.is_enabled(self._selected_key):
+                targets = [self._selected_key]
+            else:
+                targets = list(self.enabled_keys())
+        except Exception:
+            targets = []
+
+        for key in targets:
+            cur = False
+            try:
+                cur = bool(self._runtime_flips.get(key, {}).get(flip_key, False))
+            except Exception:
+                cur = False
+            self._set_runtime_flip(key, flip_key, (not cur))
+
+            # Re-apply immediately so the user sees the change.
+            lbl = self._labels.get(key)
+            path = getattr(lbl, "_zzz_source_path", None) if lbl is not None else None
+            if isinstance(path, str) and path:
+                try:
+                    self._apply_label(key, path)
+                except Exception:
+                    pass
+
+    def _set_runtime_flip(self, key: str, flip_key: str, value: bool) -> None:
+        key = str(key or "").strip()
+        if not key:
+            return
+        flip_key = str(flip_key or "").strip()
+        if flip_key not in ("flip_x", "flip_y"):
+            return
+        try:
+            d = self._runtime_flips.get(key)
+            if not isinstance(d, dict):
+                d = {}
+            d[flip_key] = bool(value)
+            self._runtime_flips[key] = d
+        except Exception:
+            pass
+
+    def _get_runtime_flips(self, key: str) -> tuple[bool, bool]:
+        try:
+            d = self._runtime_flips.get(key)
+            if not isinstance(d, dict):
+                return (False, False)
+            return (bool(d.get("flip_x", False)), bool(d.get("flip_y", False)))
+        except Exception:
+            return (False, False)
+
+    def _effective_zoom(self, t: dict, cw: int, ch: int, src_w: int, src_h: int) -> float:
+        """Match the runtime zoom behavior for mirror position calculations."""
+        try:
+            zoom_raw = t.get("zoom", 1.0)
+        except Exception:
+            zoom_raw = 1.0
+
+        # For videos we support 'zoom: null' meaning "fit" (matches utils._LabelVideoPlayer).
+        if zoom_raw is None:
+            try:
+                zw = float(cw) / float(max(1, src_w))
+                zh = float(ch) / float(max(1, src_h))
+                zoom = min(zw, zh)
+            except Exception:
+                zoom = 1.0
+        else:
+            try:
+                zoom = float(zoom_raw or 1.0)
+            except Exception:
+                zoom = 1.0
+
+        if not (zoom > 0):
+            zoom = 1.0
+        return max(0.05, min(10.0, float(zoom)))
+
+    def _get_asset_size(self, key: str, path: Optional[str]) -> tuple[int, int]:
+        """Best-effort media dimensions for mirroring math."""
+        # 1) Try image dimensions directly.
+        try:
+            p = str(path or "").strip()
+        except Exception:
+            p = ""
+
+        if p and os.path.exists(p):
+            try:
+                lower = p.lower()
+            except Exception:
+                lower = p
+
+            if not lower.endswith((".mp4", ".avi", ".mov", ".webm", ".mkv", ".m4v")):
+                try:
+                    from PyQt6.QtGui import QImage
+
+                    img = QImage(p)
+                    if not img.isNull():
+                        return int(img.width()), int(img.height())
+                except Exception:
+                    pass
+
+        # 2) For videos, prefer the active player last-known frame size.
+        try:
+            lbl = self._labels.get(key)
+            player = getattr(lbl, "_zzz_video_player", None) if lbl is not None else None
+            if player is not None:
+                fn = getattr(player, "get_source_size", None)
+                if callable(fn):
+                    sz = fn()
+                    if isinstance(sz, tuple) and len(sz) == 2:
+                        w, h = int(sz[0]), int(sz[1])
+                        if w > 0 and h > 0:
+                            return w, h
+        except Exception:
+            pass
+
+        # 3) Fallback: probe with OpenCV if available.
+        if p and os.path.exists(p):
+            try:
+                import cv2  # type: ignore
+
+                cap = cv2.VideoCapture(p)
+                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                if w > 0 and h > 0:
+                    return w, h
+            except Exception:
+                pass
+
+        return (0, 0)
 
     def set_transform(self, key: str, update: dict) -> None:
         st = self._get_state(key)
@@ -679,7 +854,72 @@ class ArtOverlayController:
         except Exception:
             pass
 
-        set_label_art_from_path(lbl, path, canvas_size=self._canvas_size, transform=dict(st.transform or {}))
+        base_t = dict(st.transform or {})
+        # Mirror is runtime-only; ignore any persisted flip keys from older builds.
+        try:
+            base_t.pop("flip_x", None)
+            base_t.pop("flip_y", None)
+        except Exception:
+            pass
+
+        fx, fy = self._get_runtime_flips(key)
+
+        # Compute mirrored position around canvas center without modifying persisted x/y.
+        cw, ch = (0, 0)
+        try:
+            cw, ch = int(self._canvas_size[0]), int(self._canvas_size[1])
+        except Exception:
+            cw, ch = (0, 0)
+
+        eff_t = dict(base_t)
+        if fx:
+            eff_t["flip_x"] = True
+        if fy:
+            eff_t["flip_y"] = True
+
+        # Only adjust x/y if we can determine the asset size; otherwise just flip visually.
+        try:
+            src_w, src_h = self._get_asset_size(key, path)
+        except Exception:
+            src_w, src_h = (0, 0)
+
+        if cw > 0 and ch > 0 and src_w > 0 and src_h > 0 and (fx or fy):
+            # Match renderer semantics:
+            # - x/y are interpreted as the unscaled top-left of the asset.
+            # - if x/y are missing (or null), default to centering using unscaled size.
+            try:
+                zoom = self._effective_zoom(base_t, cw, ch, src_w, src_h)
+            except Exception:
+                zoom = 1.0
+
+            w_scaled = float(src_w) * float(zoom)
+            h_scaled = float(src_h) * float(zoom)
+
+            def _effective_pos(component: str, canvas: int, src_size: int) -> float:
+                # Treat missing OR null as "use default".
+                try:
+                    if component in base_t and base_t.get(component, None) is not None:
+                        return float(base_t.get(component))
+                except Exception:
+                    pass
+                # Default matches utils.set_label_art_from_path: center using unscaled size.
+                return (float(canvas) - float(src_size)) / 2.0
+
+            pos_x = _effective_pos("x", cw, src_w)
+            pos_y = _effective_pos("y", ch, src_h)
+
+            # Mirror around the element's transformed center point.
+            # This stays correct even when rotation != 0.
+            cx0 = pos_x + (w_scaled / 2.0)
+            cy0 = pos_y + (h_scaled / 2.0)
+            if fx:
+                cx1 = float(cw) - cx0
+                eff_t["x"] = cx1 - (w_scaled / 2.0)
+            if fy:
+                cy1 = float(ch) - cy0
+                eff_t["y"] = cy1 - (h_scaled / 2.0)
+
+        set_label_art_from_path(lbl, path, canvas_size=self._canvas_size, transform=eff_t)
 
         try:
             target_visible = bool(st.enabled) if visible_override is None else bool(visible_override)

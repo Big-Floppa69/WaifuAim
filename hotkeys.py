@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 import ctypes
 import threading
@@ -115,6 +116,12 @@ def load_hotkey_config() -> dict:
         aliases = {
             "`": "grave",
             "~": "grave",
+            "pgup": "page_up",
+            "pageup": "page_up",
+            "page up": "page_up",
+            "pgdn": "page_down",
+            "pagedown": "page_down",
+            "page down": "page_down",
             "mouse4": "mouse_x1",
             "mouse5": "mouse_x2",
             "mouse_4": "mouse_x1",
@@ -220,6 +227,25 @@ def reload_hotkeys() -> None:
                 "backspace": 0x08,
                 "capslock": 0x14,
                 "grave": 0xC0,
+                "insert": 0x2D,
+                "delete": 0x2E,
+                "home": 0x24,
+                "end": 0x23,
+                "pageup": 0x21,
+                "page_up": 0x21,
+                "page down": 0x22,
+                "pagedown": 0x22,
+                "page_down": 0x22,
+                "semicolon": 0xBA,
+                "equal": 0xBB,
+                "comma": 0xBC,
+                "minus": 0xBD,
+                "period": 0xBE,
+                "slash": 0xBF,
+                "lbracket": 0xDB,
+                "rbracket": 0xDD,
+                "backslash": 0xDC,
+                "apostrophe": 0xDE,
             }
             if name.startswith("f") and name[1:].isdigit():
                 try:
@@ -262,15 +288,20 @@ def reload_hotkeys() -> None:
 
         state = {"armed": True, "last": 0.0}
 
-        if _any_mouse(parts) or _all_modifiers(parts):
-            # Mouse-based chords: poll via Win32 (keyboard lib doesn't support mouse buttons).
-            # Modifier-only chords (e.g. "alt") are also unreliable via keyboard hooks on some systems,
-            # so we poll them as well.
+        # Windows installed/frozen builds frequently cannot rely on low-level
+        # keyboard hooks (the `keyboard` lib may require elevation or be blocked).
+        # Use Win32 polling for reliability.
+        try:
+            is_windows = (os.name == "nt")
+        except Exception:
+            is_windows = False
+
+        if is_windows:
+            # If all parts are recognized, handle via Win32 polling.
             if any(_vk_from_key_name(p) is None for p in parts):
                 return
             with _win32_hotkey_lock:
                 _win32_hotkey_bindings.append({"parts": parts, "state": state, "callback": callback})
-
             _ensure_win32_hotkey_thread()
             return
 
@@ -327,6 +358,17 @@ def reload_hotkeys() -> None:
 
     def mirror_v() -> None:
         def _do():
+            # Prefer mirroring selected art overlays (new pipeline).
+            try:
+                if _overlay_controller_ref is not None:
+                    fn = getattr(_overlay_controller_ref, "toggle_mirror_vertical", None)
+                    if callable(fn):
+                        fn()
+                        return
+            except Exception:
+                pass
+
+            # Fallback: mirror the legacy base image label.
             if _label_ref is None:
                 return
             mirror_vertical(_label_ref, _label_ref.pixmap())
@@ -335,6 +377,17 @@ def reload_hotkeys() -> None:
 
     def mirror_h() -> None:
         def _do():
+            # Prefer mirroring selected art overlays (new pipeline).
+            try:
+                if _overlay_controller_ref is not None:
+                    fn = getattr(_overlay_controller_ref, "toggle_mirror_horizontal", None)
+                    if callable(fn):
+                        fn()
+                        return
+            except Exception:
+                pass
+
+            # Fallback: mirror the legacy base image label.
             if _label_ref is None:
                 return
             mirror_horizontal(_label_ref, _label_ref.pixmap())

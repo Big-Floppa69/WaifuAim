@@ -81,6 +81,12 @@ Update these constants in the `.iss` file:
 #define MyAppPublisher "FDC Team (Open Source)"
 ```
 
+Important: after changing Python code, rebuild the executable with PyInstaller (using `WaifuAim.spec`) BEFORE compiling the Inno Setup installer, otherwise the installer will ship an older `WaifuAim.exe`.
+
+PyInstaller output locations used by the installer:
+- One-file build: `dist/WaifuAim.exe`
+- One-dir build: `dist/WaifuAim/WaifuAim.exe`
+
 ### Additional Files
 To include more files in the installer, add entries to the `[Files]` section:
 ```pascal
