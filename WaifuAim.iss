@@ -2,8 +2,8 @@
 ; Created for Inno Setup
 
 #define MyAppName "WaifuAim"
-#define MyAppVersion "1.1"
-#define MyAppVersionInfo "1.1.0.0"
+#define MyAppVersion "1.0"
+#define MyAppVersionInfo "1.0.0.0"
 #define MyAppPublisher "FDC Team (Open Source)"
 #define MyAppURL "https://github.com/Big-Floppa69/WaifuAim"
 #define MyAppExeName "main.py"

@@ -1,4 +1,4 @@
-WaifuAim 1.1
+WaifuAim 1.0
 FDC Team (Open Source)
 
 WaifuAim is a lightweight, always-on-top crosshair overlay for Windows.

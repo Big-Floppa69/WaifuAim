@@ -916,7 +916,7 @@ def transparent(label, percent):
 # --- Config paths --------------------------------------------------------------------
 
 APP_NAME = "WaifuAim"
-APP_VERSION = "1.1"
+APP_VERSION = "1.0"
 
 
 def _autostart_command() -> str:

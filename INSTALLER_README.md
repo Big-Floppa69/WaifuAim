@@ -77,7 +77,7 @@ The uninstaller will:
 ### Version Updates
 Update these constants in the `.iss` file:
 ```pascal
-#define MyAppVersion "1.1"
+#define MyAppVersion "1.0"
 #define MyAppPublisher "FDC Team (Open Source)"
 ```
 
