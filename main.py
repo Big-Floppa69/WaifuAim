@@ -4,10 +4,11 @@ A customizable crosshair overlay with control panel and system tray integration.
 """
 import sys
 import time
+import os
 
-from PyQt6.QtCore import Qt, QPointF, QRectF
+from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer
 from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
-from PyQt6.QtWidgets import QApplication, QLabel, QProxyStyle, QStyle
+from PyQt6.QtWidgets import QApplication, QLabel, QProxyStyle, QStyle, QWidget
 
 from control_panel import DarkControlPanel
 from tray_icon import create_tray_icon
@@ -128,6 +129,33 @@ def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # Important for tray applications
 
+    # Windows: set a stable AppUserModelID. This improves tray/taskbar behavior
+    # in some autostart/login timing scenarios.
+    if os.name == "nt":
+        try:
+            import ctypes  # type: ignore
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_NAME)
+        except Exception:
+            pass
+
+    # Create a hidden native window (HWND) early.
+    # When started via autostart we may have no visible widgets; some Windows
+    # tray/taskbar notifications (and Qt's internal tray plumbing) behave more
+    # reliably if at least one HWND exists.
+    try:
+        tray_host = QWidget()
+        tray_host.setWindowTitle(APP_NAME)
+        tray_host.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
+        tray_host.hide()
+        try:
+            tray_host.winId()  # force native handle
+        except Exception:
+            pass
+        setattr(app, "_waifu_tray_host", tray_host)
+    except Exception:
+        pass
+
     # App identity (Windows task switcher/tray/tooltips).
     try:
         app.setApplicationName(APP_NAME)
@@ -214,9 +242,11 @@ def main():
     except Exception:
         pass
 
-    # Ensure GUI is initialized
-    app.processEvents()
-    time.sleep(0.1)
+    # Let Qt finish bootstrapping before we build UI pieces.
+    try:
+        app.processEvents()
+    except Exception:
+        pass
 
     # Create control panel
     control_panel = DarkControlPanel(
@@ -226,11 +256,32 @@ def main():
         startup_hidden=started_via_autostart,
     )
 
-    # Add additional delay before creating tray icon
-    time.sleep(0.5)
+    # Create system tray icon *after* the Qt event loop starts.
+    # On Windows login/autostart, creating the tray icon before app.exec() can
+    # silently fail even though the process stays alive.
+    def _create_tray_icon_with_retry(attempt: int = 0):
+        try:
+            tray = create_tray_icon(app, image_label, control_panel)
+            # Keep a strong reference for the lifetime of the app.
+            setattr(app, "_waifu_tray_icon", tray)
+            return
+        except Exception:
+            pass
+        if attempt < 20:
+            try:
+                QTimer.singleShot(1000, lambda: _create_tray_icon_with_retry(attempt + 1))
+            except Exception:
+                pass
 
-    # Create system tray icon
-    tray_icon = create_tray_icon(app, image_label, control_panel)
+    try:
+        QTimer.singleShot(0, lambda: _create_tray_icon_with_retry(0))
+    except Exception:
+        # Fallback: try immediately.
+        try:
+            tray = create_tray_icon(app, image_label, control_panel)
+            setattr(app, "_waifu_tray_icon", tray)
+        except Exception:
+            pass
 
     # Setup keyboard hotkeys
     setup_hotkeys(

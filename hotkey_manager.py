@@ -172,6 +172,11 @@ class HotkeyLineEdit(QLineEdit):
             return "shift"
         if key == Qt.Key.Key_Meta:
             return "windows"
+        # Prefer a layout-independent mapping on Windows (VK codes) so hotkeys
+        # keep working when the user switches keyboard languages.
+        token = self._token_from_native_vk(event)
+        if token:
+            return token
         return self._get_key_name(key)
 
     def _format_tokens(self, tokens: set[str]) -> str:
@@ -215,6 +220,73 @@ class HotkeyLineEdit(QLineEdit):
         }
         
         return special_keys.get(key, chr(key).lower() if key < 256 else "unknown")
+
+    def _token_from_native_vk(self, event: QKeyEvent) -> str:
+        """Map Windows native virtual-key codes to canonical English tokens.
+
+        This avoids layout-dependent tokens (e.g. Cyrillic letters) and ensures
+        config is always stored/displayed using English key names.
+        """
+
+        try:
+            if os.name != "nt":
+                return ""
+        except Exception:
+            return ""
+
+        vk = None
+        try:
+            vk = int(event.nativeVirtualKey())
+        except Exception:
+            vk = None
+        if not vk:
+            return ""
+
+        # A-Z
+        if 0x41 <= vk <= 0x5A:
+            return chr(vk).lower()
+
+        # 0-9
+        if 0x30 <= vk <= 0x39:
+            return chr(vk)
+
+        # F1-F24
+        if 0x70 <= vk <= 0x87:
+            return f"f{vk - 0x70 + 1}"
+
+        # Common navigation/editing keys
+        vk_map = {
+            0x20: "space",
+            0x09: "tab",
+            0x1B: "esc",
+            0x0D: "enter",
+            0x08: "backspace",
+            0x2D: "insert",
+            0x2E: "delete",
+            0x24: "home",
+            0x23: "end",
+            0x21: "page_up",
+            0x22: "page_down",
+            0x25: "left",
+            0x26: "up",
+            0x27: "right",
+            0x28: "down",
+            0x14: "capslock",
+            0x5B: "windows",
+            0x5C: "windows",
+            0xBA: "semicolon",
+            0xBB: "equal",
+            0xBC: "comma",
+            0xBD: "minus",
+            0xBE: "period",
+            0xBF: "slash",
+            0xC0: "grave",
+            0xDB: "lbracket",
+            0xDC: "backslash",
+            0xDD: "rbracket",
+            0xDE: "apostrophe",
+        }
+        return vk_map.get(vk, "")
 
 
 class HotkeyManagerDialog(QWidget):

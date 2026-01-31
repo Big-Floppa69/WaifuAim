@@ -877,22 +877,16 @@ class ArtOverlayController:
         if fy:
             eff_t["flip_y"] = True
 
-        try:
-            pos_x = float(base_t.get("x", 0.0) or 0.0)
-        except Exception:
-            pos_x = 0.0
-        try:
-            pos_y = float(base_t.get("y", 0.0) or 0.0)
-        except Exception:
-            pos_y = 0.0
-
-        # Only shift x/y if we can determine the asset size; otherwise just flip visually.
+        # Only adjust x/y if we can determine the asset size; otherwise just flip visually.
         try:
             src_w, src_h = self._get_asset_size(key, path)
         except Exception:
             src_w, src_h = (0, 0)
 
         if cw > 0 and ch > 0 and src_w > 0 and src_h > 0 and (fx or fy):
+            # Match renderer semantics:
+            # - x/y are interpreted as the unscaled top-left of the asset.
+            # - if x/y are missing (or null), default to centering using unscaled size.
             try:
                 zoom = self._effective_zoom(base_t, cw, ch, src_w, src_h)
             except Exception:
@@ -901,10 +895,29 @@ class ArtOverlayController:
             w_scaled = float(src_w) * float(zoom)
             h_scaled = float(src_h) * float(zoom)
 
+            def _effective_pos(component: str, canvas: int, src_size: int) -> float:
+                # Treat missing OR null as "use default".
+                try:
+                    if component in base_t and base_t.get(component, None) is not None:
+                        return float(base_t.get(component))
+                except Exception:
+                    pass
+                # Default matches utils.set_label_art_from_path: center using unscaled size.
+                return (float(canvas) - float(src_size)) / 2.0
+
+            pos_x = _effective_pos("x", cw, src_w)
+            pos_y = _effective_pos("y", ch, src_h)
+
+            # Mirror around the element's transformed center point.
+            # This stays correct even when rotation != 0.
+            cx0 = pos_x + (w_scaled / 2.0)
+            cy0 = pos_y + (h_scaled / 2.0)
             if fx:
-                eff_t["x"] = float(cw) - (pos_x + w_scaled)
+                cx1 = float(cw) - cx0
+                eff_t["x"] = cx1 - (w_scaled / 2.0)
             if fy:
-                eff_t["y"] = float(ch) - (pos_y + h_scaled)
+                cy1 = float(ch) - cy0
+                eff_t["y"] = cy1 - (h_scaled / 2.0)
 
         set_label_art_from_path(lbl, path, canvas_size=self._canvas_size, transform=eff_t)
 

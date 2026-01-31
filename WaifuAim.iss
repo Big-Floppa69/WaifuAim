@@ -11,14 +11,16 @@
 ; Prefer the latest PyInstaller output from WaifuAim.spec.
 ; Support both onefile and onedir outputs. Fail fast if nothing is found
 ; to avoid accidentally packaging a stale/old exe.
-#if FileExists("dist\\WaifuAim.exe")
-  #define MyBuiltExe "dist\\WaifuAim.exe"
-#elif FileExists("dist\\WaifuAim\\WaifuAim.exe")
-  #define MyBuiltExe "dist\\WaifuAim\\WaifuAim.exe"
-#elif FileExists("dist\\Zenless Zone Zero Crosshair.exe")
-  #define MyBuiltExe "dist\\Zenless Zone Zero Crosshair.exe"
-#elif FileExists("dist\\Zenless Zone Zero Crosshair\\Zenless Zone Zero Crosshair.exe")
-  #define MyBuiltExe "dist\\Zenless Zone Zero Crosshair\\Zenless Zone Zero Crosshair.exe"
+#define _Root SourcePath
+
+#if FileExists(_Root + "dist\\WaifuAim.exe")
+  #define MyBuiltExe _Root + "dist\\WaifuAim.exe"
+#elif FileExists(_Root + "dist\\WaifuAim\\WaifuAim.exe")
+  #define MyBuiltExe _Root + "dist\\WaifuAim\\WaifuAim.exe"
+#elif FileExists(_Root + "dist\\Zenless Zone Zero Crosshair.exe")
+  #define MyBuiltExe _Root + "dist\\Zenless Zone Zero Crosshair.exe"
+#elif FileExists(_Root + "dist\\Zenless Zone Zero Crosshair\\Zenless Zone Zero Crosshair.exe")
+  #define MyBuiltExe _Root + "dist\\Zenless Zone Zero Crosshair\\Zenless Zone Zero Crosshair.exe"
 #else
   #error "Built exe not found. Run: pyinstaller WaifuAim.spec"
 #endif

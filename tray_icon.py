@@ -1,30 +1,65 @@
-"""
-System tray icon management for the crosshair application.
-"""
+"""System tray icon management for the crosshair application."""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
 from PyQt6.QtWidgets import (
     QSystemTrayIcon,
     QMenu,
     QApplication,
     QMessageBox,
+    QStyle,
 )
 from PyQt6.QtGui import QIcon, QAction
-from PyQt6.QtCore import QUrl, QTimer
+from PyQt6.QtCore import QAbstractNativeEventFilter, QUrl, QTimer
 
 import threading
 
-from utils import APP_VERSION, get_app_config_dir, get_app_config_path, tr_lit, read_app_settings, update_app_settings, is_windows_autostart_enabled, set_windows_autostart
+from utils import (
+    APP_VERSION,
+    get_app_config_dir,
+    get_app_config_path,
+    tr_lit,
+    read_app_settings,
+    update_app_settings,
+    is_windows_autostart_enabled,
+    set_windows_autostart,
+)
 
 # GitHub repo used for update checks
 _GITHUB_OWNER = "Big-Floppa69"
 _GITHUB_REPO = "WaifuAim"
 
 
-def create_tray_icon(app, label, control_panel, controller=None, icon_path="astra_yao_tray.png"):
+def create_tray_icon(app, label, control_panel, controller=None, icon_path="astra_yao_tray.ico"):
     # КРИТИЧНО: приложение не должно закрываться при закрытии всех окон
     QApplication.setQuitOnLastWindowClosed(False)
 
-    tray_icon = QSystemTrayIcon(QIcon(icon_path), parent=app)
+    resolved_icon = _resolve_tray_icon(icon_path)
+
+    # Also set the application/window icon (helps with identity on Windows).
+    try:
+        QApplication.setWindowIcon(resolved_icon)
+    except Exception:
+        pass
+
+    tray_icon = QSystemTrayIcon(resolved_icon, parent=app)
     tray_icon.setToolTip(f"WaifuAim v{APP_VERSION}")
+
+    # Windows: if Explorer restarts or creates the taskbar after autostart,
+    # the tray icon can be dropped. Listen for TaskbarCreated and re-show.
+    _install_taskbarcreated_filter(app, tray_icon)
+
+    _tray_debug_log(
+        "create",
+        {
+            "tray_available": _safe_bool(lambda: QSystemTrayIcon.isSystemTrayAvailable()),
+            "messages_supported": _safe_bool(lambda: QSystemTrayIcon.supportsMessages()),
+            "icon_null": _safe_bool(lambda: tray_icon.icon().isNull()),
+        },
+    )
 
     # Левый / двойной клик по иконке
     def on_tray_activated(reason):
@@ -39,8 +74,250 @@ def create_tray_icon(app, label, control_panel, controller=None, icon_path="astr
     tray_menu = _create_tray_menu(label, control_panel, controller, app, tray_icon)
     tray_icon.setContextMenu(tray_menu)
 
-    tray_icon.show()
+    # Keep strong references; in some PyQt/Windows situations losing references
+    # can result in menus/actions (or even the tray) getting collected.
+    try:
+        setattr(tray_icon, "_waifu_tray_menu", tray_menu)
+    except Exception:
+        pass
+
+    # In Windows autostart contexts, Explorer (system tray) may not be ready yet.
+    # Also, CWD can be C:\Windows\System32, making relative icon paths break.
+    _ensure_tray_shown(tray_icon)
+    _schedule_tray_reassert(tray_icon)
     return tray_icon
+
+
+def _install_taskbarcreated_filter(app: QApplication, tray_icon: QSystemTrayIcon) -> None:
+    """Install a native event filter that restores tray after Explorer restart."""
+
+    if os.name != "nt":
+        return
+
+    try:
+        existing = getattr(app, "_waifu_taskbar_filter", None)
+        if existing is not None:
+            return
+    except Exception:
+        pass
+
+    try:
+        import ctypes
+        import ctypes.wintypes
+    except Exception:
+        return
+
+    try:
+        taskbar_created = ctypes.windll.user32.RegisterWindowMessageW("TaskbarCreated")
+    except Exception:
+        return
+
+    class _Filter(QAbstractNativeEventFilter):
+        def nativeEventFilter(self, eventType, message):  # type: ignore[override]
+            try:
+                if eventType != "windows_generic_MSG":
+                    return False, 0
+                msg = ctypes.wintypes.MSG.from_address(int(message))
+                if int(msg.message) == int(taskbar_created):
+                    _tray_debug_log("taskbar_created")
+                    QTimer.singleShot(0, lambda: _ensure_tray_shown(tray_icon, attempt=0))
+            except Exception:
+                pass
+            return False, 0
+
+    try:
+        flt = _Filter()
+        app.installNativeEventFilter(flt)
+        setattr(app, "_waifu_taskbar_filter", flt)
+    except Exception:
+        pass
+
+
+def _safe_bool(fn) -> bool:
+    try:
+        return bool(fn())
+    except Exception:
+        return False
+
+
+def _tray_debug_log(event: str, fields: dict | None = None) -> None:
+    """Append a small debug line into AppData.
+
+    This is intentionally always-on and lightweight, because the autostart bug
+    is otherwise very hard to diagnose in the field.
+    """
+
+    try:
+        p = get_app_config_dir() / "tray_debug.log"
+    except Exception:
+        return
+
+    try:
+        import time as _time
+
+        ts = _time.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        ts = "?"
+
+    try:
+        base = f"[{ts}] {event}"
+        if isinstance(fields, dict) and fields:
+            parts = []
+            for k, v in fields.items():
+                try:
+                    parts.append(f"{k}={v}")
+                except Exception:
+                    continue
+            if parts:
+                base += " " + " ".join(parts)
+        base += "\n"
+
+        # Keep file small.
+        try:
+            if p.exists() and p.stat().st_size > 256_000:
+                p.write_text("", encoding="utf-8", errors="ignore")
+        except Exception:
+            pass
+
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8", errors="ignore") as f:
+            f.write(base)
+    except Exception:
+        pass
+
+
+def _resolve_tray_icon(icon_path: str) -> QIcon:
+    """Resolve icon path reliably across dev/PyInstaller/autostart."""
+
+    # Absolute path => use directly.
+    try:
+        if os.path.isabs(icon_path) and Path(icon_path).exists():
+            return QIcon(str(Path(icon_path)))
+    except Exception:
+        pass
+
+    candidates: list[Path] = []
+    try:
+        candidates.append(Path(__file__).resolve().parent / icon_path)
+    except Exception:
+        pass
+
+    # PyInstaller one-file extraction dir.
+    try:
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(str(meipass)) / icon_path)
+    except Exception:
+        pass
+
+    # Next to the executable (frozen).
+    try:
+        candidates.append(Path(sys.executable).resolve().parent / icon_path)
+    except Exception:
+        pass
+
+    for p in candidates:
+        try:
+            if p.exists() and p.is_file():
+                return QIcon(str(p))
+        except Exception:
+            continue
+
+    # Fallback: use a standard app icon so tray still appears.
+    try:
+        return QApplication.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+    except Exception:
+        return QIcon()
+
+
+def _ensure_tray_shown(tray_icon: QSystemTrayIcon, *, attempt: int = 0) -> None:
+    """Show tray icon, retrying if system tray isn't ready yet."""
+
+    # Avoid infinite retries in pathological situations.
+    if attempt > 30:
+        try:
+            tray_icon.show()
+        except Exception:
+            pass
+        return
+
+    try:
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            _tray_debug_log("ensure_wait", {"attempt": attempt, "tray_available": False})
+            QTimer.singleShot(1000, lambda: _ensure_tray_shown(tray_icon, attempt=attempt + 1))
+            return
+    except Exception:
+        # If the check itself fails, fall back to a plain show.
+        try:
+            tray_icon.show()
+        except Exception:
+            pass
+        return
+
+    try:
+        if tray_icon.icon().isNull():
+            tray_icon.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon))
+    except Exception:
+        pass
+
+    try:
+        tray_icon.setVisible(True)
+    except Exception:
+        pass
+    try:
+        tray_icon.show()
+    except Exception:
+        pass
+
+    _tray_debug_log(
+        "ensure_show",
+        {
+            "attempt": attempt,
+            "tray_available": _safe_bool(lambda: QSystemTrayIcon.isSystemTrayAvailable()),
+            "visible": _safe_bool(lambda: tray_icon.isVisible()),
+            "icon_null": _safe_bool(lambda: tray_icon.icon().isNull()),
+        },
+    )
+
+    # Sometimes Windows drops the first show() at login; re-assert visibility.
+    try:
+        visible = bool(tray_icon.isVisible())
+    except Exception:
+        visible = True
+
+    if not visible:
+        QTimer.singleShot(1000, lambda: _ensure_tray_shown(tray_icon, attempt=attempt + 1))
+
+
+def _schedule_tray_reassert(tray_icon: QSystemTrayIcon) -> None:
+    """Re-assert tray registration a few times.
+
+    Why: On Windows login, Explorer can start late or restart once. Qt may think
+    the tray icon is visible while the shell dropped it. Toggling hide/show
+    re-registers the icon with the shell.
+    """
+
+    delays_ms = [2000, 5000, 15000, 30000, 60000]
+
+    def _bump() -> None:
+        try:
+            tray_icon.hide()
+        except Exception:
+            pass
+        try:
+            tray_icon.setVisible(True)
+        except Exception:
+            pass
+        try:
+            tray_icon.show()
+        except Exception:
+            pass
+
+    for d in delays_ms:
+        try:
+            QTimer.singleShot(int(d), _bump)
+        except Exception:
+            continue
 
 
 def _create_tray_menu(label, control_panel, controller, app, tray_icon):
