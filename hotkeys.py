@@ -342,6 +342,17 @@ def reload_hotkeys() -> None:
 
     def toggle_visibility() -> None:
         def _do():
+            # Prefer the Control Panel action so UI buttons stay in sync.
+            try:
+                cp = _control_panel_ref
+                fn = getattr(cp, "toggle_image_visibility", None) if cp is not None else None
+                if callable(fn):
+                    fn()
+                    return
+            except Exception:
+                pass
+
+            # Fallback: legacy toggle the base label directly.
             if _label_ref is None:
                 return
             if _label_ref.isVisible():
@@ -358,6 +369,16 @@ def reload_hotkeys() -> None:
 
     def mirror_v() -> None:
         def _do():
+            # Prefer the Control Panel action so behavior matches the UI.
+            try:
+                cp = _control_panel_ref
+                fn = getattr(cp, "_mirror_vertical_action", None) if cp is not None else None
+                if callable(fn):
+                    fn()
+                    return
+            except Exception:
+                pass
+
             # Prefer mirroring selected art overlays (new pipeline).
             try:
                 if _overlay_controller_ref is not None:
@@ -377,6 +398,16 @@ def reload_hotkeys() -> None:
 
     def mirror_h() -> None:
         def _do():
+            # Prefer the Control Panel action so behavior matches the UI.
+            try:
+                cp = _control_panel_ref
+                fn = getattr(cp, "_mirror_horizontal_action", None) if cp is not None else None
+                if callable(fn):
+                    fn()
+                    return
+            except Exception:
+                pass
+
             # Prefer mirroring selected art overlays (new pipeline).
             try:
                 if _overlay_controller_ref is not None:
@@ -416,6 +447,12 @@ def reload_hotkeys() -> None:
             if _label_ref is None:
                 return
 
+            # Respect current visibility (e.g. user hid art via the UI option).
+            try:
+                visible_now = bool(_label_ref.isVisible())
+            except Exception:
+                visible_now = True
+
             # Prefer using the main UI's switching logic so the order/index is
             # consistent across the Next Image button and the hotkey.
             try:
@@ -424,16 +461,6 @@ def reload_hotkeys() -> None:
                 if callable(fn):
                     fn()
                     return
-            except Exception:
-                pass
-
-            # Switching images via hotkey should always advance *and* show the
-            # newly selected art. If the base label is hidden, the previous
-            # selection can appear to "turn off" because rendering is requested
-            # with visible=False.
-            try:
-                if not _label_ref.isVisible():
-                    _label_ref.show()
             except Exception:
                 pass
 
@@ -461,7 +488,7 @@ def reload_hotkeys() -> None:
                     _sync_image_manager_checkmarks()
                     _overlay_controller_ref.request_render_selected_atomic(
                         "display_images",
-                        visible=True,
+                        visible=visible_now,
                     )
                 except Exception:
                     pass
@@ -495,7 +522,7 @@ def reload_hotkeys() -> None:
                     _sync_image_manager_checkmarks()
                     _overlay_controller_ref.request_render_selected_atomic(
                         "display_images",
-                        visible=True,
+                        visible=visible_now,
                         on_error=_fallback,
                     )
                 except Exception:

@@ -2279,12 +2279,12 @@ class DarkControlPanel(QWidget):
     
     def switch_image(self):
         """Switch to the next crosshair image."""
-        # Switching images implies we want to see the newly selected art.
+        # Respect the user's current image visibility setting.
+        # Switching should advance selection but must not force-show art.
         try:
-            if not self.image_label.isVisible():
-                self.image_label.show()
+            visible_now = bool(self.image_label.isVisible())
         except Exception:
-            pass
+            visible_now = True
 
         # Build cycle list: user-defined order (Art Manager), including combos.
         entries = get_art_cycle_entries("display_images")
@@ -2312,7 +2312,7 @@ class DarkControlPanel(QWidget):
 
                     self.art_overlay_controller.request_render_selected_atomic(
                         "display_images",
-                        visible=True,
+                        visible=visible_now,
                     )
             except Exception:
                 pass
@@ -2359,7 +2359,7 @@ class DarkControlPanel(QWidget):
 
                 self.art_overlay_controller.request_render_selected_atomic(
                     "display_images",
-                    visible=True,
+                    visible=visible_now,
                     on_error=_fallback,
                 )
                 return
